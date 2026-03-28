@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # FXLab Phase 3 — Web UX, Governance, and Results/Export Surfaces
 
 ## Overview
@@ -120,3 +121,6 @@ See `docs/ARCHITECTURE.md` for detailed design decisions.
 ## License
 
 Proprietary - Internal Use Only
+=======
+# fxlab
+>>>>>>> 5511e60521cc6152eec611323f7d78237cf69900
