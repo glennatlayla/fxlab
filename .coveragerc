@@ -1,0 +1,13 @@
+[run]
+source = libs,services
+data_file = /tmp/.fxlab_coverage
+omit =
+    */tests/*
+    */test_*
+    */.venv/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError

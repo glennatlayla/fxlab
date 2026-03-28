@@ -1,0 +1,71 @@
+{
+  "M5": [],
+  "M6": [
+    {
+      "ts": "2026-03-27T10:00:00+00:00",
+      "test_file": "tests/unit/test_m6_feed_registry.py",
+      "failure_class": "type_coercion",
+      "outcome": "oscillation",
+      "detail": "LL-010: FastAPI int Query() param ?offset=1 arrived as str '1' in cross-arch sandbox; list slice raised TypeError. Fixed with explicit int() cast in list_feeds()."
+    }
+  ],
+  "M8": [],
+  "M10": [],
+  "M11": [],
+  "M12": [],
+  "M9": [
+    {
+      "ts": "2026-03-27T18:45:00+00:00",
+      "test_file": "tests/integration/test_m4_jobs_queues.py",
+      "failure_class": "stale_integration_test",
+      "outcome": "pre_existing_failure_fixed",
+      "detail": "LL-013: TestQueuesContentionEndpointIntegration still tested deprecated GET /queues/contention (M4 aggregate shape). M7 changed this to GET /queues/{queue_class}/contention. Unit tests were fixed (ISS-018) but integration tests were not updated. Fixed by rewriting 4 integration tests to use the M7 per-class API. Lesson: grep all test files for old endpoint URLs before closing a milestone."
+    }
+  ],
+  "M7": [
+    {
+      "ts": "2026-03-27T12:30:00+00:00",
+      "test_file": "tests/unit/test_m7_charts_and_queues.py",
+      "failure_class": "pydantic_optional_enum",
+      "outcome": "oscillation",
+      "detail": "LL-012: Optional[SamplingMethod] field in EquityChartResponse raised 'TypeError: typing.Optional[...SamplingMethod] is not a generic class' in cross-arch pydantic-core stub when sampling_method=SamplingMethod.LTTB (non-None). Fixed with model_construct() bypass in _build_equity_response()."
+    }
+  ],
+  "M0": [
+    {
+      "ts": "2026-03-19T20:22:39.275494+00:00",
+      "test_file": "tests/integration/test_m0_backend_api_importability.py",
+      "failure_class": "logic",
+      "outcome": "oscillation",
+      "detail": "Loop detected same failing set in two separate rounds"
+    },
+    {
+      "ts": "2026-03-19T20:22:39.277078+00:00",
+      "test_file": "tests/unit/test_api_bootstrap.py",
+      "failure_class": "logic",
+      "outcome": "oscillation",
+      "detail": "Loop detected same failing set in two separate rounds"
+    },
+    {
+      "ts": "2026-03-19T20:22:39.278210+00:00",
+      "test_file": "tests/unit/test_promotions_endpoint.py",
+      "failure_class": "logic",
+      "outcome": "oscillation",
+      "detail": "Loop detected same failing set in two separate rounds"
+    },
+    {
+      "ts": "2026-03-19T20:22:39.279260+00:00",
+      "test_file": "tests/unit/test_runs_readiness_endpoint.py",
+      "failure_class": "logic",
+      "outcome": "oscillation",
+      "detail": "Loop detected same failing set in two separate rounds"
+    },
+    {
+      "ts": "2026-03-19T20:22:39.280253+00:00",
+      "test_file": "tests/unit/test_runs_results_endpoint.py",
+      "failure_class": "logic",
+      "outcome": "oscillation",
+      "detail": "Loop detected same failing set in two separate rounds"
+    }
+  ]
+}

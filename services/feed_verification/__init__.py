@@ -1,0 +1,1 @@
+"""Feed verification service."""

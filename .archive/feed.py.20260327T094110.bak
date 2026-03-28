@@ -1,0 +1,69 @@
+"""
+Feed health and parity contracts.
+
+Pydantic v2 schemas for feed monitoring.
+"""
+
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
+
+
+class FeedResponse(BaseModel):
+    """
+    Response schema for feed registration.
+    
+    Phase 1 contract. Phase 3 consumes but does not mutate.
+    """
+    id: str = Field(..., description="ULID")
+    name: str
+    provider: str
+    config: Dict[str, Any]
+    is_active: bool
+    is_quarantined: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class FeedHealthSnapshotResponse(BaseModel):
+    """
+    Response schema for feed health snapshot.
+    
+    Phase 1/2 contract. Phase 3 consumes for charting.
+    """
+    id: str = Field(..., description="ULID")
+    feed_id: str
+    timestamp: datetime
+    latency_ms: Optional[int]
+    gap_count: int
+    anomaly_count: int
+    health_score: float = Field(..., ge=0.0, le=100.0)
+    metadata: Dict[str, Any]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ParityEventResponse(BaseModel):
+    """
+    Response schema for parity discrepancy event.
+    
+    Phase 2 contract. Phase 3 consumes for alerting.
+    """
+    id: str = Field(..., description="ULID")
+    feed_a_id: str
+    feed_b_id: str
+    symbol: str
+    timestamp: datetime
+    discrepancy_type: str
+    magnitude: Optional[float]
+    metadata: Dict[str, Any]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -1,0 +1,45 @@
+"""
+Feed health monitoring routes.
+
+Responsibilities:
+- Expose GET /feed-health for the feed health dashboard.
+- Return a summary of all registered feed health statuses.
+
+Does NOT:
+- Connect directly to feed monitoring backends.
+- Compute health scores locally (backend is source of truth).
+
+Example:
+    GET /feed-health
+    → {"feeds": [], "generated_at": "..."}
+"""
+
+from datetime import datetime, timezone
+from typing import Any
+
+import structlog
+from fastapi import APIRouter
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter(prefix="/feed-health", tags=["feed-health"])
+
+
+@router.get("")
+async def get_feed_health() -> dict[str, Any]:
+    """
+    Return the current health status for all registered feeds.
+
+    Provides the UI feed health dashboard with anomaly flags and
+    certification status.  In the stub phase an empty feed list is
+    returned.  The real implementation will delegate to a feed health
+    service adapter.
+
+    Returns:
+        Dict with ``feeds`` list and ``generated_at`` timestamp.
+    """
+    logger.info("feed_health.requested")
+    return {
+        "feeds": [],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }

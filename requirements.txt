@@ -1,0 +1,14 @@
+# Core dependencies for FXLab Phase 1
+fastapi==0.109.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+sqlalchemy==2.0.25
+alembic==1.13.1
+psycopg2-binary==2.9.9
+redis==5.0.1
+structlog==24.1.0
+python-ulid==2.2.0
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+httpx==0.26.0

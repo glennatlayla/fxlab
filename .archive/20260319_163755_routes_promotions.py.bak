@@ -1,0 +1,67 @@
+"""
+Promotion workflow routes.
+
+Handles promotion request submission and status tracking.
+"""
+import structlog
+from fastapi import APIRouter, status
+from pydantic import Field, field_validator
+from ulid import ULID
+
+from libs.contracts.base import FXLabBaseModel
+from libs.contracts.enums import Environment
+
+logger = structlog.get_logger()
+
+router = APIRouter(prefix="/promotions", tags=["promotions"])
+
+
+class PromotionRequest(FXLabBaseModel):
+    """Request to promote a strategy candidate."""
+    candidate_id: str = Field(..., description="ULID of candidate to promote")
+    target_environment: Environment = Field(..., description="Target deployment environment")
+    requester_id: str = Field(..., description="ULID of user requesting promotion")
+    
+    @field_validator('candidate_id', 'requester_id')
+    @classmethod
+    def validate_ulid(cls, v: str) -> str:
+        """Validate that the value is a valid ULID."""
+        try:
+            ULID.from_str(v)
+            return v
+        except (ValueError, AttributeError) as e:
+            raise ValueError(f"Invalid ULID format: {v}")
+
+
+class PromotionResponse(FXLabBaseModel):
+    """Response from promotion request submission."""
+    job_id: str = Field(..., description="ULID of async job tracking this promotion")
+    status: str = Field(..., description="Initial job status")
+
+
+@router.post("/request", status_code=status.HTTP_202_ACCEPTED, response_model=PromotionResponse)
+async def request_promotion(request: PromotionRequest) -> PromotionResponse:
+    """
+    Submit a promotion request for async processing.
+    
+    Creates an audit event and returns immediately with a job ID.
+    """
+    logger.info(
+        "promotion.request.received",
+        candidate_id=request.candidate_id,
+        target_environment=request.target_environment.value,
+        requester_id=request.requester_id,
+    )
+    
+    # Import here to avoid circular dependency
+    from services.api.main import submit_promotion_request
+    
+    result = submit_promotion_request(request)
+    
+    logger.info(
+        "promotion.request.accepted",
+        job_id=result["job_id"],
+        candidate_id=request.candidate_id,
+    )
+    
+    return PromotionResponse(**result)

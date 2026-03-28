@@ -1,0 +1,7 @@
+"""Artifact management endpoints (stub)."""
+import structlog
+from fastapi import APIRouter
+
+logger = structlog.get_logger()
+
+router = APIRouter(tags=["artifacts"])

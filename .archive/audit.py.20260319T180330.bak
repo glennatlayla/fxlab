@@ -1,0 +1,42 @@
+"""
+Audit event schemas and write function.
+
+Every mutation writes an immutable audit event.
+"""
+
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
+
+
+class AuditEventSchema(BaseModel):
+    """
+    Audit event payload.
+    
+    Immutable ledger entry for all mutations.
+    """
+    id: str = Field(..., description="ULID primary key")
+    actor: str = Field(..., description="User email or system identity")
+    action: str = Field(..., description="Action verb (e.g., create_draft, approve_promotion)")
+    object_id: Optional[str] = Field(None, description="ULID of affected object")
+    object_type: Optional[str] = Field(None, description="Type of affected object")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Action-specific context")
+    created_at: datetime = Field(default_factory=datetime.utcnow, description="Event timestamp")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "01HQZX3Y7Z8F9G0H1J2K3L4M5N",
+                "actor": "analyst@fxlab.io",
+                "action": "approve_promotion",
+                "object_id": "01HQZX3Y7Z8F9G0H1J2K3L4M5P",
+                "object_type": "promotion_request",
+                "metadata": {
+                    "target_environment": "paper",
+                    "decision": "approved",
+                    "evidence_link": "https://jira.example.com/TICKET-123",
+                },
+                "created_at": "2026-03-19T21:56:00Z",
+            }
+        }

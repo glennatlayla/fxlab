@@ -1,0 +1,133 @@
+"""
+FastAPI application entry point.
+
+Main application instance and router registration.
+"""
+from collections.abc import AsyncIterator
+from typing import Any
+
+import structlog
+from fastapi import FastAPI
+
+from libs.contracts.base import APIResponse
+from libs.contracts.promotion import PromotionRequest
+from services.api.routes import runs
+
+logger = structlog.get_logger()
+
+app = FastAPI(
+    title="FXLab API",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# Register routers
+app.include_router(runs.router)
+
+# Re-export the service function for mocking in tests
+def get_run_results(run_id: str):
+    """
+    Retrieve run results.
+    This function is mocked in tests.
+    """
+    return None
+
+
+@app.get("/health")
+async def health_check():
+    """Basic health check endpoint."""
+    return {"status": "ok"}
+
+
+logger.info("fastapi_app_initialized")
+
+# -- merged (accumulator): services/api/main.py --
+async def lifespan(app: FastAPI):
+    """Application lifespan manager."""
+    logger.info("api.startup")
+    yield
+    logger.info("api.shutdown")
+
+# -- merged (accumulator): services/api/main.py --
+async def root() -> APIResponse[dict]:
+    """Root endpoint."""
+    return APIResponse(data={"message": "FXLab API"})
+
+# -- merged (accumulator): services/api/main.py --
+async def health():
+    """Health check endpoint."""
+    return APIResponse(data={"status": "healthy"})
+
+# -- merged (accumulator): services/api/main.py --
+def submit_promotion_request(request) -> dict:
+    """
+    Submit promotion request to background job queue.
+    
+    This function creates audit events and enqueues the promotion job.
+    In tests, this function is mocked to avoid actual queue/audit dependencies.
+    """
+    job_id = str(ULID())
+    
+    logger.info(
+        "promotion.job.created",
+        job_id=job_id,
+        candidate_id=request.candidate_id,
+    )
+    
+    # Create audit event (stub - would use actual audit repository)
+    logger.info(
+        "audit.event.created",
+        event_type="promotion_requested",
+        job_id=job_id,
+        candidate_id=request.candidate_id,
+        requester_id=request.requester_id,
+    )
+    
+    return {
+        "job_id": job_id,
+        "status": "pending"
+    }
+
+# -- merged (accumulator): services/api/main.py --
+async def startup_event():
+    """Application startup."""
+    logger.info("api_starting", version="0.1.0")
+
+async def shutdown_event():
+    """Application shutdown."""
+    logger.info("api_shutting_down")
+
+# -- merged (accumulator): services/api/main.py --
+def get_readiness_report(run_id: str):
+    """Get readiness report for a run. To be implemented."""
+    return None
+
+# -- merged (accumulator): services/api/main.py --
+__all__ = ["app", "submit_promotion_request"]
+
+# -- new symbols merged: services/api/main.py --
+async def get_run_readiness(
+    run_id: str = Path(..., pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
+) -> APIResponse:
+    """
+    Get readiness report for a specific run.
+    
+    Args:
+        run_id: ULID of the run
+        
+    Returns:
+        APIResponse containing readiness report
+        
+    Raises:
+        HTTPException: 404 if run not found
+    """
+    logger.info("get_run_readiness.entry", run_id=run_id)
+    
+    report = get_readiness_report(run_id)
+    
+    if report is None:
+        logger.warning("get_run_readiness.not_found", run_id=run_id)
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    logger.info("get_run_readiness.success", run_id=run_id)
+    return APIResponse(data=report)

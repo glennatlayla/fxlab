@@ -1,0 +1,345 @@
+FXLAB PHASE 3 BACKEND - QUALITY AUDIT REPORT
+Generated: 2026-03-28
+Codebase: /sessions/gifted-hopeful-galileo/mnt/fxlab
+
+================================================================================
+1. OPEN ISSUES — FROM ISSUE TRACKER
+================================================================================
+
+CRITICAL (Blocks Production Readiness):
+  ISS-006: pydantic-core stub—Pydantic Field validation unenforced
+    Severity: CRITICAL
+    Status: IDENTIFIED (NOT RESOLVED)
+    Impact: All Pydantic constraints (min_length, pattern, ge/le) are silently skipped
+    Details: The .venv contains pydantic-core as pure-Python stub (no C extension).
+             All field validation constraints are dead code in production.
+
+  ISS-011: get_artifact_repository() returns mock in PRODUCTION
+    Severity: CRITICAL
+    Status: RESOLVED but NOT IMPLEMENTED
+    Impact: All artifact metadata is lost on API restart
+    Evidence: services/api/routes/artifacts.py:89-97
+    Current: MockArtifactRepository() used when ENVIRONMENT != "test"
+    Required: SqlArtifactRepository backed by DB (deferred to M13)
+
+  ISS-012: get_artifact_storage() returns local /tmp stub in PRODUCTION
+    Severity: CRITICAL
+    Impact: All uploaded artifacts written to container /tmp (lost on restart)
+    Evidence: services/api/routes/artifacts.py:110-116
+    Current: LocalArtifactStorage("/tmp/fxlab-artifacts-stub")
+    Required: MinIOArtifactStorage wired via env vars (deferred to M13)
+
+HIGH (Blocks Data Persistence):
+  ISS-013: get_feed_repository() returns mock in PRODUCTION
+    Status: IDENTIFIED, deferred to M7+
+    Impact: Feed registry persists only in-memory (module scope)
+
+  ISS-014: get_feed_health_repository() returns mock in PRODUCTION
+    Status: IDENTIFIED, deferred to M7+
+    Impact: Feed health monitoring persists only in-memory
+
+  ISS-015: FastAPI int Query() params arrive as str (pydantic-core stub issue)
+    Severity: HIGH
+    Status: RESOLVED via explicit int() casts
+    Evidence: services/api/routes/feeds.py:210 — manual int() applied
+
+  ISS-016: get_chart_repository() returns mock in PRODUCTION
+    Status: IDENTIFIED, deferred to M8+
+    Impact: Chart cache and LTTB sampled points not persisted
+
+  ISS-017: get_queue_repository() returns mock in PRODUCTION
+    Status: IDENTIFIED, deferred to M8+
+    Impact: Queue contention monitoring reads from empty in-memory store
+
+  ISS-019 through ISS-025: Similar pattern - 7 additional mock repositories wired in production
+    All identified; all deferred to future milestones
+    All suffer from data loss on restart
+
+================================================================================
+2. STUBS AND MOCKS IN PRODUCTION CODE PATHS
+================================================================================
+
+ROUTE-LEVEL IN-MEMORY STORES (Data Lost on Restart):
+
+  services/api/routes/overrides.py:101
+    Type: Dict-backed in-memory store
+    Variable: _override_store: dict[str, dict[str, Any]]
+    Usage: POST /overrides — creates; GET /overrides/{id} — reads
+    Issue: Not suitable for multi-worker deployments; all data lost on restart
+    Deferred: M13-T3 for SqlOverrideRepository implementation
+
+  services/api/routes/strategies.py:60
+    Type: Dict-backed in-memory store
+    Variable: _autosave_store: dict[str, dict[str, Any]]
+    Usage: POST /strategies/draft/autosave, GET, DELETE operations
+    Issue: Module-scoped, shared across all concurrent requests
+    Deferred: M13-T3 for SqlDraftAutosaveRepository implementation
+
+DI ENVIRONMENT-CONDITIONAL STUBS (INVERTED LOGIC):
+
+  services/api/routes/artifacts.py:89-97
+    Condition: if os.environ.get("ENVIRONMENT", "test") != "test"
+    False Branch: MockArtifactRepository() (PRODUCTION DEFAULT)
+    True Branch: SqlArtifactRepository from DB (only in "test" mode)
+    Issue: INVERTED LOGIC — production uses mock; test mode uses SQL
+
+  [REPEATED IN 11 FILES]:
+    - feeds.py, feed_health.py, data_certification.py, charts.py, queues.py,
+      parity.py, audit.py, symbol_lineage.py, observability.py (2 repos),
+      and 2 additional getter functions
+
+LEGACY STUB IMPLEMENTATIONS:
+
+  services/api/routes/approvals.py:74
+    Comment: "# Stub: real implementation queries DB, enforces SoD, emits audit event."
+    Current: Returns {"approval_id": approval_id, "status": "approved"}
+    Issue: POST /approvals/{id}/approve does nothing
+
+  services/api/routes/exports.py:13
+    Current: Minimal stub to satisfy importability tests
+
+  services/api/routes/research.py
+    Current: Empty router definition
+
+AUDIT SERVICE STUB:
+
+  services/api/main.py:190-307
+    Class: _AuditServiceStub
+    Issue: All audit operations logged but not persisted
+
+================================================================================
+3. ORM/MIGRATION GAPS — TABLES WITHOUT CORRESPONDING MODELS
+================================================================================
+
+Migration defines 20 tables; ORM models only for 14 tables.
+
+MISSING ORM MODELS (6 TABLES UNREACHABLE FROM ORM):
+  1. OverrideWatermark (override_watermarks table)
+  2. DraftAutosave (draft_autosaves table)
+  3. ChartCacheEntry (chart_cache_entries table)
+  4. CertificationEvent (certification_events table)
+  5. SymbolLineageEntry (symbol_lineage_entries table)
+  6. PromotionRequest (promotion_requests table)
+
+IMPACT:
+  - Any SQL repository depending on these tables will raise AttributeError
+  - Base.metadata.create_all() omits these 6 tables from ORM registry
+  - Schema and code are out of sync
+
+================================================================================
+4. AUTHENTICATION & AUTHORIZATION — CRITICAL SECURITY GAPS
+================================================================================
+
+ENDPOINTS WITHOUT AUTHENTICATION:
+  Status: ALL 21 ROUTE FILES — ZERO AUTHENTICATION CHECKS
+  Grep result: get_current_user dependency has 0 imports across all routes
+  Result: EVERY ENDPOINT IS PUBLICLY ACCESSIBLE
+
+UNAUTHENTICATED SENSITIVE ENDPOINTS:
+  POST /approvals/{id}/approve — approval decisions (governance-critical)
+  POST /approvals/{id}/reject — approval decisions
+  POST /overrides — governance override submissions
+  POST /strategies/draft/autosave — user strategy saves
+  POST /promotions/request — promotion requests
+  GET /audit — audit log access
+
+CORS MISCONFIGURATION:
+
+  services/api/main.py:111-117
+  Configuration:
+    allow_origins=["*"]
+    allow_credentials=True  [DANGEROUS WITH allow_origins=*]
+    allow_methods=["*"]
+    allow_headers=["*"]
+  Risk: Cross-origin requests from ANY origin can perform ANY method with credentials
+
+BROKEN AUTH TRUST BOUNDARY:
+
+  services/api/dependencies.py:get_current_user()
+    Accepts X-User-ID header without validation
+    No JWT token verification
+    Client can spoof any user_id by sending custom header
+
+================================================================================
+5. UNENFORCED PYDANTIC VALIDATIONS (DEAD CONSTRAINTS)
+================================================================================
+
+ISSUE ISS-006: pydantic-core stub in .venv skips ALL validation
+
+UNENFORCED CONSTRAINTS ACROSS 11+ CONTRACT CLASSES:
+  - Field(min_length=...)
+  - Field(max_length=...)
+  - Field(pattern=...)
+  - Field(ge=..., le=...)
+
+EXAMPLES OF DEAD CODE:
+  libs/contracts/strategy.py:
+    name: str = Field(..., min_length=1, max_length=255)  [UNENFORCED]
+
+  libs/contracts/governance.py:
+    rationale: str = Field(..., min_length=10)  [UNENFORCED]
+    candidate_id: str = Field(..., pattern=r"^[0-9A-HJKMNP-TV-Z]{26}$")  [UNENFORCED]
+
+  libs/contracts/queue.py:
+    depth: int = Field(..., ge=0)  [UNENFORCED]
+    contention_score: float = Field(..., ge=0.0, le=100.0)  [UNENFORCED]
+
+MANUAL VALIDATION WORKAROUNDS:
+  services/api/routes/approvals.py:42 — _RATIONALE_MIN_LEN = 10
+  services/api/routes/overrides.py:58 — _RATIONALE_MIN_LEN = 20
+
+IMPACT:
+  - Routes can receive invalid data that violates contract constraints
+  - No automatic type coercion (int params may arrive as strings)
+  - Manual workarounds scattered across route files
+
+================================================================================
+6. TEST COVERAGE GAPS
+================================================================================
+
+REPOSITORIES WITH ZERO TESTS (11 FILES):
+  1. sql_artifact_repository.py
+  2. sql_feed_repository.py
+  3. sql_feed_health_repository.py
+  4. sql_parity_repository.py
+  5. sql_chart_repository.py
+  6. sql_certification_repository.py
+  7. sql_audit_explorer_repository.py
+  8. sql_symbol_lineage_repository.py
+  9. sql_diagnostics_repository.py
+  10. celery_queue_repository.py
+  11. real_dependency_health_repository.py
+
+UNIT TEST COVERAGE:
+  Overall: 63% (1444 lines covered / 3851 total)
+  528 unit tests pass; 15 warnings
+
+INTEGRATION TEST COVERAGE:
+  All integration tests use mock repositories
+  No integration tests exercise SQL repositories against actual DB
+  No schema validation tests for 6 missing ORM models
+
+================================================================================
+7. HARDCODED CREDENTIALS & CONFIGURATION ISSUES
+================================================================================
+
+HARDCODED IN SOURCE:
+
+  alembic.ini:49
+    sqlalchemy.url = postgresql://fxlab:fxlab@postgres:5432/fxlab
+    Risk: Production DB credentials in config file
+
+  libs/contracts/config.py
+    access_key: str = Field(default="minioadmin")
+    secret_key: str = Field(default="minioadmin")
+    Risk: MinIO default credentials if env vars not overridden
+
+  libs/storage/minio_storage.py:28-31
+    Example shows hardcoded secret_key="minioadmin"
+    Risk: Documentation anti-pattern
+
+================================================================================
+8. ARCHITECTURE ISSUES & DEBT
+================================================================================
+
+ENVIRONMENT-CONDITIONAL LOGIC INVERTED:
+
+  All 11 mock repository getters use:
+    if os.environ.get("ENVIRONMENT", "test") != "test":
+      return MockRepository()  ← PRODUCTION
+    else:
+      return SqlRepository()   ← TEST ONLY
+
+  This means:
+    - Production defaults to mocks (all data lost on restart)
+    - Test mode defaults to SQL (but tests expect mocks)
+    - Logic is backwards
+
+FRAGILE WORKAROUNDS FOR PYDANTIC-CORE STUB:
+
+  services/api/routes/artifacts.py:204-210
+    Using model_construct() instead of Model()
+    Explicit int() casts on query params
+    JSONResponse(content=model.model_dump()) instead of response_model=
+
+  These workarounds bypass type safety and are maintenance-intensive
+
+================================================================================
+9. PRODUCTION READINESS VERDICTS BY SUBSYSTEM
+================================================================================
+
+RED (NOT PRODUCTION-READY):
+  - Artifacts API (ISS-011, ISS-012, ISS-006)
+  - Feeds API (ISS-013, ISS-015)
+  - Charts API (ISS-016, ISS-006)
+  - Queue Monitoring (ISS-017, ISS-006)
+  - Approval API (no auth, stub implementation, ISS-006)
+  - Override API (in-memory store, no auth, ISS-006)
+  - Strategies Draft Autosave (in-memory store, no auth)
+  - Audit Log API (ISS-021)
+  - Certification API (ISS-019)
+  - Parity API (ISS-020)
+  - Symbol Lineage (ISS-022)
+  - Dependency Health (ISS-024)
+  - Diagnostics (ISS-025)
+  - Feed Health (ISS-014)
+  - API Infrastructure (no auth, CORS allow_origins=*)
+
+AMBER (PARTIAL/WORKING):
+  - Observability (baseline works; 2 mock repos)
+  - Promotions (endpoint works; missing ORM model)
+  - Database Layer (schema OK; 6 missing models)
+  - Code Quality (63% coverage; workarounds present)
+
+================================================================================
+10. CRITICAL PATH REMEDIATION (BLOCKING FRONTEND)
+================================================================================
+
+1. [CRITICAL] Fix pydantic-core for Linux x86_64
+   Timeline: Immediate
+   Impact: Unblocks all validation constraints
+
+2. [CRITICAL] Implement authentication on all endpoints
+   Timeline: 1 day
+   Impact: Secures all sensitive operations
+
+3. [CRITICAL] Fix CORS configuration
+   Timeline: 1 hour
+   Impact: Restricts cross-origin access
+
+4. [CRITICAL] Wire SQL repositories (invert ENVIRONMENT logic)
+   Timeline: 3-4 days
+   Impact: Eliminates 11 mock repositories in production
+
+5. [HIGH] Create 6 missing ORM models
+   Timeline: 4 hours
+   Impact: Unblocks SQL repositories for these tables
+
+6. [HIGH] Replace in-memory dict stores with SQL
+   Timeline: 2 days
+   Impact: Eliminates data loss on restart
+
+7. [HIGH] Add integration tests for SQL repositories
+   Timeline: 3 days
+   Impact: Prevents regression
+
+Estimated total: 6-8 days for critical path; 12 days for full production readiness
+
+================================================================================
+CONCLUSION
+================================================================================
+
+The FXLab Phase 3 backend has excellent architectural structure (onion layers,
+TDD discipline, comprehensive specs) and decent unit test coverage (63%), but is
+NOT PRODUCTION-READY:
+
+CRITICAL BLOCKERS:
+  1. Zero authentication enforcement — all endpoints public
+  2. 11 mock repositories wired in production — all data lost on restart
+  3. pydantic-core stub makes all Pydantic validation dead code
+  4. 6 database tables lack ORM models
+  5. 2 in-memory dict stores (non-persistent)
+
+RECOMMENDATION: DO NOT DEPLOY FRONTEND until items 1-7 in remediation section
+are completed. Current backend will lose user data on restart and accepts any
+user ID without validation.

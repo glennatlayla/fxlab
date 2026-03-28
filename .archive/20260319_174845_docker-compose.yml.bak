@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  health:
+    build:
+      context: ./services/health
+      dockerfile: Dockerfile
+    container_name: fxlab-health
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+
+  # Future services (M1+) will be added here:
+  # - postgres (M2: metadata DB)
+  # - redis (M4: job queue)
+  # - minio (M5: object storage)
+  # - api-gateway (M1: reverse proxy)
+
+networks:
+  fxlab-net:
+    driver: bridge
+    name: fxlab-network
+
+# Volumes for persistence (M2+)
+# volumes:
+#   postgres-data:
+#   redis-data:
+#   minio-data:

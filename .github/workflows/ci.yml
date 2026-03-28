@@ -1,0 +1,101 @@
+# FXLab CI Pipeline
+# Triggers on push to any branch and PRs targeting main or develop.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.12"
+  ENVIRONMENT: test
+
+jobs:
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ env.PYTHON_VERSION }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Format check
+        run: .venv/bin/ruff format --check .
+
+      - name: Lint
+        run: .venv/bin/ruff check .
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: quality
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: sqlite:///./test.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ env.PYTHON_VERSION }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          .venv/bin/python -m pytest \
+            --tb=short -q \
+            --cov=services --cov=libs \
+            --cov-report=xml \
+            --cov-report=term-missing
+
+      - name: Coverage gate (≥80%)
+        run: .venv/bin/python -m pytest --cov=services --cov=libs --cov-fail-under=80 --tb=no -q
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  build:
+    name: Docker Build Smoke Test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: |
+          docker build \
+            -f services/api/Dockerfile \
+            -t fxlab-api:ci-test \
+            .

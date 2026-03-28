@@ -1,0 +1,19 @@
+"""API integration tests for FXLab Platform.
+
+Tests verify the FastAPI application behavior using a test client.
+These tests treat the API as an external boundary per project rules.
+"""
+
+from fastapi.testclient import TestClient
+
+from services.api.main import app
+
+# Test client for API integration tests
+client = TestClient(app)
+
+
+def test_health_check() -> None:
+    """Verify health check endpoint returns expected status."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}

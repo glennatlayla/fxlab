@@ -1,0 +1,204 @@
+# Lessons Learned: FXLab Phase 3 workplan v1 1
+# Workplan: FXLab_Phase_3_workplan_v1_1.md
+# Last updated: 2026-03-19T23:05:00Z
+
+---
+# LL-001
+# Title:     SQLAlchemy DeclarativeBase reserves 'metadata' as a class attribute
+# Milestone: M2
+# Source:    ISS-001
+# Lesson:    Never name a SQLAlchemy model column 'metadata'.  DeclarativeBase
+#            exposes cls.metadata as the table MetaData object; any column with
+#            that name raises InvalidRequestError at class definition time.
+#            Pattern: rename the Python attribute (e.g. event_metadata) and use
+#            Column("metadata", ...) to preserve the DB column name.
+# Apply to:  M2, all future milestones that define ORM models
+
+---
+# LL-002
+# Title:     SQLAlchemy @validates fires at construction time, not at commit
+# Milestone: M2
+# Source:    ISS-002
+# Lesson:    @validates intercepts attribute assignment during the model
+#            __init__ call.  pytest.raises must wrap the constructor call, not
+#            just session.commit(), to catch validation errors.  Wrap all three:
+#            construction, session.add(), and session.commit() inside a single
+#            pytest.raises context.
+# Apply to:  M2, any future milestone that adds @validates constraints
+
+---
+# LL-003
+# Title:     Accumulator pattern must preserve @pytest.fixture decorators
+# Milestone: M2
+# Source:    ISS-003
+# Lesson:    When merging or regenerating conftest.py via an accumulator
+#            approach, always verify that every fixture function retains the
+#            @pytest.fixture decorator.  Plain function definitions are not
+#            registered by pytest.  Prefer a full rewrite over incremental
+#            appending to avoid silent omissions.
+# Apply to:  M2, M3, and all future milestones that add test fixtures
+
+---
+# LL-004
+# Title:     Hand-crafted ULID test values must be counted to exactly 26 chars
+# Milestone: M2
+# Source:    ISS-004
+# Lesson:    ULIDs are exactly 26 Crockford Base32 characters.  When writing
+#            test ULIDs by hand (e.g. "01HQAAAAAAAAAAAAAAAAAAAAAA"), count
+#            carefully: 4-char timestamp prefix + 22 repeated characters = 26.
+#            A common off-by-one is using 23 repeated chars for 27 total.
+#            Use the formula: prefix(4) + padding(22) = 26.
+# Apply to:  M2, M3, and all future milestones that declare test ULIDs
+
+---
+# LL-005
+# Title:     SQLAlchemy integration tests need SAVEPOINT isolation with module-scoped engines
+# Milestone: M2
+# Source:    ISS-005
+# Lesson:    When using a module-scoped SQLAlchemy engine (schema created once)
+#            with per-test sessions, use SAVEPOINT isolation to prevent test
+#            data from persisting across tests.  Pattern:
+#              connection = engine.connect()
+#              transaction = connection.begin()
+#              session = Session(bind=connection)
+#              nested = connection.begin_nested()  -- SAVEPOINT
+#              yield session
+#              session.close(); nested.rollback(); transaction.rollback(); connection.close()
+#            Inside fixtures, use session.flush() not session.commit() to avoid
+#            committing past the SAVEPOINT boundary.
+# Apply to:  M2, all future integration milestones using SQLAlchemy
+
+---
+# LL-007
+# Title:     pydantic-core native binary may not load in cross-arch/cross-version sandboxes
+# Milestone: M4
+# Source:    ISS-006
+# Lesson:    When pydantic-core falls back to its pure-Python stub (detectable by
+#            importing pydantic_core._pydantic_core_stub without ImportError),
+#            runtime Field constraint enforcement (ge, le, min_length, etc.) is
+#            silently disabled and frozen-model equality may fail with AttributeError.
+#            Test adaptation pattern:
+#            - For constraint tests: inspect model_fields[name].metadata instead of
+#              expecting ValidationError at construction time.
+#            - For equality: compare model.model_dump() dictionaries, not model objects.
+# Apply to:  M4 and all future milestones that test Pydantic model constraints
+
+---
+# LL-006
+# Title:     Maintain issues and lessons files in real-time, not retroactively
+# Milestone: M3
+# Source:    Meta-review after M3
+# Lesson:    Issues and lessons files were not updated during M0-M3 development;
+#            this was identified only in a meta-review after M3 was complete.
+#            Going forward, each time an issue is encountered: (1) log it in
+#            .issues immediately, (2) add the lesson to .lessons-learned when
+#            resolved, (3) promote to SHARED_LESSONS.md if applicable to 2+
+#            phases.  Never defer meta-maintenance to a later session.
+# Apply to:  M4 and all future milestones
+
+---
+# LL-008
+# Title:     FastAPI response_model serialization fails silently with pydantic-core stub
+# Milestone: M5
+# Source:    M5-S4 GREEN implementation
+# Lesson:    When pydantic-core native binary is unavailable (cross-arch sandbox),
+#            FastAPI's response_model= serialization pipeline calls pydantic-core
+#            under the hood and produces an empty {} body instead of raising an error.
+#            Two-part workaround for route handlers:
+#            (1) Remove response_model= from the @router.get decorator entirely.
+#            (2) Replace the return type annotation with JSONResponse.
+#            (3) Call model.model_dump() explicitly and return JSONResponse(content=...).
+#            Additional: model_construct() must be used instead of Model() for any
+#            Pydantic model that contains Optional[str] fields, since the stub raises
+#            "TypeError: typing.Optional[str] is not a generic class" at validation time.
+#            Always add explicit int(param) coercion when using model_construct()
+#            because FastAPI query string params arrive as strings without coercion.
+# Apply to:  M5 and all future milestones that return Pydantic models from FastAPI routes
+
+---
+# LL-009
+# Title:     ruff and mypy binaries are architecture-specific and fail in cross-arch VM
+# Milestone: M5
+# Source:    M5-S5 Quality Gate
+# Lesson:    The ruff and mypy wheel binaries installed in .venv are compiled for
+#            macOS arm64 (the host), but the sandbox runs Linux x86_64.  The OS
+#            returns "Exec format error" when trying to execute them.  Neither
+#            python -m ruff nor python -m mypy work for the same reason (the
+#            .so extension module inside the wheel is the wrong arch).
+#            Workaround: use python ast.parse() for syntax validation, black for
+#            formatting, and rely on pytest for behavioural coverage.  Static
+#            analysis must be run on the host machine (macOS) where the correct
+#            arch binaries are installed.  Document this in CI setup: cross-arch
+#            sandbox cannot substitute for host-side type checking.
+# Apply to:  M5 and all future milestones — do not attempt ruff/mypy in the sandbox
+
+---
+# LL-010
+# Title:     FastAPI query-param int coercion fails in cross-arch pydantic-core sandbox
+# Milestone: M6
+# Source:    ISS-015
+# Lesson:    When pydantic-core is unavailable (cross-arch sandbox), FastAPI cannot
+#            coerce Query() parameters from their raw string form to int.  Default
+#            values (Python int literals) arrive correctly, but values supplied in
+#            the HTTP query string (e.g. ?offset=1) arrive as str even when the
+#            Query() annotation specifies int.  Symptom: TypeError inside the
+#            repository on slice operations like list[offset : offset + limit].
+#            Fix: add explicit int() casts in the route handler before forwarding
+#            params to the repository:
+#                result = repo.list(limit=int(limit), offset=int(offset), ...)
+#            This is a specialisation of LL-007/LL-008 and applies to all route
+#            handlers that accept numeric query parameters.
+# Apply to:  M6 and all future milestones that use int Query() parameters
+
+---
+# LL-011
+# Title:     str-enum model_dump() branches are unreachable — use pragma: no cover
+# Milestone: M6
+# Source:    M6-S5 Quality Gate
+# Lesson:    When a Pydantic model field is typed as a str-enum (class Foo(str, Enum)),
+#            model_dump() already serialises it to the string value directly.
+#            Defensive guards like:
+#                if hasattr(raw["field"], "value"):
+#                    raw["field"] = raw["field"].value
+#            are logically unreachable and will never be covered by tests.
+#            Add # pragma: no cover to such branches rather than writing artificial
+#            tests that cannot actually trigger them.  This prevents false coverage
+#            failures and makes the intent clear to future maintainers.
+# Apply to:  M6 and all future milestones that include serialization helpers
+
+---
+# LL-012
+# Title:     Optional[StrEnum] pydantic-core validation fails when value is non-None
+# Milestone: M7
+# Source:    M7-S4 GREEN — _build_equity_response() in charts.py
+# Lesson:    The cross-arch pydantic-core stub raises:
+#            "TypeError: typing.Optional[libs.contracts.chart.SamplingMethod]
+#             is not a generic class"
+#            when constructing a Pydantic model whose Optional[str-Enum] field
+#            is assigned a non-None enum value.  The same field with None passes
+#            silently (the stub short-circuits validation for None).
+#            Symptom: tests for the LTTB-applied code path fail; tests for the
+#            no-sampling code path pass.  Diagnosis: sampling_method=None vs
+#            sampling_method=SamplingMethod.LTTB triggers the stub's type-checking.
+#            Fix: use model_construct() instead of Model() for any Pydantic model
+#            that contains an Optional[str-Enum] field and may be populated with
+#            a non-None value in the cross-arch sandbox:
+#                return EquityChartResponse.model_construct(
+#                    sampling_method=SamplingMethod.LTTB, ...
+#                )
+#            Note: this is a refinement of LL-007 — LL-007 covered Optional[str],
+#            LL-012 covers Optional[str-Enum] specifically.
+# Apply to:  M7 and all future milestones with Optional[Enum] Pydantic fields
+
+---
+# LL-013
+# Title:     Integration tests for deprecated endpoints must be updated alongside unit tests
+# Milestone: M9
+# Source:    M9-S5 QUALITY GATE — test_m4_jobs_queues.py::TestQueuesContentionEndpointIntegration
+# Lesson:    When ISS-018 was fixed (unit test_jobs.py updated for M7 per-class queue contention),
+#            the corresponding integration tests in test_m4_jobs_queues.py were not updated.
+#            This was caught during M9 full-suite run: 4 integration tests failed because they
+#            still tested GET /queues/contention (old M4 aggregate shape) which returns 404.
+#            Fix: Update both unit AND integration tests when an endpoint shape changes.
+#            Pattern: grep for the old endpoint URL across ALL test files before closing a milestone.
+# Apply to:  M9 and all future milestones that change or remove an API endpoint.

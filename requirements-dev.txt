@@ -1,0 +1,4 @@
+pydantic
+services
+structlog
+libs

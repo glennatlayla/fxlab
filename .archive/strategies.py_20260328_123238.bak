@@ -1,0 +1,247 @@
+"""
+Strategy Routes.
+
+Responsibilities:
+- Strategy list/get/versions endpoints.
+- Draft autosave endpoints (POST, GET /latest, DELETE /{id}).
+
+Draft autosave allows non-technical operators to recover from session loss.
+The frontend calls POST /strategies/draft/autosave every 30 seconds and on
+field blur. GET /strategies/draft/autosave/latest is called on login to
+offer recovery of incomplete drafts.
+
+Does NOT:
+- Contain business logic or scoring logic.
+- Access the database directly (stub — SQL repository wired in M13-T3).
+- Enforce RBAC (that is the service layer's responsibility).
+
+Dependencies:
+- libs.contracts.governance: DraftAutosavePayload, DraftAutosaveResponse
+- structlog for structured logging
+
+Error conditions:
+- 422 Unprocessable Entity: missing required fields in autosave payload.
+- 404 Not Found: autosave_id does not exist.
+- 204 No Content: no autosave found for user_id (GET /latest).
+
+Example:
+    POST /strategies/draft/autosave
+    {"user_id": "01H...", "draft_payload": {...}, "form_step": "parameters", ...}
+    → 200 {"autosave_id": "01H...", "saved_at": "..."}
+
+    GET /strategies/draft/autosave/latest?user_id=01H...
+    → 200 {autosave payload} or 204 if none
+
+    DELETE /strategies/draft/autosave/01H...
+    → 204 No Content
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+import structlog
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Path, Query, status
+from fastapi.responses import Response
+
+from libs.contracts.governance import DraftAutosavePayload, DraftAutosaveResponse
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# In-memory stub store — replaced by SqlDraftAutosaveRepository in M13-T3.
+# Keyed by autosave_id; lookup by user_id scans the dict.
+# ---------------------------------------------------------------------------
+_autosave_store: dict[str, dict[str, Any]] = {}
+_stub_counter = 0
+
+
+def _generate_stub_id() -> str:
+    """Generate a stub ULID-shaped ID for the in-memory store."""
+    global _stub_counter
+    _stub_counter += 1
+    return f"01HAUTOSAVE{_stub_counter:015d}"
+
+
+# ---------------------------------------------------------------------------
+# Strategy list endpoint (pre-existing stub)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/", summary="List strategies")
+async def list_strategies() -> dict:
+    """
+    List strategies.
+
+    Returns:
+        Paginated list of strategy summaries (stub returns empty list).
+    """
+    logger.info("strategies.list.called")
+    return {"success": True, "data": []}
+
+
+# ---------------------------------------------------------------------------
+# Draft autosave endpoints (M13 gap G-10 — spec Section 7.5 / 8.8)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/draft/autosave",
+    summary="Save a draft strategy autosave",
+)
+async def post_draft_autosave(payload: DraftAutosavePayload) -> dict:
+    """
+    Persist a draft strategy autosave for the given user.
+
+    The frontend calls this endpoint every 30 seconds and on every field blur.
+    The draft_payload may be incomplete — partial validation only, not full
+    StrategyDraftInput validation.
+
+    Autosaves older than 30 days are purged from the server (enforced by a
+    background cleanup job, not here).
+
+    Args:
+        payload: DraftAutosavePayload containing user_id, draft_payload,
+                 form_step, client_ts, and session_id.
+
+    Returns:
+        DraftAutosaveResponse with autosave_id and saved_at timestamp.
+
+    Raises:
+        HTTPException 422: If required fields are missing.
+
+    Example:
+        POST /strategies/draft/autosave
+        {"user_id": "01H...", "draft_payload": {"name": "S1"}, ...}
+        → 200 {"autosave_id": "01H...", "saved_at": "2026-03-28T11:00:01Z"}
+    """
+    now = datetime.now(tz=timezone.utc)
+    autosave_id = _generate_stub_id()
+
+    _autosave_store[autosave_id] = {
+        "autosave_id": autosave_id,
+        "user_id": payload.user_id,
+        "session_id": payload.session_id,
+        "draft_payload": payload.draft_payload,
+        "form_step": payload.form_step,
+        "client_ts": payload.client_ts,
+        "saved_at": now,
+    }
+
+    logger.info(
+        "draft.autosave.saved",
+        autosave_id=autosave_id,
+        user_id=payload.user_id,
+        form_step=payload.form_step,
+    )
+
+    # Return plain dict to avoid pydantic-core stub serialization issues.
+    return {"autosave_id": autosave_id, "saved_at": now.isoformat()}
+
+
+@router.get(
+    "/draft/autosave/latest",
+    summary="Retrieve the latest draft autosave for a user",
+)
+async def get_latest_draft_autosave(
+    user_id: Optional[str] = Query(
+        None,
+        description="ULID of the user whose latest autosave to fetch",
+    ),
+) -> Any:
+    """
+    Return the most recent autosave for the given user, or 204 if none exists.
+
+    Called on login to offer the DraftRecoveryBanner. Autosaves older than
+    30 days are excluded (enforced by SQL query in production; stub returns
+    whatever is in memory).
+
+    Args:
+        user_id: Query parameter — ULID of the user.
+
+    Returns:
+        200 with the most recent autosave record if found.
+        204 No Content if no autosave exists for the user.
+
+    Raises:
+        HTTPException 422: If user_id query param is missing.
+
+    Example:
+        GET /strategies/draft/autosave/latest?user_id=01H...
+        → 200 {"autosave_id": "01H...", "draft_payload": {...}, ...}
+    """
+    # Manual validation — pydantic Query(...) 422 enforcement is broken in this env.
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="user_id query parameter is required",
+        )
+
+    user_saves = [
+        rec for rec in _autosave_store.values()
+        if rec["user_id"] == user_id
+    ]
+
+    if not user_saves:
+        logger.debug("draft.autosave.latest.none", user_id=user_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    latest = max(user_saves, key=lambda r: r["saved_at"])
+    logger.debug(
+        "draft.autosave.latest.found",
+        user_id=user_id,
+        autosave_id=latest["autosave_id"],
+    )
+    return {
+        **latest,
+        "client_ts": (
+            latest["client_ts"].isoformat()
+            if hasattr(latest["client_ts"], "isoformat")
+            else latest["client_ts"]
+        ),
+        "saved_at": latest["saved_at"].isoformat(),
+    }
+
+
+@router.delete(
+    "/draft/autosave/{autosave_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Discard a draft autosave",
+)
+async def delete_draft_autosave(
+    autosave_id: str = Path(..., description="Autosave ULID to discard"),
+) -> None:
+    """
+    Explicitly discard a draft autosave record.
+
+    Called when the user selects 'Start Fresh' from the DraftRecoveryBanner.
+
+    Args:
+        autosave_id: ULID of the autosave record to delete.
+
+    Returns:
+        204 No Content on success.
+
+    Raises:
+        HTTPException 404: If autosave_id is not found.
+
+    Example:
+        DELETE /strategies/draft/autosave/01H...
+        → 204 No Content
+    """
+    if autosave_id not in _autosave_store:
+        logger.warning("draft.autosave.delete.not_found", autosave_id=autosave_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Autosave '{autosave_id}' not found.",
+        )
+
+    del _autosave_store[autosave_id]
+    logger.info("draft.autosave.deleted", autosave_id=autosave_id)
+    # FastAPI returns 204 with no body when the function returns None
+    # and status_code=204 is set on the decorator.

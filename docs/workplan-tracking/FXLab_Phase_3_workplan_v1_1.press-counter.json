@@ -1,0 +1,74 @@
+{
+  "M5": {
+    "completed_at": "2026-03-27T00:00:00Z",
+    "user_interventions": 1,
+    "intervention_notes": [
+      "Post-completion review prompt: user asked 'what might you have missed?' — caught 4 gaps (MinIO inheritance, Content-Type, issues file not updated, HACK comments without ticket IDs)"
+    ],
+    "oscillations": 0,
+    "tests_at_close": 311
+  },
+  "M6": {
+    "completed_at": "2026-03-27T10:00:00Z",
+    "user_interventions": 0,
+    "intervention_notes": [],
+    "oscillations": 1,
+    "oscillation_notes": [
+      "LL-007 variant: query-param int coercion failed (offset arrived as str); fixed with explicit int() cast in list_feeds()"
+    ],
+    "tests_at_close": 351
+  },
+  "M7": {
+    "completed_at": "2026-03-27T12:30:00Z",
+    "user_interventions": 0,
+    "intervention_notes": [],
+    "oscillations": 1,
+    "oscillation_notes": [
+      "LL-012: Optional[SamplingMethod] in EquityChartResponse raised TypeError in pydantic-core stub when non-None; fixed with model_construct() in _build_equity_response(). Pre-M7 test_jobs.py tests also needed updating for new per-class queue contention endpoint shape."
+    ],
+    "tests_at_close": 398
+  },
+  "M8": {
+    "completed_at": "2026-03-27T13:00:00Z",
+    "user_interventions": 0,
+    "intervention_notes": [],
+    "oscillations": 0,
+    "oscillation_notes": [],
+    "tests_at_close": 420
+  },
+  "M9": {
+    "completed_at": "2026-03-27T18:45:00Z",
+    "user_interventions": 0,
+    "intervention_notes": [],
+    "oscillations": 0,
+    "oscillation_notes": [
+      "No oscillations in M9 itself. Caught and fixed 4 pre-existing integration test failures from M4/M7 ISS-018 (integration counterpart not updated when unit tests were fixed). LL-013 recorded."
+    ],
+    "tests_at_close": 557
+  },
+  "M10": {
+    "completed_at": "2026-03-27T19:15:00Z",
+    "user_interventions": 0,
+    "intervention_notes": [],
+    "oscillations": 0,
+    "oscillation_notes": [],
+    "tests_at_close": 583
+  },
+  "M11": {
+    "completed_at": "2026-03-28T10:30:00Z",
+    "user_interventions": 0,
+    "intervention_notes": [],
+    "oscillations": 0,
+    "oscillation_notes": [],
+    "tests_at_close": 610
+  },
+  "M12": {
+    "completed_at": "2026-03-28T11:00:00Z",
+    "user_interventions": 0,
+    "intervention_notes": [],
+    "oscillations": 0,
+    "oscillation_notes": [],
+    "tests_at_close": 650,
+    "notes": "40 acceptance tests in test_m12_acceptance_pack.py; ACCEPTANCE_PACK.md generated covering all 27 Phase 3 endpoints"
+  }
+}

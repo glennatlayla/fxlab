@@ -1,0 +1,92 @@
+"""
+FastAPI application entry point.
+
+Main application instance and router registration.
+"""
+from collections.abc import AsyncIterator
+from typing import Any
+
+import structlog
+from fastapi import FastAPI
+
+from libs.contracts.base import APIResponse
+from libs.contracts.promotion import PromotionRequest
+from services.api.routes import runs
+
+logger = structlog.get_logger()
+
+app = FastAPI(
+    title="FXLab Platform API",
+    version="0.1.0",
+    description="Systematic trading research platform"
+)
+
+# Register routers
+app.include_router(runs.router)
+
+# Re-export the service function for mocking in tests
+get_run_results = runs.get_run_results
+
+
+@app.get("/health")
+async def health_check():
+    """Basic health check endpoint."""
+    return {"status": "healthy"}
+
+
+logger.info("fastapi_app_initialized")
+
+# -- merged (accumulator): services/api/main.py --
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan manager."""
+    logger.info("fastapi_app_starting")
+    yield
+    logger.info("fastapi_app_shutting_down")
+
+# -- merged (accumulator): services/api/main.py --
+async def root() -> APIResponse[dict]:
+    """Root endpoint."""
+    return APIResponse(data={"message": "FXLab API"})
+
+# -- merged (accumulator): services/api/main.py --
+async def health() -> APIResponse:
+    """
+    Phase 1 health check endpoint.
+    Returns operational status of the API.
+    """
+    logger.info("health_check_requested")
+    return APIResponse(success=True, data={"status": "healthy"})
+
+# -- merged (accumulator): services/api/main.py --
+def submit_promotion_request(request: PromotionRequest) -> dict:
+    """
+    Placeholder for promotion request submission.
+    
+    This will be replaced by actual implementation in a later phase.
+    """
+    return {
+        "job_id": "01HQ7X9Z8K3M4N5P6Q7R8S9T0X",
+        "status": "pending"
+    }
+
+# -- merged (accumulator): services/api/main.py --
+async def startup_event():
+    """Application startup."""
+    logger.info("api_starting", version="0.1.0")
+
+async def shutdown_event():
+    """Application shutdown."""
+    logger.info("api_shutting_down")
+
+# -- merged (accumulator): services/api/main.py --
+def get_readiness_report(run_id: str) -> dict[str, Any] | None:
+    """
+    Retrieve readiness report for a run.
+    
+    This is a placeholder that will be replaced with actual service implementation.
+    """
+    logger.info("get_readiness_report.called", run_id=run_id)
+    return None
+
+# -- merged (accumulator): services/api/main.py --
+__all__ = ["app", "submit_promotion_request"]

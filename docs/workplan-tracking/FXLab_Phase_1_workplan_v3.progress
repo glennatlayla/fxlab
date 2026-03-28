@@ -1,0 +1,129 @@
+# Progress: FXLab Phase 1 workplan v3
+# Workplan: FXLab_Phase_1_workplan_v3.md
+# Last updated: 2026-03-16T22:06:22Z
+# Active milestone: M0
+# Active step: M0 COMPLETE -- advance Active milestone
+
+[M0] Bootstrap                                                   DONE
+  [M0-S1] UNDERSTAND -- review spec                             DONE
+  [M0-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M0-S3] RED -- write failing tests                            DONE
+  [M0-S4] GREEN -- implement                                    DONE
+  [M0-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M0-S6] REFACTOR                                              DONE
+  [M0-S7] INTEGRATION -- integration tests                      DONE
+  [M0-S8] REVIEW -- checklist sign-off                          DONE
+[M1] Docker Runtime                                              NOT_STARTED
+  [M1-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M1-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M1-S3] RED -- write failing tests                            NOT_STARTED
+  [M1-S4] GREEN -- implement                                    NOT_STARTED
+  [M1-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M1-S6] REFACTOR                                              NOT_STARTED
+  [M1-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M1-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M2] DB Schema + Migrations + Audit Ledger                       NOT_STARTED
+  [M2-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M2-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M2-S3] RED -- write failing tests                            NOT_STARTED
+  [M2-S4] GREEN -- implement                                    NOT_STARTED
+  [M2-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M2-S6] REFACTOR                                              NOT_STARTED
+  [M2-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M2-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M3] Auth + RBAC                                                 NOT_STARTED
+  [M3-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M3-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M3-S3] RED -- write failing tests                            NOT_STARTED
+  [M3-S4] GREEN -- implement                                    NOT_STARTED
+  [M3-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M3-S6] REFACTOR                                              NOT_STARTED
+  [M3-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M3-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M4] Jobs + Queue Classes + Compute Policy                       NOT_STARTED
+  [M4-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M4-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M4-S3] RED -- write failing tests                            NOT_STARTED
+  [M4-S4] GREEN -- implement                                    NOT_STARTED
+  [M4-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M4-S6] REFACTOR                                              NOT_STARTED
+  [M4-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M4-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M5] Artifact Registry + Storage Abstraction                     NOT_STARTED
+  [M5-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M5-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M5-S3] RED -- write failing tests                            NOT_STARTED
+  [M5-S4] GREEN -- implement                                    NOT_STARTED
+  [M5-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M5-S6] REFACTOR                                              NOT_STARTED
+  [M5-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M5-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M6] Feed Registry + Versioned Config + Connectivity Tests       NOT_STARTED
+  [M6-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M6-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M6-S3] RED -- write failing tests                            NOT_STARTED
+  [M6-S4] GREEN -- implement                                    NOT_STARTED
+  [M6-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M6-S6] REFACTOR                                              NOT_STARTED
+  [M6-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M6-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M7] Ingest Pipeline                                             NOT_STARTED
+  [M7-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M7-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M7-S3] RED -- write failing tests                            NOT_STARTED
+  [M7-S4] GREEN -- implement                                    NOT_STARTED
+  [M7-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M7-S6] REFACTOR                                              NOT_STARTED
+  [M7-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M7-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M8] Verification + Gaps + Anomalies + Certification             NOT_STARTED
+  [M8-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M8-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M8-S3] RED -- write failing tests                            NOT_STARTED
+  [M8-S4] GREEN -- implement                                    NOT_STARTED
+  [M8-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M8-S6] REFACTOR                                              NOT_STARTED
+  [M8-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M8-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M9] Symbol Lineage                                              NOT_STARTED
+  [M9-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M9-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M9-S3] RED -- write failing tests                            NOT_STARTED
+  [M9-S4] GREEN -- implement                                    NOT_STARTED
+  [M9-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M9-S6] REFACTOR                                              NOT_STARTED
+  [M9-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M9-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M10] Parity Service                                              NOT_STARTED
+  [M10-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M10-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M10-S3] RED -- write failing tests                            NOT_STARTED
+  [M10-S4] GREEN -- implement                                    NOT_STARTED
+  [M10-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M10-S6] REFACTOR                                              NOT_STARTED
+  [M10-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M10-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M11] Alerting + Observability Hardening                          NOT_STARTED
+  [M11-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M11-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M11-S3] RED -- write failing tests                            NOT_STARTED
+  [M11-S4] GREEN -- implement                                    NOT_STARTED
+  [M11-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M11-S6] REFACTOR                                              NOT_STARTED
+  [M11-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M11-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+[M12] Operator API Docs + Acceptance Pack                         NOT_STARTED
+  [M12-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M12-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M12-S3] RED -- write failing tests                            NOT_STARTED
+  [M12-S4] GREEN -- implement                                    NOT_STARTED
+  [M12-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M12-S6] REFACTOR                                              NOT_STARTED
+  [M12-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M12-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+# CONTRACT_FINGERPRINTS: milestone=M0 ts=2026-03-14T21:21:50Z
+#   1fabc00cfeab4c2d  libs/health/interfaces/health_checker.py
+#   d88cce11aa178418  libs/storage/interfaces/object_storage.py
+#   0cc764b3a54664c9  libs/db/interfaces/connection_manager.py
+#   c825e8b711adf4ef  libs/logging/interfaces/logger.py

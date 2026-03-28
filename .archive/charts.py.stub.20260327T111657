@@ -1,0 +1,18 @@
+"""
+Chart Routes Stub
+
+Placeholder for M23/M24 chart generation endpoints.
+"""
+from fastapi import APIRouter
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter()
+
+
+@router.get("/")
+async def list_charts():
+    """List charts endpoint stub."""
+    logger.info("list_charts", event="List charts called")
+    return {"success": True, "data": []}

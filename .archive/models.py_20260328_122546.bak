@@ -1,0 +1,484 @@
+"""
+SQLAlchemy ORM models for FXLab Phase 3.
+
+Responsibilities:
+- Define all database table mappings using SQLAlchemy declarative base.
+- Provide Base for use in Alembic migrations and test fixtures.
+- Each model maps to one database table (SRP).
+
+Does NOT:
+- Contain business logic.
+- Perform I/O or queries.
+
+Dependencies:
+- SQLAlchemy ORM
+
+Example:
+    from libs.contracts.models import Base, Strategy, AuditEvent
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.orm import DeclarativeBase, relationship, validates
+
+
+# ---------------------------------------------------------------------------
+# Declarative base
+# ---------------------------------------------------------------------------
+
+
+class Base(DeclarativeBase):
+    """
+    Declarative base class for all ORM models.
+
+    All models inherit from this base, which provides the metadata registry
+    used by Alembic migrations and test fixture setup.
+
+    Note:
+        __allow_unmapped__ = True permits legacy Column() declarations
+        alongside SQLAlchemy 2.0's DeclarativeBase without requiring
+        Mapped[] type annotations on every column attribute.
+    """
+
+    __allow_unmapped__ = True
+
+
+# ---------------------------------------------------------------------------
+# Helper mixin: ULID primary key + timestamps
+# ---------------------------------------------------------------------------
+
+
+class TimestampMixin:
+    """
+    Mixin providing created_at and updated_at timestamp columns.
+
+    Responsibilities:
+    - Auto-populate created_at on INSERT.
+    - Auto-update updated_at on UPDATE.
+
+    Does NOT:
+    - Handle business logic or validation.
+
+    Note:
+        __allow_unmapped__ = True is required for SQLAlchemy 2.0 compatibility
+        when using Column() declarations without Mapped[] annotations.
+    """
+
+    __allow_unmapped__ = True
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        server_default=func.now(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+
+class User(TimestampMixin, Base):
+    """
+    User accounts for authentication and authorisation.
+
+    Attributes:
+        id: ULID primary key (26-char string).
+        email: Unique user email address.
+        hashed_password: BCrypt-hashed password.
+        role: User role — one of: admin, operator, researcher, viewer.
+        is_active: Whether the account is enabled.
+    """
+
+    __tablename__ = "users"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    email: Any = Column(String(255), nullable=False, unique=True, index=True)
+    hashed_password: Any = Column(String(255), nullable=False)
+    role: Any = Column(String(50), nullable=False)
+    is_active: Any = Column(Boolean, nullable=False, default=True)
+
+
+class Strategy(TimestampMixin, Base):
+    """
+    Registered trading strategy definition.
+
+    Attributes:
+        id: ULID primary key.
+        name: Human-readable strategy name.
+        code: Strategy source code.
+        version: Semantic version string.
+        created_by: ULID of the user who created this strategy.
+        is_active: Whether this strategy is currently active.
+    """
+
+    __tablename__ = "strategies"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    name: Any = Column(String(255), nullable=False)
+    code: Any = Column(Text, nullable=False)
+    version: Any = Column(String(50), nullable=True)
+    created_by: Any = Column(String(26), ForeignKey("users.id"), nullable=True)
+    is_active: Any = Column(Boolean, nullable=False, default=True)
+
+    builds: Any = relationship("StrategyBuild", back_populates="strategy")
+
+    @validates("id")
+    def validate_ulid_id(self, key: str, value: str) -> str:
+        """
+        Validate that the primary key is a well-formed ULID.
+
+        A ULID is exactly 26 characters of Crockford Base32 (uppercase).
+        Characters I, L, O, U are excluded from the alphabet.
+
+        Args:
+            key: Column name (always "id").
+            value: Proposed ID value.
+
+        Returns:
+            The validated ULID string.
+
+        Raises:
+            ValueError: If value is not a valid ULID (wrong length or chars).
+        """
+        _ULID_ALPHABET = set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+        if not value or len(value) != 26:
+            raise ValueError(
+                f"Invalid ULID for {key!r}: expected 26 chars, got {len(value) if value else 0}"
+            )
+        invalid_chars = set(value.upper()) - _ULID_ALPHABET
+        if invalid_chars:
+            raise ValueError(f"Invalid ULID for {key!r}: disallowed characters {invalid_chars!r}")
+        return value
+
+
+class StrategyBuild(TimestampMixin, Base):
+    """
+    Compiled artifact of a strategy at a given version.
+
+    Attributes:
+        id: ULID primary key.
+        strategy_id: FK to Strategy.
+        artifact_uri: URI where the compiled artifact is stored.
+        source_hash: SHA-256 hash of strategy source at build time.
+        build_status: one of: pending, success, failed.
+    """
+
+    __tablename__ = "strategy_builds"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    strategy_id: Any = Column(String(26), ForeignKey("strategies.id"), nullable=False, index=True)
+    artifact_uri: Any = Column(String(512), nullable=True)
+    source_hash: Any = Column(String(64), nullable=True)
+    build_status: Any = Column(String(50), nullable=False, default="pending")
+
+    strategy: Any = relationship("Strategy", back_populates="builds")
+
+
+class Candidate(TimestampMixin, Base):
+    """
+    A strategy candidate submitted for evaluation.
+
+    Attributes:
+        id: ULID primary key.
+        strategy_id: FK to Strategy.
+        status: Lifecycle status (draft, submitted, approved, rejected).
+        submitted_by: ULID of submitting user.
+    """
+
+    __tablename__ = "candidates"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    strategy_id: Any = Column(String(26), ForeignKey("strategies.id"), nullable=False, index=True)
+    status: Any = Column(String(50), nullable=False, default="draft")
+    submitted_by: Any = Column(String(26), ForeignKey("users.id"), nullable=True)
+
+
+class Deployment(TimestampMixin, Base):
+    """
+    A strategy deployment to a target environment.
+
+    Attributes:
+        id: ULID primary key.
+        strategy_id: FK to Strategy.
+        environment: Target environment (paper, live).
+        status: Deployment status.
+        deployed_by: ULID of deploying user.
+    """
+
+    __tablename__ = "deployments"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    strategy_id: Any = Column(String(26), ForeignKey("strategies.id"), nullable=False, index=True)
+    environment: Any = Column(String(50), nullable=False)
+    status: Any = Column(String(50), nullable=False, default="pending")
+    deployed_by: Any = Column(String(26), ForeignKey("users.id"), nullable=True)
+
+
+class Run(TimestampMixin, Base):
+    """
+    A single execution run of a strategy.
+
+    Attributes:
+        id: ULID primary key.
+        strategy_id: FK to Strategy.
+        run_type: Type of run (backtest, paper, live).
+        status: Run lifecycle status.
+        started_at: When the run began executing.
+        completed_at: When the run finished (nullable until complete).
+    """
+
+    __tablename__ = "runs"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    strategy_id: Any = Column(String(26), ForeignKey("strategies.id"), nullable=True, index=True)
+    run_type: Any = Column(String(50), nullable=False, default="backtest")
+    status: Any = Column(String(50), nullable=False, default="pending")
+    started_at: Any = Column(DateTime, nullable=True)
+    completed_at: Any = Column(DateTime, nullable=True)
+
+    trials: Any = relationship("Trial", back_populates="run")
+
+
+class Trial(TimestampMixin, Base):
+    """
+    A single parameter-set trial within a run.
+
+    Attributes:
+        id: ULID primary key.
+        run_id: FK to Run.
+        trial_index: Zero-based trial index within the run.
+        status: Trial status.
+        metrics: JSON blob of performance metrics.
+    """
+
+    __tablename__ = "trials"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    run_id: Any = Column(String(26), ForeignKey("runs.id"), nullable=False, index=True)
+    trial_index: Any = Column(Integer, nullable=False, default=0)
+    status: Any = Column(String(50), nullable=False, default="pending")
+    metrics: Any = Column(JSON, nullable=True)
+
+    run: Any = relationship("Run", back_populates="trials")
+
+
+class Artifact(TimestampMixin, Base):
+    """
+    A file artifact produced by a run or build.
+
+    Attributes:
+        id: ULID primary key.
+        run_id: FK to Run (nullable — some artifacts come from builds).
+        artifact_type: Type classifier (model, report, chart, etc.).
+        uri: Storage URI.
+        size_bytes: File size in bytes.
+        checksum: SHA-256 checksum.
+    """
+
+    __tablename__ = "artifacts"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    run_id: Any = Column(String(26), ForeignKey("runs.id"), nullable=True, index=True)
+    artifact_type: Any = Column(String(100), nullable=False)
+    uri: Any = Column(String(512), nullable=False)
+    size_bytes: Any = Column(Integer, nullable=True)
+    checksum: Any = Column(String(64), nullable=True)
+
+
+class AuditEvent(Base):
+    """
+    Immutable audit ledger entry.
+
+    Responsibilities:
+    - Record every mutation in the system with actor, action, and context.
+    - Provide an append-only compliance trail.
+
+    Does NOT:
+    - Support UPDATE or DELETE operations.
+    - Contain business logic.
+
+    Attributes:
+        id: ULID primary key.
+        actor: Identity string (e.g. "user:<ulid>", "system:scheduler").
+        action: Action verb (e.g. "strategy.created", "run.started").
+        object_id: ULID of the affected entity.
+        object_type: Entity type name (e.g. "strategy", "run").
+        metadata: Arbitrary JSON context for the event.
+        created_at: Event timestamp (no updated_at — events are immutable).
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    actor: Any = Column(String(255), nullable=False)
+    action: Any = Column(String(255), nullable=False)
+    object_id: Any = Column(String(26), nullable=False, index=True)
+    object_type: Any = Column(String(100), nullable=False)
+    # SQLAlchemy reserves 'metadata' at the class level; use 'event_metadata'
+    # as the Python attribute name while mapping to the 'metadata' DB column.
+    event_metadata: Any = Column("metadata", JSON, nullable=False, default=dict)
+    created_at: Any = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+    )
+
+
+class Feed(TimestampMixin, Base):
+    """
+    Data feed registration entry.
+
+    Attributes:
+        id: ULID primary key.
+        name: Unique feed name.
+        feed_type: Feed type classifier (e.g. price, fundamental).
+        source: Data source identifier.
+        is_active: Whether this feed is currently enabled.
+    """
+
+    __tablename__ = "feeds"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    name: Any = Column(String(255), nullable=False, unique=True)
+    feed_type: Any = Column(String(100), nullable=False)
+    source: Any = Column(String(255), nullable=True)
+    is_active: Any = Column(Boolean, nullable=False, default=True)
+
+    health_events: Any = relationship("FeedHealthEvent", back_populates="feed")
+
+
+class FeedHealthEvent(Base):
+    """
+    A health check result for a feed.
+
+    Attributes:
+        id: ULID primary key.
+        feed_id: FK to Feed.
+        status: Health status (healthy, degraded, failed).
+        checked_at: When the check was performed.
+        details: JSON blob with check details.
+    """
+
+    __tablename__ = "feed_health_events"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    feed_id: Any = Column(String(26), ForeignKey("feeds.id"), nullable=False, index=True)
+    status: Any = Column(String(50), nullable=False)
+    checked_at: Any = Column(DateTime, nullable=False, default=datetime.utcnow)
+    details: Any = Column(JSON, nullable=True)
+
+    feed: Any = relationship("Feed", back_populates="health_events")
+
+
+class ParityEvent(Base):
+    """
+    A parity check result comparing two data sources.
+
+    Attributes:
+        id: ULID primary key.
+        feed_id: FK to Feed (primary feed being checked).
+        reference_feed_id: FK to the reference Feed.
+        parity_score: Numeric parity score (0.0–1.0).
+        status: Parity status (pass, fail, warning).
+        checked_at: When the parity check ran.
+        details: JSON context.
+    """
+
+    __tablename__ = "parity_events"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    feed_id: Any = Column(String(26), ForeignKey("feeds.id"), nullable=True, index=True)
+    reference_feed_id: Any = Column(String(26), ForeignKey("feeds.id"), nullable=True)
+    parity_score: Any = Column(String(20), nullable=True)  # stored as string for precision
+    status: Any = Column(String(50), nullable=False, default="unknown")
+    checked_at: Any = Column(DateTime, nullable=False, default=datetime.utcnow)
+    details: Any = Column(JSON, nullable=True)
+
+
+class Override(TimestampMixin, Base):
+    """
+    A manual operator override of a system decision.
+
+    Attributes:
+        id: ULID primary key.
+        target_id: ULID of the entity being overridden.
+        target_type: Type of the target entity.
+        override_type: Category of override.
+        reason: Free-text justification.
+        applied_by: ULID of the operator who applied the override.
+        is_active: Whether this override is currently in effect.
+    """
+
+    __tablename__ = "overrides"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    target_id: Any = Column(String(26), nullable=False, index=True)
+    target_type: Any = Column(String(100), nullable=False)
+    override_type: Any = Column(String(100), nullable=False)
+    reason: Any = Column(Text, nullable=True)
+    applied_by: Any = Column(String(26), ForeignKey("users.id"), nullable=True)
+    is_active: Any = Column(Boolean, nullable=False, default=True)
+
+
+class ApprovalRequest(TimestampMixin, Base):
+    """
+    A request for human approval of a promotion or deployment.
+
+    Attributes:
+        id: ULID primary key.
+        candidate_id: FK to Candidate being considered.
+        requested_by: ULID of the requesting user.
+        status: Approval status (pending, approved, rejected).
+        reviewer_id: ULID of the reviewer (nullable until reviewed).
+        decision_reason: Free-text rationale for the decision.
+        decided_at: When the decision was made.
+    """
+
+    __tablename__ = "approval_requests"
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    candidate_id: Any = Column(String(26), ForeignKey("candidates.id"), nullable=True, index=True)
+    requested_by: Any = Column(String(26), ForeignKey("users.id"), nullable=True)
+    status: Any = Column(String(50), nullable=False, default="pending")
+    reviewer_id: Any = Column(String(26), ForeignKey("users.id"), nullable=True)
+    decision_reason: Any = Column(Text, nullable=True)
+    decided_at: Any = Column(DateTime, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+__all__ = [
+    "Base",
+    "AuditEvent",
+    "ApprovalRequest",
+    "Artifact",
+    "Candidate",
+    "Deployment",
+    "Feed",
+    "FeedHealthEvent",
+    "Override",
+    "ParityEvent",
+    "Run",
+    "Strategy",
+    "StrategyBuild",
+    "Trial",
+    "User",
+]

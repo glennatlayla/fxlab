@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fxlab"
+version = "0.1.0"
+description = "FXLab Platform Foundation"
+requires-python = ">=3.10"
+dependencies = [
+    # Phase 1 — platform foundation
+    "fastapi==0.109.0",
+    "pydantic==2.5.3",
+    "pydantic-settings==2.1.0",
+    "sqlalchemy==2.0.25",
+    "alembic==1.13.1",
+    "psycopg2-binary==2.9.9",
+    "redis==5.0.1",
+    "structlog==24.1.0",
+    "python-ulid==2.2.0",
+    # Phase 2 — research & strategy compiler
+    "optuna>=3.5.0",       # hyperparameter optimisation sampler
+    "numpy>=1.26.0",       # numerical operations across compiler/IR layers
+    "polars>=0.20.0",      # bar-level computation (columnar, fast)
+    "pyarrow>=14.0.0",     # parquet I/O for research artefacts
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest==7.4.4",
+    "pytest-asyncio==0.23.3",
+    "pytest-cov==4.1.0",
+    "httpx==0.26.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=libs",
+    "--cov=services",
+    "--cov-report=term-missing",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true

@@ -1,0 +1,186 @@
+"""
+Shared pytest fixtures for all test modules.
+
+Provides:
+- Correlation ID generation
+- Mock loggers with structured logging
+- Mock database connections
+- Mock artifact storage
+- Common test data factories
+"""
+
+import pytest
+from unittest.mock import MagicMock
+import ulid
+
+
+@pytest.fixture
+def correlation_id() -> str:
+    """
+    Generate a unique correlation ID for request tracing.
+    
+    Returns:
+        ULID string for correlation tracking
+    """
+    return str(ulid.ULID())
+
+
+@pytest.fixture
+def mock_logger() -> MagicMock:
+    """
+    Provide a mock structured logger.
+    
+    Returns:
+        MagicMock configured to accept structlog-style bind() and log methods
+    """
+    logger = MagicMock()
+    logger.bind.return_value = logger
+    return logger
+
+
+@pytest.fixture
+def mock_metadata_db() -> MagicMock:
+    """
+    Provide a mock metadata database connection.
+    
+    Returns:
+        MagicMock configured with common DB operations
+    """
+    db = MagicMock()
+    db.execute.return_value = MagicMock()
+    db.commit.return_value = None
+    db.rollback.return_value = None
+    return db
+
+
+@pytest.fixture
+def mock_artifact_storage() -> MagicMock:
+    """
+    Provide a mock artifact storage interface.
+    
+    Returns:
+        MagicMock implementing ArtifactStorage interface methods
+    """
+    storage = MagicMock()
+    
+    # Configure default behaviors
+    storage.initialize.return_value = None
+    storage.is_initialized.return_value = False
+    storage.health_check.return_value = True
+    storage.put.return_value = "artifacts/default.bin"
+    storage.get.return_value = b"default content"
+    storage.get_with_metadata.return_value = (b"default content", {})
+    storage.list.return_value = []
+    storage.delete.return_value = None
+    
+    return storage
+
+# -- merged imports --
+from ulid import ULID
+
+# -- merged imports --
+import sys
+from pathlib import Path
+
+def project_root() -> Path:
+    """Project root directory."""
+    return PROJECT_ROOT
+
+
+def test_data_dir(project_root: Path) -> Path:
+    """Test data directory."""
+    data_dir = project_root / "tests" / "fixtures" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def fixture_csv_dir(project_root: Path) -> Path:
+    """Directory containing fixture CSV files."""
+    csv_dir = project_root / "tests" / "fixtures" / "data"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    return csv_dir
+
+
+def mock_env(monkeypatch):
+    """Mock environment variables for testing."""
+    test_env = {
+        "ENVIRONMENT": "test",
+        "LOG_LEVEL": "DEBUG",
+        "DB_HOST": "localhost",
+        "DB_PORT": "5432",
+        "DB_NAME": "fxlab_test",
+        "DB_USER": "test",
+        "DB_PASSWORD": "test",
+        "REDIS_HOST": "localhost",
+        "REDIS_PORT": "6379",
+        "MINIO_HOST": "localhost",
+        "MINIO_PORT": "9000",
+        "MINIO_ACCESS_KEY": "minioadmin",
+        "MINIO_SECRET_KEY": "minioadmin",
+    }
+    for key, value in test_env.items():
+        monkeypatch.setenv(key, value)
+    return test_env
+
+
+def sample_strategy_code() -> str:
+    """Sample strategy source code for testing."""
+    return """
+def initialize(context):
+    context.symbol = "EURUSD"
+    context.period = "1h"
+
+def handle_data(context, data):
+    price = data.current(context.symbol, "close")
+    if price > context.get("last_price", 0):
+        context.order(context.symbol, 100)
+    context.last_price = price
+"""
+
+def frontend_root(project_root):
+    """Get frontend directory."""
+    return project_root / "frontend"
+
+
+def backend_root(project_root):
+    """Get backend services directory."""
+    return project_root / "services"
+
+# -- merged imports --
+import subprocess
+import time
+
+def docker_compose_file(project_root):
+    """Return path to docker-compose.yml."""
+    compose_file = project_root / "docker-compose.yml"
+    return compose_file
+
+
+def api_base_url():
+    """Base URL for API service in docker-compose."""
+    return "http://localhost:8000"
+
+
+def web_base_url():
+    """Base URL for web service in docker-compose."""
+    return "http://localhost:3000"
+
+
+def health_check_timeout():
+    """Default timeout for health check retries (seconds)."""
+    return 30
+
+
+def health_check_interval():
+    """Default interval between health check retries (seconds)."""
+    return 1
+
+
+def pytest_configure(config):
+    """Configure pytest with custom markers."""
+    config.addinivalue_line(
+        "markers", "integration: mark test as integration test requiring Docker"
+    )
+    config.addinivalue_line(
+        "markers", "unit: mark test as unit test (no external dependencies)"
+    )

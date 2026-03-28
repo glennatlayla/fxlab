@@ -1,0 +1,69 @@
+"""
+Integration test fixtures for Phase 2.
+
+This file provides shared fixtures for integration tests.
+Integration tests may interact with real databases, files, or services
+but should use test-specific isolation.
+"""
+import pytest
+from pathlib import Path
+from typing import Generator
+
+
+@pytest.fixture
+def integration_test_db_url() -> str:
+    """Provide test database URL for integration tests."""
+    # Will be configured via environment in real tests
+    return "postgresql://test:test@localhost:5432/fxlab_test"
+
+
+@pytest.fixture
+def integration_test_redis_url() -> str:
+    """Provide test Redis URL for integration tests."""
+    return "redis://localhost:6379/15"  # Use DB 15 for tests
+
+
+@pytest.fixture
+def integration_temp_storage(tmp_path: Path) -> Generator[Path, None, None]:
+    """Provide temporary storage directory for integration tests."""
+    storage = tmp_path / "integration_storage"
+    storage.mkdir(parents=True, exist_ok=True)
+    
+    yield storage
+    
+    # Cleanup is automatic via tmp_path
+
+
+@pytest.fixture
+def integration_test_correlation_id() -> str:
+    """Provide correlation ID for integration test tracing."""
+    import ulid
+    return str(ulid.ULID())
+
+# -- merged imports --
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from libs.contracts.models import Base
+
+def test_db_url():
+    """Test database URL from environment or default."""
+    return os.getenv("TEST_DATABASE_URL", "postgresql://fxlab:fxlab@localhost:5432/fxlab_test")
+
+
+def test_db_engine(test_db_url):
+    """Create test database engine."""
+    engine = create_engine(test_db_url)
+    Base.metadata.create_all(engine)
+    yield engine
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def test_db_session(test_db_engine):
+    """Create test database session."""
+    SessionLocal = sessionmaker(bind=test_db_engine)
+    session = SessionLocal()
+    yield session
+    session.rollback()
+    session.close()

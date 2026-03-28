@@ -1,0 +1,19 @@
+"""
+Feed management routes.
+Stub for future feed implementation.
+"""
+import structlog
+from fastapi import APIRouter
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter()
+
+
+@router.get("/")
+async def list_feeds():
+    """
+    List feeds (stub).
+    """
+    logger.debug("feeds.list", message="List feeds endpoint called")
+    return {"success": True, "data": []}

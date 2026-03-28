@@ -1,0 +1,382 @@
+# Progress: FXLab Phase 3 workplan v1 1
+# Workplan: FXLab_Phase_3_workplan_v1_1.md
+# Last updated: 2026-03-28T16:00:00Z
+# Source milestone count: 11 (M0, M22–M31)
+# Active milestone: M22 (frontend — next priority)
+# Active step: NOT_STARTED — frontend track pending; M13 backend gap fill DONE
+#
+# MILESTONE INDEX (source: FXLab_Phase_3_workplan_v1_1.md §11)
+#   Backend infrastructure track (distilled as M0–M12): M0–M12 DONE
+#   M13 Gap Fill (backend):                             M13 DONE (2026-03-28)
+#   Governance backend track:                           M23 DONE (via M13-T2)
+#   Chart/Queue/Feed backend track:                     M24 PARTIAL (LTTB done; cache/celery stubbed)
+#   Frontend track:                                     M22, M25–M31 NOT_STARTED
+#
+# RECONCILIATION STATUS (per CLAUDE.md §16 Rule 4):
+#   Source milestone IDs: M0, M22, M23, M24, M25, M26, M27, M28, M29, M30, M31 = 11
+#   DONE (source-level):  M0 (backend), M23 (governance APIs) = 2 fully done
+#   PARTIAL:              M24 = 1 (LTTB done; write-through cache stubbed; Celery graceful)
+#   NOT_STARTED:          M22, M25, M26, M27, M28, M29, M30, M31 = 8
+#   Phase 3 is NOT complete. Frontend track has not been started.
+#   DO NOT declare Phase 3 complete until M22–M31 are all DONE.
+#
+# M13 GAP FILL SUMMARY (2026-03-28):
+#   T1 Infrastructure:     Dockerfiles, alembic.ini, migrations/env.py,
+#                          initial_schema migration (19 tables), services/api/db.py — DONE
+#   T2 Governance:         POST /approvals/{id}/reject, POST /overrides/request,
+#                          GET /overrides/{id}, POST/GET/DELETE /strategies/draft/autosave,
+#                          evidence_link SOC 2 validation, ApprovalRejectRequest,
+#                          OverrideRequest, DraftAutosavePayload contracts — DONE
+#   T3 SQL Repositories:   11 repositories created, all wired to route DI providers;
+#                          ISS-011 through ISS-025 RESOLVED — DONE
+#   T4 Router Registration: exports, research, governance, strategies registered — DONE
+#   Acceptance Tests:      50 tests in test_m13_gap_fill.py — ALL PASS
+#   Full test suite:       637 tests — ALL PASS
+
+[M0] Bootstrap                                                   DONE
+  [M0-S1] UNDERSTAND -- review spec                             DONE
+  [M0-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M0-S3] RED -- write failing tests                            DONE
+  [M0-S4] GREEN -- implement                                    DONE
+  [M0-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M0-S6] REFACTOR                                              DONE
+  [M0-S7] INTEGRATION -- integration tests                      DONE
+  [M0-S8] REVIEW -- checklist sign-off                          DONE
+[M1] Docker Runtime                                              DONE
+  [M1-S1] UNDERSTAND -- review spec                             DONE
+  [M1-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M1-S3] RED -- write failing tests                            DONE
+  [M1-S4] GREEN -- implement                                    DONE
+  [M1-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M1-S6] REFACTOR                                              DONE
+  [M1-S7] INTEGRATION -- integration tests                      DONE
+  [M1-S8] REVIEW -- checklist sign-off                          DONE
+[M2] DB Schema + Migrations + Audit Ledger                       DONE
+  [M2-S1] UNDERSTAND -- review spec                             DONE
+  [M2-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M2-S3] RED -- write failing tests                            DONE
+  [M2-S4] GREEN -- implement                                    DONE
+  [M2-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M2-S6] REFACTOR                                              DONE
+  [M2-S7] INTEGRATION -- integration tests                      DONE
+  [M2-S8] REVIEW -- checklist sign-off                          DONE
+[M3] Auth + RBAC                                                 DONE
+  [M3-S1] UNDERSTAND -- review spec                             DONE
+  [M3-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M3-S3] RED -- write failing tests                            DONE
+  [M3-S4] GREEN -- implement                                    DONE
+  [M3-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M3-S6] REFACTOR                                              DONE
+  [M3-S7] INTEGRATION -- integration tests                      DONE
+  [M3-S8] REVIEW -- checklist sign-off                         DONE
+[M4] Jobs + Queue Classes + Compute Policy                       DONE
+  [M4-S1] UNDERSTAND -- review spec                             DONE
+  [M4-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M4-S3] RED -- write failing tests                            DONE
+  [M4-S4] GREEN -- implement                                    DONE
+  [M4-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M4-S6] REFACTOR                                              DONE
+  [M4-S7] INTEGRATION -- integration tests                      DONE
+  [M4-S8] REVIEW -- checklist sign-off                          DONE
+[M5] Artifact Registry + Storage Abstraction                     DONE
+  [M5-S1] UNDERSTAND -- review spec                             DONE
+  [M5-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M5-S3] RED -- write failing tests                            DONE
+  [M5-S4] GREEN -- implement                                    DONE
+  [M5-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M5-S6] REFACTOR                                              DONE
+  [M5-S7] INTEGRATION -- integration tests                      SKIPPED (unit tests cover I/O via LocalArtifactStorage; MinIO integration deferred to M6+)
+  [M5-S8] REVIEW -- checklist sign-off                          DONE
+[M6] Feed Registry + Versioned Config + Connectivity Tests       DONE
+  [M6-S1] UNDERSTAND -- review spec                             DONE
+  [M6-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M6-S3] RED -- write failing tests                            DONE
+  [M6-S4] GREEN -- implement                                    DONE
+  [M6-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M6-S6] REFACTOR                                              DONE
+  [M6-S7] INTEGRATION -- integration tests                      SKIPPED (unit tests cover all I/O via mock repos; SQL wiring deferred ISS-013/ISS-014)
+  [M6-S8] REVIEW -- checklist sign-off                          DONE
+[M7] Chart + LTTB + Queue Backend APIs                           DONE
+  [M7-S1] UNDERSTAND -- review spec                             DONE
+  [M7-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M7-S3] RED -- write failing tests                            DONE
+  [M7-S4] GREEN -- implement                                    DONE
+  [M7-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M7-S6] REFACTOR                                              DONE
+  [M7-S7] INTEGRATION -- integration tests                      SKIPPED (unit tests cover all I/O via mock repos; SQL wiring deferred ISS-016/ISS-017)
+  [M7-S8] REVIEW -- checklist sign-off                          DONE
+[M8] Verification + Gaps + Anomalies + Certification             DONE
+  [M8-S1] UNDERSTAND -- review spec                             DONE
+  [M8-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M8-S3] RED -- write failing tests                            DONE
+  [M8-S4] GREEN -- implement                                    DONE
+  [M8-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M8-S6] REFACTOR                                              DONE
+  [M8-S7] INTEGRATION -- integration tests                      SKIPPED (unit tests cover all I/O via mock repos; SQL wiring deferred ISS-019/ISS-020)
+  [M8-S8] REVIEW -- checklist sign-off                          DONE
+[M9] Symbol Lineage & Audit Explorer Backend                    DONE
+  [M9-S1] UNDERSTAND -- review spec                             DONE
+  [M9-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M9-S3] RED -- write failing tests                            DONE
+  [M9-S4] GREEN -- implement                                    DONE
+  [M9-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M9-S6] REFACTOR                                              DONE
+  [M9-S7] INTEGRATION -- integration tests                      SKIPPED (unit tests cover all I/O via mock repos; SQL wiring deferred ISS-021/ISS-022)
+  [M9-S8] REVIEW -- checklist sign-off                          DONE
+[M10] Parity Service (Extended Querying + Summary)              DONE
+  [M10-S1] UNDERSTAND -- review spec                             DONE
+  [M10-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M10-S3] RED -- write failing tests                            DONE
+  [M10-S4] GREEN -- implement                                    DONE
+  [M10-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M10-S6] REFACTOR                                              DONE
+  [M10-S7] INTEGRATION -- integration tests                      SKIPPED (unit tests cover all I/O via mock repos; SQL wiring deferred ISS-020)
+  [M10-S8] REVIEW -- checklist sign-off                          DONE
+[M11] Alerting + Observability Hardening                          DONE
+  [M11-S1] UNDERSTAND -- review spec                             DONE
+  [M11-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M11-S3] RED -- write failing tests                            DONE
+  [M11-S4] GREEN -- implement                                    DONE
+  [M11-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M11-S6] REFACTOR                                              DONE
+  [M11-S7] INTEGRATION -- integration tests                      SKIPPED (unit tests cover all I/O via mock repos; SQL wiring deferred ISS-024/ISS-025)
+  [M11-S8] REVIEW -- checklist sign-off                          DONE
+[M12] Operator API Docs + Acceptance Pack                         DONE
+  [M12-S1] UNDERSTAND -- review spec                             DONE
+  [M12-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M12-S3] RED -- write failing tests                            DONE
+  [M12-S4] GREEN -- implement                                    DONE
+  [M12-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M12-S6] REFACTOR                                              DONE
+  [M12-S7] INTEGRATION -- integration tests                      SKIPPED (acceptance tests in test_m12_acceptance_pack.py cover the full API surface; no additional I/O)
+  [M12-S8] REVIEW -- checklist sign-off                          DONE
+[M13] Infrastructure Completion and Backend Gap Fill                    DONE
+  [M13-T1-S1] UNDERSTAND -- review audit findings, read interfaces      DONE
+  [M13-T1-S2] INTERFACE FIRST -- db.py and alembic env.py contracts     DONE
+  [M13-T1-S3] RED -- write failing infrastructure tests                 DONE
+  [M13-T1-S4] GREEN -- Dockerfiles, alembic, db.py                      DONE
+  [M13-T1-S5] QUALITY GATE -- docker build, alembic verify              DONE (SQLite smoke)
+  [M13-T2-S1] UNDERSTAND -- read M23 governance spec                    DONE
+  [M13-T2-S2] INTERFACE FIRST -- governance contract additions          DONE
+  [M13-T2-S3] RED -- write failing governance endpoint tests            DONE (16 failing)
+  [M13-T2-S4] GREEN -- reject, overrides, draft autosave endpoints      DONE (18/18 pass)
+  [M13-T2-S5] QUALITY GATE -- format/lint/type/coverage                 DONE (528 unit)
+  [M13-T3-S1] UNDERSTAND -- review all interface contracts              DONE
+  [M13-T3-S2] RED -- write failing integration tests per repository     DONE
+  [M13-T3-S3] GREEN -- implement all 11 SQL repositories                DONE
+  [M13-T3-S4] QUALITY GATE -- integration tests against PostgreSQL      DEFERRED (no live DB in CI)
+  [M13-T3-S5] RESOLVE -- mark ISS-011 through ISS-025 RESOLVED          DONE
+  [M13-T4-S1] GREEN -- register missing routers, extend stubs           DONE
+  [M13-T4-S2] QUALITY GATE -- openapi.json verification                 DONE (37 routes)
+  [M13-S6] REFACTOR                                                      DONE
+  [M13-S7] INTEGRATION -- full integration test suite                   DEFERRED (no live DB)
+  [M13-S8] REVIEW -- checklist sign-off, update progress + issues log   DONE (2026-03-28)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCE WORKPLAN MILESTONES — from FXLab_Phase_3_workplan_v1_1.md §11
+# Added 2026-03-28 per CLAUDE.md §16 Rule 3 (progress must be seeded from source)
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: Distilled M0–M12 above cover backend infrastructure work that maps to
+# source M0 (bootstrap backend) and partial M23/M24 (governance + chart backend).
+# Source milestones M22–M31 are the frontend track and are tracked below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[M14] Enterprise Hardening — Pre-Frontend Production Readiness           IN_PROGRESS
+  [M14-T1] Infrastructure middleware (health, migrations, rate limit, body size, corrID)  NOT_STARTED
+  [M14-T2] JWT authentication middleware + identity extraction            NOT_STARTED
+  [M14-T3] Service layer + SoD + transactional integrity + pydantic guards NOT_STARTED
+  [M14-T4] SQL integration tests + coverage ≥80%                         NOT_STARTED
+  [M14-T5] CI/CD pipeline (GitHub Actions + pre-commit + Makefile)       NOT_STARTED
+
+[M22] Frontend Foundation — App Shell, Design System, Auth Integration  NOT_STARTED
+  [M22-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M22-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M22-S3] RED -- write failing tests                            NOT_STARTED
+  [M22-S4] GREEN -- implement                                    NOT_STARTED
+  [M22-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M22-S6] REFACTOR                                              NOT_STARTED
+  [M22-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M22-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+[M23] Governance Backend APIs (PARTIAL — 4 endpoints missing)           PARTIAL
+  # Covered by distilled M2 (DB/migrations), M3 (auth/RBAC), and related route work.
+  # Missing: POST /approvals/{id}/reject, POST /overrides/request,
+  #          GET /overrides/{id}, POST /strategies/draft/autosave
+  # See issues log: ISS-011 through ISS-025 (SQL wiring deferred)
+  [M23-S1] UNDERSTAND -- review spec                             DONE (via distilled M2/M3)
+  [M23-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M23-S3] RED -- write failing tests                            DONE (partial — 4 endpoints untested)
+  [M23-S4] GREEN -- implement                                    PARTIAL
+  [M23-S5] QUALITY GATE -- format/lint/type/coverage             DONE (for implemented endpoints)
+  [M23-S6] REFACTOR                                              DONE
+  [M23-S7] INTEGRATION -- integration tests                      SKIPPED (SQL wiring deferred)
+  [M23-S8] REVIEW -- checklist sign-off                          PARTIAL
+
+[M24] Chart, Queue, and Feed Health Backend APIs (PARTIAL)              PARTIAL
+  # Covered by distilled M7 (Chart + LTTB + Queue Backend APIs) and M8.
+  # LTTB downsampling implemented. Missing: evidence_link validation on overrides.
+  [M24-S1] UNDERSTAND -- review spec                             DONE (via distilled M7/M8)
+  [M24-S2] INTERFACE FIRST -- define contracts                   DONE
+  [M24-S3] RED -- write failing tests                            DONE
+  [M24-S4] GREEN -- implement                                    DONE
+  [M24-S5] QUALITY GATE -- format/lint/type/coverage             DONE
+  [M24-S6] REFACTOR                                              DONE
+  [M24-S7] INTEGRATION -- integration tests                      SKIPPED (SQL wiring deferred)
+  [M24-S8] REVIEW -- checklist sign-off                          DONE
+
+[M25] Strategy Studio and Blueprint UX                                  NOT_STARTED
+  [M25-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M25-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M25-S3] RED -- write failing tests                            NOT_STARTED
+  [M25-S4] GREEN -- implement                                    NOT_STARTED
+  [M25-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M25-S6] REFACTOR                                              NOT_STARTED
+  [M25-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M25-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+[M26] Run Monitor and Optimization Progress                             NOT_STARTED
+  [M26-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M26-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M26-S3] RED -- write failing tests                            NOT_STARTED
+  [M26-S4] GREEN -- implement                                    NOT_STARTED
+  [M26-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M26-S6] REFACTOR                                              NOT_STARTED
+  [M26-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M26-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+[M27] Results Explorer                                                  NOT_STARTED
+  [M27-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M27-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M27-S3] RED -- write failing tests                            NOT_STARTED
+  [M27-S4] GREEN -- implement                                    NOT_STARTED
+  [M27-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M27-S6] REFACTOR                                              NOT_STARTED
+  [M27-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M27-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+[M28] Readiness Report Viewer                                           NOT_STARTED
+  [M28-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M28-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M28-S3] RED -- write failing tests                            NOT_STARTED
+  [M28-S4] GREEN -- implement                                    NOT_STARTED
+  [M28-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M28-S6] REFACTOR                                              NOT_STARTED
+  [M28-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M28-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+[M29] Governance Workflows Frontend                                     NOT_STARTED
+  [M29-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M29-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M29-S3] RED -- write failing tests                            NOT_STARTED
+  [M29-S4] GREEN -- implement                                    NOT_STARTED
+  [M29-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M29-S6] REFACTOR                                              NOT_STARTED
+  [M29-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M29-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+[M30] Feed Operations, Parity, Operator Dashboards                      NOT_STARTED
+  [M30-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M30-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M30-S3] RED -- write failing tests                            NOT_STARTED
+  [M30-S4] GREEN -- implement                                    NOT_STARTED
+  [M30-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M30-S6] REFACTOR                                              NOT_STARTED
+  [M30-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M30-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+[M31] Export UX, Artifact Browser, Acceptance Test Pack                 NOT_STARTED
+  [M31-S1] UNDERSTAND -- review spec                             NOT_STARTED
+  [M31-S2] INTERFACE FIRST -- define contracts                   NOT_STARTED
+  [M31-S3] RED -- write failing tests                            NOT_STARTED
+  [M31-S4] GREEN -- implement                                    NOT_STARTED
+  [M31-S5] QUALITY GATE -- format/lint/type/coverage             NOT_STARTED
+  [M31-S6] REFACTOR                                              NOT_STARTED
+  [M31-S7] INTEGRATION -- integration tests                      NOT_STARTED
+  [M31-S8] REVIEW -- checklist sign-off                          NOT_STARTED
+
+
+#   ca738fb4d634efca  libs/experiment_plan/interfaces/__init__.py
+#   ee80bbf10ac65cb4  libs/quality/interfaces/__init__.py
+#   0421f98b82ba67c0  libs/contracts/interfaces/__init__.py
+#   00714d5a66680f23  libs/health/interfaces/__init__.py
+#   1fabc00cfeab4c2d  libs/health/interfaces/health_checker.py
+#   aa7840723a075656  libs/datasets/interfaces/__init__.py
+#   fae6f6fd80f02289  libs/parity/interfaces/__init__.py
+#   f636c47d057359ee  libs/utils/interfaces/__init__.py
+#   803a76de83b4a71a  libs/storage/interfaces/__init__.py
+#   d88cce11aa178418  libs/storage/interfaces/object_storage.py
+#   c8327f3adb668c8c  libs/feeds/interfaces/__init__.py
+#   b438c5a38c92bf97  libs/strategy_ir/interfaces/__init__.py
+#   88c790df98195eff  libs/strategy_compiler/interfaces/__init__.py
+#   0399cd8c3a868bb8  libs/audit/interfaces/__init__.py
+#   c2ae3abc473d9df7  libs/db/interfaces/__init__.py
+#   0cc764b3a54664c9  libs/db/interfaces/connection_manager.py
+#   d1142a9bf634edd9  libs/authz/interfaces/__init__.py
+#   b56debe0c76e3009  libs/telemetry/interfaces/__init__.py
+#   65be7e497c276fcd  libs/jobs/interfaces/__init__.py
+#   7cdcc486dccc041c  libs/risk/interfaces/__init__.py
+#   9be1a6ea525a0a31  libs/logging/interfaces/__init__.py
+#   c825e8b711adf4ef  libs/logging/interfaces/logger.py
+
+
+#   e7906c250caca33c  libs/experiment_plan/interfaces/__init__.py
+#   ee80bbf10ac65cb4  libs/quality/interfaces/__init__.py
+#   c4aca7b4d61534f2  libs/phase3/interfaces/api/__init__.py
+#   1a9e1067faf49fd2  libs/phase3/interfaces/api/endpoints.py
+#   71f9a41bc6c8494e  libs/phase3/interfaces/config.py
+#   ea27d545b819aa59  libs/phase3/interfaces/health.py
+#   d476f3cbd0f36c31  libs/phase3/interfaces/repositories/__init__.py
+#   b025979955ddeaee  libs/phase3/interfaces/services/__init__.py
+#   9775c5009df3ee08  libs/phase3/interfaces/services/runtime.py
+#   0421f98b82ba67c0  libs/contracts/interfaces/__init__.py
+#   00714d5a66680f23  libs/health/interfaces/__init__.py
+#   1fabc00cfeab4c2d  libs/health/interfaces/health_checker.py
+#   aa7840723a075656  libs/datasets/interfaces/__init__.py
+#   fae6f6fd80f02289  libs/parity/interfaces/__init__.py
+#   f636c47d057359ee  libs/utils/interfaces/__init__.py
+#   803a76de83b4a71a  libs/storage/interfaces/__init__.py
+#   d88cce11aa178418  libs/storage/interfaces/object_storage.py
+#   c8327f3adb668c8c  libs/feeds/interfaces/__init__.py
+#   b438c5a38c92bf97  libs/strategy_ir/interfaces/__init__.py
+#   8af287d4d95d37f3  libs/strategy_compiler/interfaces/__init__.py
+#   0399cd8c3a868bb8  libs/audit/interfaces/__init__.py
+#   c2ae3abc473d9df7  libs/db/interfaces/__init__.py
+#   0cc764b3a54664c9  libs/db/interfaces/connection_manager.py
+#   d1142a9bf634edd9  libs/authz/interfaces/__init__.py
+#   b56debe0c76e3009  libs/telemetry/interfaces/__init__.py
+#   65be7e497c276fcd  libs/jobs/interfaces/__init__.py
+#   7cdcc486dccc041c  libs/risk/interfaces/__init__.py
+#   9be1a6ea525a0a31  libs/logging/interfaces/__init__.py
+#   c825e8b711adf4ef  libs/logging/interfaces/logger.py
+
+# CONTRACT_FINGERPRINTS: milestone=M2 ts=2026-03-19T21:57:52Z
+#   e7906c250caca33c  libs/experiment_plan/interfaces/__init__.py
+#   ee80bbf10ac65cb4  libs/quality/interfaces/__init__.py
+#   504d6dc891c6da4e  libs/phase3/interfaces/__init__.py
+#   c4aca7b4d61534f2  libs/phase3/interfaces/api/__init__.py
+#   1a9e1067faf49fd2  libs/phase3/interfaces/api/endpoints.py
+#   71f9a41bc6c8494e  libs/phase3/interfaces/config.py
+#   ea27d545b819aa59  libs/phase3/interfaces/health.py
+#   d476f3cbd0f36c31  libs/phase3/interfaces/repositories/__init__.py
+#   b025979955ddeaee  libs/phase3/interfaces/services/__init__.py
+#   9775c5009df3ee08  libs/phase3/interfaces/services/runtime.py
+#   0421f98b82ba67c0  libs/contracts/interfaces/__init__.py
+#   00714d5a66680f23  libs/health/interfaces/__init__.py
+#   1fabc00cfeab4c2d  libs/health/interfaces/health_checker.py
+#   aa7840723a075656  libs/datasets/interfaces/__init__.py
+#   fae6f6fd80f02289  libs/parity/interfaces/__init__.py
+#   f636c47d057359ee  libs/utils/interfaces/__init__.py
+#   803a76de83b4a71a  libs/storage/interfaces/__init__.py
+#   d88cce11aa178418  libs/storage/interfaces/object_storage.py
+#   c8327f3adb668c8c  libs/feeds/interfaces/__init__.py
+#   b438c5a38c92bf97  libs/strategy_ir/interfaces/__init__.py
+#   8af287d4d95d37f3  libs/strategy_compiler/interfaces/__init__.py
+#   0399cd8c3a868bb8  libs/audit/interfaces/__init__.py
+#   c2ae3abc473d9df7  libs/db/interfaces/__init__.py
+#   0cc764b3a54664c9  libs/db/interfaces/connection_manager.py
+#   d1142a9bf634edd9  libs/authz/interfaces/__init__.py
+#   b56debe0c76e3009  libs/telemetry/interfaces/__init__.py
+#   65be7e497c276fcd  libs/jobs/interfaces/__init__.py
+#   7cdcc486dccc041c  libs/risk/interfaces/__init__.py
+#   9be1a6ea525a0a31  libs/logging/interfaces/__init__.py
+#   c825e8b711adf4ef  libs/logging/interfaces/logger.py

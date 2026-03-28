@@ -1,0 +1,26 @@
+"""FastAPI application factory."""
+from fastapi import FastAPI
+
+from services.api.routes import health
+
+
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application.
+    
+    Returns:
+        FastAPI: Configured application instance
+    """
+    app = FastAPI(
+        title="FXLab API",
+        description="Foreign Exchange Laboratory API",
+        version="0.1.0",
+    )
+    
+    # Register routers
+    app.include_router(health.router)
+    
+    return app
+
+
+# Application instance for ASGI servers
+app = create_app()

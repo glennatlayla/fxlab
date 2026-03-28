@@ -1,0 +1,1 @@
+"""Readiness service entry point."""

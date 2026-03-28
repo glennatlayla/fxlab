@@ -1,0 +1,62 @@
+"""
+Queue and compute contention routes.
+
+Responsibilities:
+- Expose GET /queues/contention for queue health and compute monitoring.
+- Return a ContentionReport-shaped response consumed by the UI dashboard.
+
+Does NOT:
+- Connect directly to queue backends (delegates to service layer).
+- Contain queue scheduling or dispatch logic.
+
+Example:
+    GET /queues/contention
+    → {"queues": [...], "overall_score": 0.0, "generated_at": "..."}
+"""
+
+from typing import Any
+
+import structlog
+from fastapi import APIRouter
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter()
+
+
+@router.get("/")
+async def list_queues() -> dict[str, Any]:
+    """
+    List all tracked queues (index endpoint).
+
+    Returns:
+        Basic queue list stub.
+    """
+    logger.info("list_queues.called")
+    return {"success": True, "data": []}
+
+
+@router.get("/contention")
+async def get_queue_contention() -> dict[str, Any]:
+    """
+    Return current queue depth and compute contention snapshot.
+
+    Provides the UI dashboard with an aggregate view of queue health.
+    In the stub phase all queues are reported as idle (score 0).  The
+    real implementation will delegate to a QueueServiceInterface adapter.
+
+    Returns:
+        ContentionReport-shaped JSON with ``queues``, ``overall_score``,
+        and ``generated_at`` fields.
+    """
+    from datetime import datetime, timezone
+
+    # Import here to allow mocking in tests via services.api.routes.queues
+    logger.info("queues.contention.requested")
+
+    # Stub — returns an idle report.  GREEN: delegates to QueueServiceInterface.
+    return {
+        "queues": [],
+        "overall_score": 0.0,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }

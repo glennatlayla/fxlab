@@ -1,0 +1,142 @@
+"""
+Unit test fixtures for Phase 2.
+
+This file provides shared fixtures for unit tests.
+All fixtures must be fast and use mocks/stubs for external dependencies.
+"""
+import pytest
+from pathlib import Path
+from typing import Generator
+from unittest.mock import MagicMock, Mock
+
+
+@pytest.fixture
+def mock_phase1_artifact_store() -> Mock:
+    """Mock Phase 1 artifact storage system."""
+    store = MagicMock()
+    store.store.return_value = "artifact-ulid-123"
+    store.retrieve.return_value = b"mock-content"
+    store.exists.return_value = True
+    return store
+
+
+@pytest.fixture
+def mock_phase1_dataset_registry() -> Mock:
+    """Mock Phase 1 dataset registry."""
+    registry = MagicMock()
+    registry.get_version.return_value = {
+        "dataset_version_id": "dv-ulid-123",
+        "status": "certified",
+        "path": "/mock/path/data.parquet"
+    }
+    return registry
+
+
+@pytest.fixture
+def mock_phase1_audit_ledger() -> Mock:
+    """Mock Phase 1 audit ledger."""
+    ledger = MagicMock()
+    ledger.record_event.return_value = "audit-event-ulid-123"
+    return ledger
+
+
+@pytest.fixture
+def mock_phase1_queue() -> Mock:
+    """Mock Phase 1 queue system."""
+    queue = MagicMock()
+    queue.enqueue.return_value = "job-ulid-123"
+    queue.get_status.return_value = "pending"
+    return queue
+
+
+@pytest.fixture
+def temp_project_root(tmp_path: Path) -> Generator[Path, None, None]:
+    """Provide a temporary project root for file system tests."""
+    # Create minimal structure
+    services = tmp_path / "services"
+    services.mkdir()
+    
+    libs = tmp_path / "libs"
+    libs.mkdir()
+    
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    
+    yield tmp_path
+
+# -- merged imports --
+from unittest.mock import Mock, AsyncMock
+
+def mock_db_session():
+    """Mock database session for unit tests."""
+    session = Mock()
+    session.commit = Mock()
+    session.rollback = Mock()
+    session.close = Mock()
+    session.execute = Mock()
+    session.scalar = Mock()
+    return session
+
+
+def mock_audit_service():
+    """Mock audit service for unit tests."""
+    service = Mock()
+    service.log_event = AsyncMock()
+    return service
+
+
+def mock_auth_context():
+    """Mock authentication context."""
+    context = Mock()
+    context.user_id = "01HQ7X9Z8K3M4N5P6Q7R8S9T0V"
+    context.role = "researcher"
+    context.permissions = {"read:runs", "write:promotions"}
+    return context
+
+# -- merged imports --
+from unittest.mock import AsyncMock, MagicMock
+
+def mock_rbac_service():
+    """Mock RBAC service for unit tests."""
+    service = MagicMock()
+    service.can_request_promotion = MagicMock(return_value=True)
+    return service
+
+
+def mock_rbac_service_forbidden():
+    """Mock RBAC service that denies permission."""
+    service = MagicMock()
+    service.can_request_promotion = MagicMock(return_value=False)
+    return service
+
+# -- merged imports --
+from datetime import datetime
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from libs.contracts.models import Base
+
+def mock_session():
+    """Mock SQLAlchemy session for unit tests."""
+    session = MagicMock(spec=Session)
+    return session
+
+
+def in_memory_db():
+    """In-memory SQLite database for schema tests."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    yield session
+    session.close()
+    Base.metadata.drop_all(engine)
+
+
+def sample_ulid():
+    """Sample ULID for testing."""
+    return "01HQZXYZ123456789ABCDEFGHJK"
+
+
+def sample_timestamp():
+    """Sample timestamp for testing."""
+    return datetime(2026, 3, 19, 12, 0, 0)

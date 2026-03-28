@@ -1,0 +1,137 @@
+version: '3.8'
+
+# FXLab Platform — Docker Compose runtime configuration
+#
+# Services:
+#   api      — FastAPI backend (Phase 3 governance & results)
+#   web      — React/Vite frontend
+#   postgres — PostgreSQL metadata database (M2+)
+#   redis    — Redis job queue / cache (M4+)
+#
+# All services use restart policies and health checks so that the
+# orchestrator can wait for dependencies to be ready before starting
+# dependent containers.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # API service — FastAPI backend
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: fxlab-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://fxlab:fxlab@postgres:5432/fxlab
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+      - ENVIRONMENT=development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    volumes:
+      - ./services/api:/app/services/api:ro
+      - ./libs:/app/libs:ro
+
+  # ---------------------------------------------------------------------------
+  # Web service — React/Vite frontend (served via nginx or vite dev server)
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fxlab-web
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://api:8000
+      - NODE_ENV=development
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — relational metadata database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: fxlab-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=fxlab
+      - POSTGRES_PASSWORD=fxlab
+      - POSTGRES_DB=fxlab
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fxlab -d fxlab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+
+  # ---------------------------------------------------------------------------
+  # Redis — job queue and cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: fxlab-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  fxlab-net:
+    driver: bridge
+    name: fxlab-network
+
+# ---------------------------------------------------------------------------
+# Volumes — persistent data across container restarts
+# ---------------------------------------------------------------------------
+volumes:
+  postgres-data:
+    name: fxlab-postgres-data
+  redis-data:
+    name: fxlab-redis-data
