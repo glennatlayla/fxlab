@@ -1,126 +1,131 @@
-<<<<<<< HEAD
-# FXLab Phase 3 — Web UX, Governance, and Results/Export Surfaces
+# FXLab
 
-## Overview
+Algorithmic trading platform for backtesting, paper trading, and live execution of equity, futures, and options strategies. Includes strategy authoring, governance workflows, risk management, and a web-based operator dashboard.
 
-Phase 3 implements the web UX layer on top of Phase 1 (operational infrastructure) and 
-Phase 2 (research/compiler/readiness APIs). This provides non-technical operators with:
+## Quick Start (Production Server)
 
-- Strategy draft authoring with autosave
-- Optimization monitoring and trial inspection
-- Readiness report review with blocker detail
-- Promotion request submission and governance tracking
-- Override visibility across all surfaces
-- Feed health monitoring
-- Export surfaces with lineage metadata
-- Artifact, audit, and queue browsing
+**One-liner install on a fresh Linux server:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/glennatlayla/fxlab/main/install.sh | sudo bash
+```
+
+This clones the repo to `/opt/fxlab`, builds all Docker containers, runs database migrations, installs a systemd service for boot persistence, and runs health checks. When it finishes, the platform is live.
+
+**Update an existing installation:**
+
+```bash
+sudo /opt/fxlab/install.sh
+```
+
+Same script, detects the existing install, pulls latest code, rebuilds containers, and restarts.
+
+## What Gets Deployed
+
+The install script starts a Docker Compose stack with these services:
+
+| Service    | Image / Build        | Port  | Purpose                                    |
+|------------|----------------------|-------|--------------------------------------------|
+| **nginx**  | nginx:1.25-alpine    | 80/443| TLS termination, reverse proxy             |
+| **api**    | services/api/Dockerfile | 8000 | FastAPI backend (strategies, governance, risk) |
+| **web**    | frontend/Dockerfile  | 3000  | React operator dashboard                   |
+| **postgres** | postgres:15-alpine | 5432  | Strategy metadata, audit ledger, governance |
+| **redis**  | redis:7-alpine       | 6379  | Rate limiting, job queue, cache            |
+| **keycloak** | keycloak:24.0      | 8080  | Identity provider (RS256 token issuance)   |
+| **jaeger** | jaegertracing/all-in-one:1.54 | 16686 | Distributed tracing (OpenTelemetry) |
+
+## Requirements (Production Host)
+
+- Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+)
+- Docker Engine 24+ with Compose v2
+- Git 2.25+
+- 4 GB RAM minimum (8 GB recommended)
+- 10 GB free disk space
+- Root or sudo access
+- SSH key for GitHub access (private repo)
+
+## Configuration
+
+On first install, the script creates `/opt/fxlab/.env` from `.env.production.template`. Edit it to set:
+
+```bash
+# Required secrets (no defaults — must be set)
+POSTGRES_PASSWORD=<strong-random-password>
+JWT_SECRET_KEY=<32+-byte-random-secret>
+KEYCLOAK_ADMIN_PASSWORD=<keycloak-admin-password>
+
+# Recommended production settings
+ENVIRONMENT=production
+LOG_LEVEL=WARNING
+ALLOWED_EXECUTION_MODES=shadow,paper    # Add "live" only when ready
+CORS_ALLOWED_ORIGINS=https://your-domain.com
+```
+
+Generate secrets:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+See `.env.example` for the full list of configuration options including database pool tuning, rate limiting, Azure Key Vault integration, and OpenTelemetry settings.
+
+## Managing the Platform
+
+```bash
+# View running containers and health status
+docker compose -f /opt/fxlab/docker-compose.prod.yml ps
+
+# View logs (all services, or a specific one)
+docker compose -f /opt/fxlab/docker-compose.prod.yml logs -f
+docker compose -f /opt/fxlab/docker-compose.prod.yml logs -f api
+
+# Restart a single service
+docker compose -f /opt/fxlab/docker-compose.prod.yml restart api
+
+# Stop everything
+docker compose -f /opt/fxlab/docker-compose.prod.yml down
+
+# Start everything
+docker compose -f /opt/fxlab/docker-compose.prod.yml up -d
+
+# Check API health
+curl http://localhost:8000/health
+```
+
+## Endpoints
+
+Once running, access:
+
+- **Operator Dashboard:** http://your-host (port 80, proxied through nginx)
+- **API Docs:** http://your-host:8000/docs (interactive Swagger UI)
+- **Keycloak Admin:** http://your-host:8080 (user management)
+- **Jaeger UI:** http://your-host:16686 (distributed tracing)
 
 ## Architecture
 
 ```
 services/
-├── api/              # FastAPI application layer (routes, models)
-├── domain/           # Business logic (services, use cases)
-└── infrastructure/   # External systems (database, storage, queues)
+  api/            FastAPI backend — routes, middleware, repositories
+    routes/         HTTP endpoints (governance, audit, strategies, risk)
+    services/       Business logic (backtesting, execution, risk gates)
+    repositories/   Data access (PostgreSQL via SQLAlchemy)
+    middleware/     Rate limiting, body size, correlation ID
+    infrastructure/ Config, tracing, secrets, circuit breaker
+  worker/         Background workers (market data, strategy execution)
+  scheduler/      Scheduled jobs (data collection, rebalancing)
 
-tests/
-├── api/              # API endpoint tests
-├── domain/           # Business logic tests
-└── integration/      # Cross-layer integration tests
+libs/
+  contracts/      Pydantic models, schemas, interfaces
+  broker/         Brokerage adapters (Alpaca, paper trading)
+  indicators/     Technical indicators (MACD, RSI, Stochastic, etc.)
+
+frontend/         React/Vite operator dashboard
 ```
 
 ## Development Setup
 
-### Prerequisites
-
-- Python 3.11+
-- pip or uv
-
-### Installation
-
-```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements-dev.txt
-```
-
-### Running Tests
-
-```bash
-# Run full test suite with coverage
-pytest
-
-# Run specific test file
-pytest tests/api/test_main.py
-
-# Run with verbose output
-pytest -v
-
-# Generate HTML coverage report
-pytest --cov-report=html
-open htmlcov/index.html
-```
-
-### Code Quality
-
-```bash
-# Format code
-ruff format .
-
-# Lint code
-ruff check .
-
-# Type check
-mypy services/
-```
-
-### Running the API
-
-```bash
-# Development server with auto-reload
-uvicorn services.api.main:app --reload
-
-# Production server
-uvicorn services.api.main:app --host 0.0.0.0 --port 8000
-```
-
-API will be available at:
-- http://localhost:8000
-- Interactive docs: http://localhost:8000/docs
-- Alternative docs: http://localhost:8000/redoc
-
-## Quality Standards
-
-All code must pass:
-- **Formatting:** `ruff format --check .`
-- **Linting:** `ruff check .`
-- **Type checking:** `mypy services/`
-- **Tests:** `pytest` with >= 80% coverage overall, >= 85% new code, >= 90% services
-
-## Non-Negotiable Rules
-
-1. No business logic in controllers
-2. All mutations map to auditable backend actions
-3. Override state visible everywhere relevant
-4. Exports are zip bundles with lineage metadata
-5. Blockers include owner and next step
-6. Draft work is never silently discarded
-7. High-density charts are downsampled server-side
-8. Governance evidence links are required URIs
-
-See `docs/ARCHITECTURE.md` for detailed design decisions.
-
-## Project Status
-
-**Current Phase:** Bootstrap (M0)  
-**Version:** 0.1.0-bootstrap
+See [DEVELOPMENT.md](DEVELOPMENT.md) for setting up a local development environment, running tests, and using the quality-gated `ship.sh` workflow.
 
 ## License
 
-Proprietary - Internal Use Only
-=======
-# fxlab
->>>>>>> 5511e60521cc6152eec611323f7d78237cf69900
+Proprietary — Internal Use Only
