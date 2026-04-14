@@ -5,7 +5,7 @@ All Phase 3 services must implement environment-based configuration
 with validation and debug introspection.
 """
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Protocol
 
 from libs.contracts.phase3.runtime import ServiceConfiguration

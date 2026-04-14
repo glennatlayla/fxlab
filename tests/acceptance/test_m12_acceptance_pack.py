@@ -26,6 +26,27 @@ from fastapi.testclient import TestClient
 
 from services.api.main import app
 
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
+
+# Reviewer-scoped auth headers — required for approval endpoints that
+# enforce the "approvals:write" scope (operator role lacks this scope).
+_REVIEWER_TOKEN: str | None = None
+
+
+def _get_reviewer_headers() -> dict[str, str]:
+    """Return auth headers for a reviewer-scoped user (has approvals:write)."""
+    global _REVIEWER_TOKEN
+    if _REVIEWER_TOKEN is None:
+        from services.api.auth import create_access_token
+
+        _REVIEWER_TOKEN = create_access_token(
+            user_id="01HABCDEF00000000000000099",
+            role="reviewer",
+            expires_minutes=60,
+        )
+    return {"Authorization": f"Bearer {_REVIEWER_TOKEN}"}
+
+
 # ---------------------------------------------------------------------------
 # Shared client fixture
 # ---------------------------------------------------------------------------
@@ -38,7 +59,30 @@ def client() -> TestClient:
 
     All routes must handle requests using their default DI providers (bootstrap
     mocks) so that acceptance tests exercise the full stack.
+
+    Seeds a Run record with a known ULID so that /runs/{run_id}/results and
+    /runs/{run_id}/readiness endpoints can return 200 with real data.
     """
+    from libs.contracts.models import Run
+    from services.api.db import SessionLocal
+
+    # Seed the Run record that TestRunEndpoints expects.
+    db = SessionLocal()
+    try:
+        existing = db.get(Run, "01HQ7X9Z8K3M4N5P6Q7R8S9T0A")
+        if existing is None:
+            run = Run(
+                id="01HQ7X9Z8K3M4N5P6Q7R8S9T0A",
+                run_type="backtest",
+                status="completed",
+            )
+            db.add(run)
+            db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
     return TestClient(app)
 
 
@@ -134,7 +178,7 @@ class TestRunEndpoints:
         WHEN GET /runs/{run_id}/results is requested
         THEN 200 is returned.
         """
-        resp = client.get(f"/runs/{self._VALID_RUN_ID}/results")
+        resp = client.get(f"/runs/{self._VALID_RUN_ID}/results", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_run_results_shape(self, client: TestClient) -> None:
@@ -143,7 +187,7 @@ class TestRunEndpoints:
         WHEN GET /runs/{run_id}/results is requested
         THEN response body contains 'run_id', 'metrics', 'artifacts'.
         """
-        body = client.get(f"/runs/{self._VALID_RUN_ID}/results").json()
+        body = client.get(f"/runs/{self._VALID_RUN_ID}/results", headers=AUTH_HEADERS).json()
         for key in ("run_id", "metrics", "artifacts"):
             assert key in body, f"Missing '{key}' in results: {body}"
 
@@ -153,7 +197,7 @@ class TestRunEndpoints:
         WHEN GET /runs/{run_id}/readiness is requested
         THEN 200 is returned.
         """
-        resp = client.get(f"/runs/{self._VALID_RUN_ID}/readiness")
+        resp = client.get(f"/runs/{self._VALID_RUN_ID}/readiness", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_run_readiness_shape(self, client: TestClient) -> None:
@@ -162,7 +206,7 @@ class TestRunEndpoints:
         WHEN GET /runs/{run_id}/readiness is requested
         THEN response body contains 'run_id', 'readiness_grade', 'blockers'.
         """
-        body = client.get(f"/runs/{self._VALID_RUN_ID}/readiness").json()
+        body = client.get(f"/runs/{self._VALID_RUN_ID}/readiness", headers=AUTH_HEADERS).json()
         for key in ("run_id", "readiness_grade", "blockers"):
             assert key in body, f"Missing '{key}' in readiness: {body}"
 
@@ -190,7 +234,7 @@ class TestGovernanceEndpoints:
             "requester_id": "01HQ7X9Z8K3M4N5P6Q7R8S9T0C",
             "target_environment": "paper",
         }
-        resp = client.post("/promotions/request", json=payload)
+        resp = client.post("/promotions/request", json=payload, headers=AUTH_HEADERS)
         assert resp.status_code in (200, 201, 202), (
             f"Expected 2xx from promotions, got {resp.status_code}: {resp.text}"
         )
@@ -204,7 +248,9 @@ class TestGovernanceEndpoints:
         Note: Bootstrap mock may return 2xx for any ID.
         """
         approval_id = "01HQ7X9Z8K3M4N5P6Q7R8S9T0D"
-        resp = client.post(f"/approvals/{approval_id}/approve", json={})
+        resp = client.post(
+            f"/approvals/{approval_id}/approve", json={}, headers=_get_reviewer_headers()
+        )
         assert resp.status_code in (200, 201, 202, 404), (
             f"Unexpected status from approvals: {resp.status_code}: {resp.text}"
         )
@@ -226,7 +272,7 @@ class TestAuditEndpoints:
         WHEN GET /audit is requested
         THEN 200 is returned.
         """
-        resp = client.get("/audit")
+        resp = client.get("/audit", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_audit_list_shape(self, client: TestClient) -> None:
@@ -235,7 +281,7 @@ class TestAuditEndpoints:
         WHEN GET /audit is requested
         THEN response body contains 'events' and 'next_cursor'.
         """
-        body = client.get("/audit").json()
+        body = client.get("/audit", headers=AUTH_HEADERS).json()
         for key in ("events", "next_cursor"):
             assert key in body, f"Missing '{key}' in audit list: {body}"
 
@@ -245,7 +291,7 @@ class TestAuditEndpoints:
         WHEN GET /audit is requested
         THEN 'events' is a list.
         """
-        body = client.get("/audit").json()
+        body = client.get("/audit", headers=AUTH_HEADERS).json()
         assert isinstance(body["events"], list), f"'events' not a list: {type(body['events'])}"
 
     def test_audit_detail_unknown_id_returns_404(self, client: TestClient) -> None:
@@ -254,7 +300,7 @@ class TestAuditEndpoints:
         WHEN GET /audit/{audit_event_id} is requested
         THEN 404 is returned.
         """
-        resp = client.get("/audit/01HQZZZZZZZZZZZZZZZZZZZZZZ")
+        resp = client.get("/audit/01HQZZZZZZZZZZZZZZZZZZZZZZ", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
 
@@ -274,7 +320,7 @@ class TestQueueEndpoints:
         WHEN GET /queues/ is requested
         THEN 200 is returned.
         """
-        resp = client.get("/queues/")
+        resp = client.get("/queues/", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_queues_list_contains_queues_key(self, client: TestClient) -> None:
@@ -283,18 +329,16 @@ class TestQueueEndpoints:
         WHEN GET /queues/ is requested
         THEN response body contains a 'queues' key.
         """
-        body = client.get("/queues/").json()
+        body = client.get("/queues/", headers=AUTH_HEADERS).json()
         assert "queues" in body, f"Missing 'queues' key: {body}"
 
-    def test_queues_contention_unknown_class_returns_404(
-        self, client: TestClient
-    ) -> None:
+    def test_queues_contention_unknown_class_returns_404(self, client: TestClient) -> None:
         """
         GIVEN an unknown queue_class
         WHEN GET /queues/{queue_class}/contention is requested
         THEN 404 is returned.
         """
-        resp = client.get("/queues/nonexistent_class/contention")
+        resp = client.get("/queues/nonexistent_class/contention", headers=AUTH_HEADERS)
         assert resp.status_code == 404, (
             f"Expected 404 for unknown queue class, got {resp.status_code}: {resp.text}"
         )
@@ -316,7 +360,7 @@ class TestFeedEndpoints:
         WHEN GET /feeds is requested
         THEN 200 is returned.
         """
-        resp = client.get("/feeds")
+        resp = client.get("/feeds", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_feeds_list_contains_feeds_key(self, client: TestClient) -> None:
@@ -325,7 +369,7 @@ class TestFeedEndpoints:
         WHEN GET /feeds is requested
         THEN response body contains 'feeds'.
         """
-        body = client.get("/feeds").json()
+        body = client.get("/feeds", headers=AUTH_HEADERS).json()
         assert "feeds" in body, f"Missing 'feeds' key: {body}"
 
     def test_feeds_feeds_is_list(self, client: TestClient) -> None:
@@ -334,7 +378,7 @@ class TestFeedEndpoints:
         WHEN GET /feeds is requested
         THEN 'feeds' is a list.
         """
-        body = client.get("/feeds").json()
+        body = client.get("/feeds", headers=AUTH_HEADERS).json()
         assert isinstance(body["feeds"], list), f"Expected list: {body}"
 
     def test_feed_detail_unknown_id_returns_404(self, client: TestClient) -> None:
@@ -343,7 +387,7 @@ class TestFeedEndpoints:
         WHEN GET /feeds/{feed_id} is requested
         THEN 404 is returned.
         """
-        resp = client.get("/feeds/01HQZZZZZZZZZZZZZZZZZZZZZZ")
+        resp = client.get("/feeds/01HQZZZZZZZZZZZZZZZZZZZZZZ", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
 
     def test_feed_health_returns_200(self, client: TestClient) -> None:
@@ -352,7 +396,7 @@ class TestFeedEndpoints:
         WHEN GET /feed-health is requested
         THEN 200 is returned.
         """
-        resp = client.get("/feed-health")
+        resp = client.get("/feed-health", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_feed_health_contains_feeds_key(self, client: TestClient) -> None:
@@ -361,7 +405,7 @@ class TestFeedEndpoints:
         WHEN GET /feed-health is requested
         THEN response body contains 'feeds' (feed health snapshot list).
         """
-        body = client.get("/feed-health").json()
+        body = client.get("/feed-health", headers=AUTH_HEADERS).json()
         assert "feeds" in body, f"Missing 'feeds' key: {body}"
 
 
@@ -381,7 +425,7 @@ class TestParityEndpoints:
         WHEN GET /parity/events is requested
         THEN 200 is returned.
         """
-        resp = client.get("/parity/events")
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_parity_events_contains_events_key(self, client: TestClient) -> None:
@@ -390,7 +434,7 @@ class TestParityEndpoints:
         WHEN GET /parity/events is requested
         THEN response body contains 'events'.
         """
-        body = client.get("/parity/events").json()
+        body = client.get("/parity/events", headers=AUTH_HEADERS).json()
         assert "events" in body, f"Missing 'events' key: {body}"
 
     def test_parity_events_filter_by_severity(self, client: TestClient) -> None:
@@ -399,18 +443,16 @@ class TestParityEndpoints:
         WHEN GET /parity/events is requested
         THEN 200 is returned (empty list is valid).
         """
-        resp = client.get("/parity/events?severity=CRITICAL")
+        resp = client.get("/parity/events?severity=CRITICAL", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
-    def test_parity_event_detail_unknown_returns_404(
-        self, client: TestClient
-    ) -> None:
+    def test_parity_event_detail_unknown_returns_404(self, client: TestClient) -> None:
         """
         GIVEN an unknown parity_event_id
         WHEN GET /parity/events/{id} is requested
         THEN 404 is returned.
         """
-        resp = client.get("/parity/events/01HQZZZZZZZZZZZZZZZZZZZZZZ")
+        resp = client.get("/parity/events/01HQZZZZZZZZZZZZZZZZZZZZZZ", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
 
     def test_parity_summary_returns_200(self, client: TestClient) -> None:
@@ -419,7 +461,7 @@ class TestParityEndpoints:
         WHEN GET /parity/summary is requested
         THEN 200 is returned.
         """
-        resp = client.get("/parity/summary")
+        resp = client.get("/parity/summary", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_parity_summary_contains_summaries_key(self, client: TestClient) -> None:
@@ -428,7 +470,7 @@ class TestParityEndpoints:
         WHEN GET /parity/summary is requested
         THEN response body contains 'summaries'.
         """
-        body = client.get("/parity/summary").json()
+        body = client.get("/parity/summary", headers=AUTH_HEADERS).json()
         assert "summaries" in body, f"Missing 'summaries' key: {body}"
 
 
@@ -442,15 +484,13 @@ class TestSymbolLineageEndpoints:
     Acceptance tests for /symbols/{symbol}/lineage.
     """
 
-    def test_symbol_lineage_unknown_symbol_returns_404(
-        self, client: TestClient
-    ) -> None:
+    def test_symbol_lineage_unknown_symbol_returns_404(self, client: TestClient) -> None:
         """
         GIVEN an unknown symbol
         WHEN GET /symbols/{symbol}/lineage is requested
         THEN 404 is returned.
         """
-        resp = client.get("/symbols/ZZZZZZZZZ/lineage")
+        resp = client.get("/symbols/ZZZZZZZZZ/lineage", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
 
 
@@ -470,7 +510,7 @@ class TestArtifactEndpoints:
         WHEN GET /artifacts is requested
         THEN 200 is returned.
         """
-        resp = client.get("/artifacts")
+        resp = client.get("/artifacts", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_artifacts_list_contains_artifacts_key(self, client: TestClient) -> None:
@@ -479,7 +519,7 @@ class TestArtifactEndpoints:
         WHEN GET /artifacts is requested
         THEN response body contains 'artifacts'.
         """
-        body = client.get("/artifacts").json()
+        body = client.get("/artifacts", headers=AUTH_HEADERS).json()
         assert "artifacts" in body, f"Missing 'artifacts' key: {body}"
 
     def test_artifact_download_unknown_returns_404(self, client: TestClient) -> None:
@@ -488,7 +528,7 @@ class TestArtifactEndpoints:
         WHEN GET /artifacts/{artifact_id}/download is requested
         THEN 404 is returned.
         """
-        resp = client.get("/artifacts/01HQZZZZZZZZZZZZZZZZZZZZZZ/download")
+        resp = client.get("/artifacts/01HQZZZZZZZZZZZZZZZZZZZZZZ/download", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
 
 
@@ -508,18 +548,16 @@ class TestCertificationEndpoints:
         WHEN GET /data/certification is requested
         THEN 200 is returned.
         """
-        resp = client.get("/data/certification")
+        resp = client.get("/data/certification", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
-    def test_certification_list_contains_certifications_key(
-        self, client: TestClient
-    ) -> None:
+    def test_certification_list_contains_certifications_key(self, client: TestClient) -> None:
         """
         GIVEN no filters
         WHEN GET /data/certification is requested
         THEN response body contains 'certifications'.
         """
-        body = client.get("/data/certification").json()
+        body = client.get("/data/certification", headers=AUTH_HEADERS).json()
         assert "certifications" in body, f"Missing 'certifications' key: {body}"
 
 
@@ -548,7 +586,7 @@ class TestObservabilityEndpoints:
         WHEN GET /health/dependencies is requested
         THEN 200 is returned.
         """
-        resp = client.get("/health/dependencies")
+        resp = client.get("/health/dependencies", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_health_dependencies_has_overall_status(self, client: TestClient) -> None:
@@ -557,7 +595,7 @@ class TestObservabilityEndpoints:
         WHEN GET /health/dependencies is requested
         THEN response body contains 'overall_status'.
         """
-        body = client.get("/health/dependencies").json()
+        body = client.get("/health/dependencies", headers=AUTH_HEADERS).json()
         assert "overall_status" in body, f"Missing 'overall_status': {body}"
 
     def test_health_diagnostics_returns_200(self, client: TestClient) -> None:
@@ -566,7 +604,7 @@ class TestObservabilityEndpoints:
         WHEN GET /health/diagnostics is requested
         THEN 200 is returned.
         """
-        resp = client.get("/health/diagnostics")
+        resp = client.get("/health/diagnostics", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200: {resp.text}"
 
     def test_health_diagnostics_has_count_fields(self, client: TestClient) -> None:
@@ -575,7 +613,7 @@ class TestObservabilityEndpoints:
         WHEN GET /health/diagnostics is requested
         THEN response body contains all four count fields.
         """
-        body = client.get("/health/diagnostics").json()
+        body = client.get("/health/diagnostics", headers=AUTH_HEADERS).json()
         for key in (
             "queue_contention_count",
             "feed_health_count",

@@ -50,6 +50,7 @@ from fastapi.responses import JSONResponse
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.queue_repository import QueueRepositoryInterface
 from libs.contracts.queue import QueueContentionResponse, QueueSnapshotResponse
+from services.api.auth import AuthenticatedUser, require_scope
 
 logger = structlog.get_logger(__name__)
 
@@ -65,21 +66,14 @@ def get_queue_repository() -> QueueRepositoryInterface:
     """
     Provide a QueueRepositoryInterface implementation.
 
+    Always returns the Celery/Redis-backed repository (real queue adapter).
+
     Returns:
-        MockQueueRepository bootstrap stub until Celery/Redis wiring is complete.
-
-    Note:
-        ISS-017 — Wire CeleryQueueRepository via lifespan DI container.
+        QueueRepositoryInterface implementation (Celery-backed).
     """
-    import os
+    from services.api.repositories.celery_queue_repository import CeleryQueueRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.repositories.celery_queue_repository import CeleryQueueRepository
-
-        return CeleryQueueRepository()
-
-    from libs.contracts.mocks.mock_queue_repository import MockQueueRepository  # pragma: no cover
-    return MockQueueRepository()  # pragma: no cover
+    return CeleryQueueRepository()
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +145,7 @@ def _serialize_queue_list(
     return {
         "queues": [_serialize_snapshot(s) for s in snapshots],
         "generated_at": (
-            generated_at.isoformat()
-            if hasattr(generated_at, "isoformat")
-            else str(generated_at)
+            generated_at.isoformat() if hasattr(generated_at, "isoformat") else str(generated_at)
         ),
     }
 
@@ -167,6 +159,7 @@ def _serialize_queue_list(
 def list_queues(
     x_correlation_id: str = "no-corr",
     repo: QueueRepositoryInterface = Depends(get_queue_repository),
+    user: AuthenticatedUser = Depends(require_scope("operator:read")),
 ) -> JSONResponse:
     """
     Return all registered queue snapshots.
@@ -183,13 +176,14 @@ def list_queues(
         → {"queues": [...], "generated_at": "..."}
     """
     corr = x_correlation_id or "no-corr"
-    logger.info("queues.list.request", correlation_id=corr)
+    logger.info("queues.list.request", correlation_id=corr, component="queues")
     snapshots = repo.list(correlation_id=corr)
     generated_at = datetime.now(timezone.utc)
     logger.info(
         "queues.list.response",
         queue_count=len(snapshots),
         correlation_id=corr,
+        component="queues",
     )
     return JSONResponse(content=_serialize_queue_list(snapshots, generated_at))
 
@@ -199,6 +193,7 @@ def get_queue_contention(
     queue_class: str,
     x_correlation_id: str = "no-corr",
     repo: QueueRepositoryInterface = Depends(get_queue_repository),
+    user: AuthenticatedUser = Depends(require_scope("operator:read")),
 ) -> JSONResponse:
     """
     Return the contention snapshot for a specific queue class.
@@ -219,17 +214,22 @@ def get_queue_contention(
         → {"queue_class": "research", "depth": 3, "running": 1, ...}
     """
     corr = x_correlation_id or "no-corr"
-    logger.info("queues.contention.request", queue_class=queue_class, correlation_id=corr)
+    logger.info(
+        "queues.contention.request",
+        queue_class=queue_class,
+        correlation_id=corr,
+        component="queues",
+    )
     try:
         contention = repo.find_by_class(queue_class, correlation_id=corr)
-    except NotFoundError as exc:
+    except NotFoundError:
         logger.warning(
             "queues.contention.not_found",
             queue_class=queue_class,
-            detail=str(exc),
             correlation_id=corr,
+            component="queues",
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Queue not found.") from None
 
     logger.info(
         "queues.contention.response",
@@ -237,5 +237,6 @@ def get_queue_contention(
         depth=contention.depth,
         contention_score=contention.contention_score,
         correlation_id=corr,
+        component="queues",
     )
     return JSONResponse(content=_serialize_contention(contention))

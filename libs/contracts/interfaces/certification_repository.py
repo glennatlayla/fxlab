@@ -59,9 +59,7 @@ class CertificationRepositoryInterface(ABC):
         ...
 
     @abstractmethod
-    def find_by_feed_id(
-        self, feed_id: str, correlation_id: str
-    ) -> CertificationEvent:
+    def find_by_feed_id(self, feed_id: str, correlation_id: str) -> CertificationEvent:
         """
         Return the certification event for a specific feed.
 

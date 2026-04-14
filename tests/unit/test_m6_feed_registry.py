@@ -20,7 +20,6 @@ LL-007 note: Use model_construct() for Pydantic models with Optional[str] fields
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,12 +30,13 @@ from libs.contracts.feed import (
     FeedConfigVersion,
     FeedConnectivityResult,
     FeedDetailResponse,
-    FeedListResponse,
     FeedResponse,
 )
 from libs.contracts.feed_health import Anomaly, AnomalyType, FeedHealthReport, FeedHealthStatus
 from libs.contracts.mocks.mock_feed_health_repository import MockFeedHealthRepository
 from libs.contracts.mocks.mock_feed_repository import MockFeedRepository
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Shared test data constants
@@ -445,7 +445,7 @@ class TestFeedsListEndpoint:
 
         FAILS: feeds.py stub does not use FeedRepositoryInterface.
         """
-        resp = client.get("/feeds")
+        resp = client.get("/feeds", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_get_feeds_returns_feeds_list(self, client: TestClient) -> None:
@@ -456,7 +456,7 @@ class TestFeedsListEndpoint:
 
         FAILS: stub returns {}.
         """
-        resp = client.get("/feeds")
+        resp = client.get("/feeds", headers=AUTH_HEADERS)
         body = resp.json()
         assert "feeds" in body, f"Expected 'feeds' key in response: {body}"
         assert len(body["feeds"]) == 2
@@ -467,7 +467,7 @@ class TestFeedsListEndpoint:
         WHEN GET /feeds is requested
         THEN total_count == 2.
         """
-        resp = client.get("/feeds")
+        resp = client.get("/feeds", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("total_count") == 2
 
@@ -477,7 +477,7 @@ class TestFeedsListEndpoint:
         WHEN GET /feeds?limit=1 is requested
         THEN one feed is returned and total_count is still 2.
         """
-        resp = client.get("/feeds?limit=1")
+        resp = client.get("/feeds?limit=1", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["feeds"]) == 1
         assert body["total_count"] == 2
@@ -488,7 +488,7 @@ class TestFeedsListEndpoint:
         WHEN GET /feeds?offset=1 is requested
         THEN one feed is returned.
         """
-        resp = client.get("/feeds?offset=1")
+        resp = client.get("/feeds?offset=1", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["feeds"]) == 1
 
@@ -498,7 +498,7 @@ class TestFeedsListEndpoint:
         WHEN GET /feeds is requested
         THEN each item contains id, name, provider, is_active, is_quarantined.
         """
-        resp = client.get("/feeds")
+        resp = client.get("/feeds", headers=AUTH_HEADERS)
         body = resp.json()
         required = {"id", "name", "provider", "is_active", "is_quarantined"}
         for item in body["feeds"]:
@@ -518,7 +518,7 @@ class TestFeedsListEndpoint:
         app.dependency_overrides[get_feed_repository] = lambda: empty_repo
         client = TestClient(app)
         try:
-            resp = client.get("/feeds")
+            resp = client.get("/feeds", headers=AUTH_HEADERS)
             body = resp.json()
             assert body["feeds"] == []
             assert body["total_count"] == 0
@@ -565,7 +565,7 @@ class TestFeedDetailEndpoint:
 
         FAILS: stub does not have this endpoint.
         """
-        resp = client.get(f"/feeds/{_FEED_ULID_1}")
+        resp = client.get(f"/feeds/{_FEED_ULID_1}", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_get_feed_detail_returns_feed_fields(self, client: TestClient) -> None:
@@ -574,7 +574,7 @@ class TestFeedDetailEndpoint:
         WHEN GET /feeds/{feed_id} is requested
         THEN response contains a 'feed' key with expected fields.
         """
-        resp = client.get(f"/feeds/{_FEED_ULID_1}")
+        resp = client.get(f"/feeds/{_FEED_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         assert "feed" in body, f"Expected 'feed' key: {body}"
         assert body["feed"]["id"] == _FEED_ULID_1
@@ -586,7 +586,7 @@ class TestFeedDetailEndpoint:
         WHEN GET /feeds/{feed_id} is requested
         THEN response contains 'version_history' with 2 entries.
         """
-        resp = client.get(f"/feeds/{_FEED_ULID_1}")
+        resp = client.get(f"/feeds/{_FEED_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         assert "version_history" in body, f"Expected 'version_history' key: {body}"
         assert len(body["version_history"]) == 2
@@ -597,7 +597,7 @@ class TestFeedDetailEndpoint:
         WHEN GET /feeds/{feed_id} is requested
         THEN each version entry has version, config, created_at, created_by.
         """
-        resp = client.get(f"/feeds/{_FEED_ULID_1}")
+        resp = client.get(f"/feeds/{_FEED_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         for v in body["version_history"]:
             for field in ("version", "config", "created_at", "created_by"):
@@ -609,7 +609,7 @@ class TestFeedDetailEndpoint:
         WHEN GET /feeds/{feed_id} is requested
         THEN response contains 'connectivity_tests' with 1 entry.
         """
-        resp = client.get(f"/feeds/{_FEED_ULID_1}")
+        resp = client.get(f"/feeds/{_FEED_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         assert "connectivity_tests" in body, f"Expected 'connectivity_tests' key: {body}"
         assert len(body["connectivity_tests"]) == 1
@@ -620,7 +620,7 @@ class TestFeedDetailEndpoint:
         WHEN GET /feeds/{feed_id} is requested
         THEN each test entry has id, feed_id, tested_at, status.
         """
-        resp = client.get(f"/feeds/{_FEED_ULID_1}")
+        resp = client.get(f"/feeds/{_FEED_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         for t in body["connectivity_tests"]:
             for field in ("id", "feed_id", "tested_at", "status"):
@@ -632,7 +632,7 @@ class TestFeedDetailEndpoint:
         WHEN GET /feeds/{feed_id} is requested
         THEN 404 is returned.
         """
-        resp = client.get(f"/feeds/{_FEED_ULID_3}")
+        resp = client.get(f"/feeds/{_FEED_ULID_3}", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
 
@@ -677,7 +677,7 @@ class TestFeedHealthEndpoint:
 
         FAILS: stub does not use FeedHealthRepositoryInterface.
         """
-        resp = client.get("/feed-health")
+        resp = client.get("/feed-health", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_get_feed_health_returns_feeds_list(self, client: TestClient) -> None:
@@ -688,7 +688,7 @@ class TestFeedHealthEndpoint:
 
         FAILS: stub returns empty list always.
         """
-        resp = client.get("/feed-health")
+        resp = client.get("/feed-health", headers=AUTH_HEADERS)
         body = resp.json()
         assert "feeds" in body, f"Expected 'feeds' key: {body}"
         assert len(body["feeds"]) == 2
@@ -699,7 +699,7 @@ class TestFeedHealthEndpoint:
         WHEN GET /feed-health is requested
         THEN response contains a 'generated_at' timestamp string.
         """
-        resp = client.get("/feed-health")
+        resp = client.get("/feed-health", headers=AUTH_HEADERS)
         body = resp.json()
         assert "generated_at" in body, f"Expected 'generated_at' key: {body}"
         assert isinstance(body["generated_at"], str)
@@ -710,7 +710,7 @@ class TestFeedHealthEndpoint:
         WHEN GET /feed-health is requested
         THEN each entry contains feed_id and status.
         """
-        resp = client.get("/feed-health")
+        resp = client.get("/feed-health", headers=AUTH_HEADERS)
         body = resp.json()
         for entry in body["feeds"]:
             assert "feed_id" in entry, f"Entry missing 'feed_id': {entry}"
@@ -722,7 +722,7 @@ class TestFeedHealthEndpoint:
         WHEN GET /feed-health is requested
         THEN response contains both statuses.
         """
-        resp = client.get("/feed-health")
+        resp = client.get("/feed-health", headers=AUTH_HEADERS)
         body = resp.json()
         statuses = {e["status"] for e in body["feeds"]}
         assert "healthy" in statuses
@@ -741,7 +741,7 @@ class TestFeedHealthEndpoint:
         app.dependency_overrides[get_feed_health_repository] = lambda: empty_repo
         client = TestClient(app)
         try:
-            resp = client.get("/feed-health")
+            resp = client.get("/feed-health", headers=AUTH_HEADERS)
             body = resp.json()
             assert body["feeds"] == []
         finally:
@@ -782,7 +782,7 @@ class TestFeedHealthEndpoint:
         app.dependency_overrides[get_feed_health_repository] = lambda: anomaly_repo
         anomaly_client = TestClient(app)
         try:
-            resp = anomaly_client.get("/feed-health")
+            resp = anomaly_client.get("/feed-health", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
             feeds = body["feeds"]
@@ -809,7 +809,7 @@ class TestFeedHealthEndpoint:
 
         app.dependency_overrides.clear()  # ensure no leftover overrides
         bare_client = TestClient(app)
-        resp = bare_client.get("/feed-health")
+        resp = bare_client.get("/feed-health", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         body = resp.json()
         assert "feeds" in body

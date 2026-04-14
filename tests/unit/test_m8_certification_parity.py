@@ -31,6 +31,8 @@ from libs.contracts.mocks.mock_certification_repository import (
 from libs.contracts.mocks.mock_parity_repository import MockParityRepository
 from libs.contracts.parity import ParityEvent, ParityEventSeverity
 
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
+
 # ---------------------------------------------------------------------------
 # Shared test data constants
 # ---------------------------------------------------------------------------
@@ -264,15 +266,11 @@ class TestDataCertificationEndpoint:
         return repo
 
     @pytest.fixture
-    def client_mixed(
-        self, cert_repo_mixed: MockCertificationRepository
-    ) -> TestClient:
+    def client_mixed(self, cert_repo_mixed: MockCertificationRepository) -> TestClient:
         from services.api.main import app
         from services.api.routes.data_certification import get_certification_repository
 
-        app.dependency_overrides[get_certification_repository] = (
-            lambda: cert_repo_mixed
-        )
+        app.dependency_overrides[get_certification_repository] = lambda: cert_repo_mixed
         tc = TestClient(app)
         yield tc
         app.dependency_overrides.clear()
@@ -285,21 +283,17 @@ class TestDataCertificationEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client_mixed.get("/data/certification")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client_mixed.get("/data/certification", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
-    def test_certification_contains_required_keys(
-        self, client_mixed: TestClient
-    ) -> None:
+    def test_certification_contains_required_keys(self, client_mixed: TestClient) -> None:
         """
         GIVEN feeds in the repository
         WHEN GET /data/certification is requested
         THEN response contains 'certifications', 'total_count', 'blocked_count',
              'certified_count', and 'generated_at'.
         """
-        resp = client_mixed.get("/data/certification")
+        resp = client_mixed.get("/data/certification", headers=AUTH_HEADERS)
         body = resp.json()
         for key in (
             "certifications",
@@ -310,15 +304,13 @@ class TestDataCertificationEndpoint:
         ):
             assert key in body, f"Missing key '{key}': {body}"
 
-    def test_certification_counts_are_correct(
-        self, client_mixed: TestClient
-    ) -> None:
+    def test_certification_counts_are_correct(self, client_mixed: TestClient) -> None:
         """
         GIVEN 2 certified and 1 blocked feed
         WHEN GET /data/certification is requested
         THEN total_count=3, blocked_count=1, certified_count=2.
         """
-        resp = client_mixed.get("/data/certification")
+        resp = client_mixed.get("/data/certification", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["total_count"] == 3, f"total_count wrong: {body}"
         assert body["blocked_count"] == 1, f"blocked_count wrong: {body}"
@@ -332,11 +324,9 @@ class TestDataCertificationEndpoint:
         WHEN GET /data/certification is requested
         THEN 'certifications' list has 3 items.
         """
-        resp = client_mixed.get("/data/certification")
+        resp = client_mixed.get("/data/certification", headers=AUTH_HEADERS)
         body = resp.json()
-        assert len(body["certifications"]) == 3, (
-            f"Expected 3 certifications: {body}"
-        )
+        assert len(body["certifications"]) == 3, f"Expected 3 certifications: {body}"
 
     def test_certification_empty_repository_returns_zero_counts(self) -> None:
         """
@@ -353,7 +343,7 @@ class TestDataCertificationEndpoint:
         app.dependency_overrides[get_certification_repository] = lambda: empty_repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/data/certification")
+            resp = tc.get("/data/certification", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
             assert body.get("certifications") == []
@@ -363,23 +353,17 @@ class TestDataCertificationEndpoint:
         finally:
             app.dependency_overrides.clear()
 
-    def test_certification_blocked_feed_has_reason(
-        self, client_mixed: TestClient
-    ) -> None:
+    def test_certification_blocked_feed_has_reason(self, client_mixed: TestClient) -> None:
         """
         GIVEN a BLOCKED feed with a non-empty blocked_reason
         WHEN GET /data/certification is requested
         THEN the blocked event in 'certifications' has a non-empty blocked_reason.
         """
-        resp = client_mixed.get("/data/certification")
+        resp = client_mixed.get("/data/certification", headers=AUTH_HEADERS)
         body = resp.json()
-        blocked = [
-            c for c in body["certifications"] if c["status"] == "BLOCKED"
-        ]
+        blocked = [c for c in body["certifications"] if c["status"] == "BLOCKED"]
         assert len(blocked) == 1, f"Expected 1 blocked feed: {body}"
-        assert blocked[0]["blocked_reason"], (
-            f"Expected non-empty blocked_reason: {blocked[0]}"
-        )
+        assert blocked[0]["blocked_reason"], f"Expected non-empty blocked_reason: {blocked[0]}"
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +388,9 @@ class TestParityEventsEndpoint:
     def parity_repo(self) -> MockParityRepository:
         """Repository with one WARNING and one CRITICAL parity event."""
         repo = MockParityRepository()
-        repo.save(_make_parity_event(_PARITY_ULID_1, severity=ParityEventSeverity.WARNING, delta=0.05))
+        repo.save(
+            _make_parity_event(_PARITY_ULID_1, severity=ParityEventSeverity.WARNING, delta=0.05)
+        )
         repo.save(
             _make_parity_event(
                 _PARITY_ULID_2,
@@ -433,10 +419,8 @@ class TestParityEventsEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client.get("/parity/events")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_parity_events_contains_required_keys(self, client: TestClient) -> None:
         """
@@ -444,7 +428,7 @@ class TestParityEventsEndpoint:
         WHEN GET /parity/events is requested
         THEN response contains 'events', 'total_count', and 'generated_at'.
         """
-        resp = client.get("/parity/events")
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
         body = resp.json()
         for key in ("events", "total_count", "generated_at"):
             assert key in body, f"Missing key '{key}': {body}"
@@ -455,20 +439,18 @@ class TestParityEventsEndpoint:
         WHEN GET /parity/events is requested
         THEN total_count is 2 and events list has 2 items.
         """
-        resp = client.get("/parity/events")
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["total_count"] == 2, f"total_count wrong: {body}"
         assert len(body["events"]) == 2, f"events length wrong: {body}"
 
-    def test_parity_events_each_event_has_required_fields(
-        self, client: TestClient
-    ) -> None:
+    def test_parity_events_each_event_has_required_fields(self, client: TestClient) -> None:
         """
         GIVEN parity events in the repository
         WHEN GET /parity/events is requested
         THEN each event contains all required ParityEvent fields.
         """
-        resp = client.get("/parity/events")
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
         body = resp.json()
         required = (
             "id",
@@ -500,7 +482,7 @@ class TestParityEventsEndpoint:
         app.dependency_overrides[get_parity_repository] = lambda: empty_repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/parity/events")
+            resp = tc.get("/parity/events", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
             assert body.get("events") == []
@@ -508,18 +490,14 @@ class TestParityEventsEndpoint:
         finally:
             app.dependency_overrides.clear()
 
-    def test_parity_events_critical_event_has_correct_severity(
-        self, client: TestClient
-    ) -> None:
+    def test_parity_events_critical_event_has_correct_severity(self, client: TestClient) -> None:
         """
         GIVEN a CRITICAL parity event for GOOG
         WHEN GET /parity/events is requested
         THEN the GOOG event has severity 'CRITICAL'.
         """
-        resp = client.get("/parity/events")
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
         body = resp.json()
         goog_events = [e for e in body["events"] if e["instrument"] == "GOOG"]
         assert len(goog_events) == 1, f"Expected 1 GOOG event: {body}"
-        assert goog_events[0]["severity"] == "CRITICAL", (
-            f"Expected CRITICAL: {goog_events[0]}"
-        )
+        assert goog_events[0]["severity"] == "CRITICAL", f"Expected CRITICAL: {goog_events[0]}"

@@ -5,7 +5,7 @@ Used in test mode (ENVIRONMENT=test / unset) to provide fast, I/O-free
 behaviour that mirrors the SqlOverrideRepository interface.
 
 Responsibilities:
-- Provide an in-memory dict store matching SqlOverrideRepository's behaviour.
+- Implement OverrideRepositoryInterface with an in-memory dict store.
 - Support introspection helpers for test assertions.
 
 Does NOT:
@@ -30,6 +30,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from libs.contracts.errors import NotFoundError
+from libs.contracts.interfaces.override_repository import OverrideRepositoryInterface
+
 _STUB_PREFIX = "01HMOCKOVERRIDE"
 _counter = 0
 
@@ -40,17 +43,22 @@ def _generate_id() -> str:
     return f"{_STUB_PREFIX}{_counter:011d}"
 
 
-class MockOverrideRepository:
+class MockOverrideRepository(OverrideRepositoryInterface):
     """
-    In-memory implementation of the override repository interface.
+    In-memory implementation of OverrideRepositoryInterface.
 
     Responsibilities:
-    - Mirror SqlOverrideRepository's create() / get_by_id() interface.
-    - Provide test introspection helpers (count(), clear()).
+    - Mirror SqlOverrideRepository behaviour with an in-memory dict store.
+    - Provide test introspection helpers (count(), clear(), get_all()).
 
     Does NOT:
     - Persist data.
     - Enforce business rules.
+
+    Example:
+        repo = MockOverrideRepository()
+        result = repo.create(object_id="01H...", ...)
+        detail = repo.get_by_id(result["override_id"])
     """
 
     def __init__(self) -> None:
@@ -99,8 +107,11 @@ class MockOverrideRepository:
             "rationale": rationale,
             "submitter_id": submitter_id,
             "status": "pending",
+            "reviewer_id": None,
+            "decision_rationale": None,
             "reviewed_by": None,
             "reviewed_at": None,
+            "decided_at": None,
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }
@@ -118,6 +129,43 @@ class MockOverrideRepository:
             Override detail dict, or None if not found.
         """
         return self._store.get(override_id)
+
+    def update_decision(
+        self,
+        *,
+        override_id: str,
+        reviewer_id: str,
+        status: str,
+        decision_rationale: str,
+    ) -> dict[str, Any]:
+        """
+        Record a reviewer's decision on an override.
+
+        Args:
+            override_id: ULID of the override being decided.
+            reviewer_id: ULID of the reviewer.
+            status: New status — 'approved' or 'rejected'.
+            decision_rationale: Reviewer's justification.
+
+        Returns:
+            Dict with updated override detail.
+
+        Raises:
+            NotFoundError: If override_id does not exist.
+        """
+        record = self._store.get(override_id)
+        if record is None:
+            raise NotFoundError(f"Override '{override_id}' not found")
+
+        now = datetime.now(tz=timezone.utc)
+        record["status"] = status
+        record["reviewer_id"] = reviewer_id
+        record["decision_rationale"] = decision_rationale
+        record["reviewed_by"] = reviewer_id
+        record["decided_at"] = now.isoformat()
+        record["reviewed_at"] = now.isoformat()
+        record["updated_at"] = now.isoformat()
+        return dict(record)
 
     # ------------------------------------------------------------------
     # Test introspection helpers

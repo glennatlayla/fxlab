@@ -1,11 +1,13 @@
 """Database connection and configuration contracts."""
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
 from enum import Enum
+
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 class DatabaseType(str, Enum):
     """Supported database types."""
+
     POSTGRESQL = "postgresql"
     MYSQL = "mysql"
     SQLITE = "sqlite"
@@ -13,7 +15,7 @@ class DatabaseType(str, Enum):
 
 class DatabaseConfig(BaseModel):
     """Database connection configuration.
-    
+
     Attributes:
         db_type: Database engine type.
         host: Database server hostname.
@@ -26,6 +28,7 @@ class DatabaseConfig(BaseModel):
         pool_timeout_seconds: Pool acquisition timeout.
         echo_sql: Whether to log SQL statements.
     """
+
     db_type: DatabaseType = Field(..., description="Database engine")
     host: str = Field(..., description="Database host")
     port: int = Field(..., gt=0, lt=65536, description="Database port")

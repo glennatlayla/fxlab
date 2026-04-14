@@ -30,14 +30,10 @@ Example:
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
-
 import structlog
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from libs.contracts.certification import CertificationEvent, CertificationStatus
+from libs.contracts.certification import CertificationEvent
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.certification_repository import CertificationRepositoryInterface
 
@@ -104,9 +100,7 @@ class SqlCertificationRepository(CertificationRepositoryInterface):
         )
         return []
 
-    def find_by_feed_id(
-        self, feed_id: str, correlation_id: str
-    ) -> CertificationEvent:
+    def find_by_feed_id(self, feed_id: str, correlation_id: str) -> CertificationEvent:
         """
         Return the certification event for a specific feed.
 

@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from libs.contracts.audit_explorer import AuditEventRecord, AuditExplorerResponse
+from libs.contracts.audit_explorer import AuditEventRecord
 from libs.contracts.errors import NotFoundError
 from libs.contracts.mocks.mock_audit_explorer_repository import (
     MockAuditExplorerRepository,
@@ -37,6 +37,8 @@ from libs.contracts.symbol_lineage import (
     SymbolLineageResponse,
     SymbolRunRef,
 )
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Shared test data constants
@@ -111,10 +113,7 @@ def _make_symbol_lineage(
         )
         for fid in (feed_ids or [])
     ]
-    runs = [
-        SymbolRunRef(run_id=rid, started_at=_NOW)
-        for rid in (run_ids or [])
-    ]
+    runs = [SymbolRunRef(run_id=rid, started_at=_NOW) for rid in (run_ids or [])]
     return SymbolLineageResponse(
         symbol=symbol,
         feeds=feeds,
@@ -223,7 +222,9 @@ class TestMockAuditExplorerRepository:
         """
         repo = MockAuditExplorerRepository()
         # Record 1: correct actor, wrong action_type
-        repo.save(_make_audit_record(_AUDIT_ULID_1, actor=_ACTOR_ANALYST, action="approve_promotion"))
+        repo.save(
+            _make_audit_record(_AUDIT_ULID_1, actor=_ACTOR_ANALYST, action="approve_promotion")
+        )
         # Record 2: correct action_type, wrong actor
         repo.save(_make_audit_record(_AUDIT_ULID_2, actor=_ACTOR_SYSTEM, action="run.started"))
         result = repo.list(actor=_ACTOR_ANALYST, action_type="run", correlation_id="c")
@@ -236,7 +237,7 @@ class TestMockAuditExplorerRepository:
         THEN at most 2 records are returned.
         """
         repo = MockAuditExplorerRepository()
-        for i, uid in enumerate(
+        for _i, uid in enumerate(
             [
                 _AUDIT_ULID_1,
                 _AUDIT_ULID_2,
@@ -408,7 +409,11 @@ class TestAuditExplorerEndpoint:
     def audit_repo(self) -> MockAuditExplorerRepository:
         """Repository with three audit records covering different actors and types."""
         repo = MockAuditExplorerRepository()
-        repo.save(_make_audit_record(_AUDIT_ULID_1, actor=_ACTOR_ANALYST, action="run.started", object_type="run"))
+        repo.save(
+            _make_audit_record(
+                _AUDIT_ULID_1, actor=_ACTOR_ANALYST, action="run.started", object_type="run"
+            )
+        )
         repo.save(
             _make_audit_record(
                 _AUDIT_ULID_2,
@@ -445,10 +450,8 @@ class TestAuditExplorerEndpoint:
 
         FAILS: enhanced audit.py does not exist until GREEN.
         """
-        resp = client.get("/audit")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get("/audit", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_audit_list_contains_required_keys(self, client: TestClient) -> None:
         """
@@ -456,20 +459,18 @@ class TestAuditExplorerEndpoint:
         WHEN GET /audit is requested
         THEN response contains 'events', 'next_cursor', 'total_count', 'generated_at'.
         """
-        resp = client.get("/audit")
+        resp = client.get("/audit", headers=AUTH_HEADERS)
         body = resp.json()
         for key in ("events", "next_cursor", "total_count", "generated_at"):
             assert key in body, f"Missing key '{key}': {body}"
 
-    def test_audit_list_returns_all_records_with_no_filters(
-        self, client: TestClient
-    ) -> None:
+    def test_audit_list_returns_all_records_with_no_filters(self, client: TestClient) -> None:
         """
         GIVEN three records in the repository
         WHEN GET /audit is requested with no query parameters
         THEN total_count is 3 and events list has 3 items.
         """
-        resp = client.get("/audit")
+        resp = client.get("/audit", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["total_count"] == 3, f"total_count wrong: {body}"
         assert len(body["events"]) == 3, f"events length wrong: {body}"
@@ -480,22 +481,20 @@ class TestAuditExplorerEndpoint:
         WHEN GET /audit?actor=analyst@fxlab.io is requested
         THEN total_count is 2.
         """
-        resp = client.get("/audit", params={"actor": _ACTOR_ANALYST})
+        resp = client.get("/audit", params={"actor": _ACTOR_ANALYST}, headers=AUTH_HEADERS)
         body = resp.json()
         assert body["total_count"] == 2, f"Expected 2 analyst records: {body}"
         assert len(body["events"]) == 2
         for ev in body["events"]:
             assert ev["actor"] == _ACTOR_ANALYST, f"Wrong actor: {ev}"
 
-    def test_audit_list_filters_by_target_type_query_param(
-        self, client: TestClient
-    ) -> None:
+    def test_audit_list_filters_by_target_type_query_param(self, client: TestClient) -> None:
         """
         GIVEN three records where 2 have object_type='run'
         WHEN GET /audit?target_type=run is requested
         THEN total_count is 2.
         """
-        resp = client.get("/audit", params={"target_type": "run"})
+        resp = client.get("/audit", params={"target_type": "run"}, headers=AUTH_HEADERS)
         body = resp.json()
         assert body["total_count"] == 2, f"Expected 2 run records: {body}"
 
@@ -514,7 +513,7 @@ class TestAuditExplorerEndpoint:
         app.dependency_overrides[get_audit_explorer_repository] = lambda: empty_repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/audit")
+            resp = tc.get("/audit", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
             assert body.get("events") == []
@@ -522,15 +521,13 @@ class TestAuditExplorerEndpoint:
         finally:
             app.dependency_overrides.clear()
 
-    def test_audit_list_each_event_has_required_fields(
-        self, client: TestClient
-    ) -> None:
+    def test_audit_list_each_event_has_required_fields(self, client: TestClient) -> None:
         """
         GIVEN records in the repository
         WHEN GET /audit is requested
         THEN each event has all required AuditEventRecord fields.
         """
-        resp = client.get("/audit")
+        resp = client.get("/audit", headers=AUTH_HEADERS)
         body = resp.json()
         required = ("id", "actor", "action", "object_id", "object_type", "created_at")
         for ev in body["events"]:
@@ -576,9 +573,7 @@ class TestAuditEventDetailEndpoint:
         from services.api.main import app
         from services.api.routes.audit import get_audit_explorer_repository
 
-        app.dependency_overrides[get_audit_explorer_repository] = (
-            lambda: audit_repo_single
-        )
+        app.dependency_overrides[get_audit_explorer_repository] = lambda: audit_repo_single
         tc = TestClient(app)
         yield tc
         app.dependency_overrides.clear()
@@ -591,10 +586,8 @@ class TestAuditEventDetailEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client.get(f"/audit/{_AUDIT_ULID_1}")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get(f"/audit/{_AUDIT_ULID_1}", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_audit_detail_contains_required_fields(self, client: TestClient) -> None:
         """
@@ -602,7 +595,7 @@ class TestAuditEventDetailEndpoint:
         WHEN GET /audit/{_AUDIT_ULID_1} is requested
         THEN response body contains all required AuditEventRecord fields.
         """
-        resp = client.get(f"/audit/{_AUDIT_ULID_1}")
+        resp = client.get(f"/audit/{_AUDIT_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         for field in ("id", "actor", "action", "object_id", "object_type", "created_at"):
             assert field in body, f"Missing field '{field}': {body}"
@@ -613,7 +606,7 @@ class TestAuditEventDetailEndpoint:
         WHEN GET /audit/{_AUDIT_ULID_1} is requested
         THEN returned actor and action match the saved values.
         """
-        resp = client.get(f"/audit/{_AUDIT_ULID_1}")
+        resp = client.get(f"/audit/{_AUDIT_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["actor"] == _ACTOR_ANALYST, f"actor mismatch: {body}"
         assert body["action"] == "approve_promotion", f"action mismatch: {body}"
@@ -628,10 +621,8 @@ class TestAuditEventDetailEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client.get(f"/audit/{_AUDIT_ULID_MISSING}")
-        assert resp.status_code == 404, (
-            f"Expected 404, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get(f"/audit/{_AUDIT_ULID_MISSING}", headers=AUTH_HEADERS)
+        assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
 
 # ---------------------------------------------------------------------------
@@ -675,9 +666,7 @@ class TestSymbolLineageEndpoint:
         yield tc
         app.dependency_overrides.clear()
 
-    def test_symbol_lineage_returns_200_for_known_symbol(
-        self, client: TestClient
-    ) -> None:
+    def test_symbol_lineage_returns_200_for_known_symbol(self, client: TestClient) -> None:
         """
         GIVEN AAPL lineage is saved
         WHEN GET /symbols/AAPL/lineage is requested
@@ -685,10 +674,8 @@ class TestSymbolLineageEndpoint:
 
         FAILS: route does not exist until GREEN.
         """
-        resp = client.get("/symbols/AAPL/lineage")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get("/symbols/AAPL/lineage", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_symbol_lineage_contains_required_keys(self, client: TestClient) -> None:
         """
@@ -696,7 +683,7 @@ class TestSymbolLineageEndpoint:
         WHEN GET /symbols/AAPL/lineage is requested
         THEN response contains 'symbol', 'feeds', 'runs', 'generated_at'.
         """
-        resp = client.get("/symbols/AAPL/lineage")
+        resp = client.get("/symbols/AAPL/lineage", headers=AUTH_HEADERS)
         body = resp.json()
         for key in ("symbol", "feeds", "runs", "generated_at"):
             assert key in body, f"Missing key '{key}': {body}"
@@ -707,65 +694,55 @@ class TestSymbolLineageEndpoint:
         WHEN GET /symbols/AAPL/lineage is requested
         THEN 'symbol' field in response is 'AAPL'.
         """
-        resp = client.get("/symbols/AAPL/lineage")
+        resp = client.get("/symbols/AAPL/lineage", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["symbol"] == "AAPL", f"symbol field wrong: {body}"
 
-    def test_symbol_lineage_feeds_list_has_correct_count(
-        self, client: TestClient
-    ) -> None:
+    def test_symbol_lineage_feeds_list_has_correct_count(self, client: TestClient) -> None:
         """
         GIVEN AAPL lineage with two feeds
         WHEN GET /symbols/AAPL/lineage is requested
         THEN 'feeds' list has 2 items.
         """
-        resp = client.get("/symbols/AAPL/lineage")
+        resp = client.get("/symbols/AAPL/lineage", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["feeds"]) == 2, f"Expected 2 feeds: {body}"
 
-    def test_symbol_lineage_feeds_have_required_fields(
-        self, client: TestClient
-    ) -> None:
+    def test_symbol_lineage_feeds_have_required_fields(self, client: TestClient) -> None:
         """
         GIVEN AAPL lineage with feeds
         WHEN GET /symbols/AAPL/lineage is requested
         THEN each feed has 'feed_id', 'feed_name', 'first_seen' fields.
         """
-        resp = client.get("/symbols/AAPL/lineage")
+        resp = client.get("/symbols/AAPL/lineage", headers=AUTH_HEADERS)
         body = resp.json()
         for feed in body["feeds"]:
             for field in ("feed_id", "feed_name", "first_seen"):
                 assert field in feed, f"Missing field '{field}' in feed: {feed}"
 
-    def test_symbol_lineage_runs_list_has_correct_count(
-        self, client: TestClient
-    ) -> None:
+    def test_symbol_lineage_runs_list_has_correct_count(self, client: TestClient) -> None:
         """
         GIVEN AAPL lineage with one run
         WHEN GET /symbols/AAPL/lineage is requested
         THEN 'runs' list has 1 item.
         """
-        resp = client.get("/symbols/AAPL/lineage")
+        resp = client.get("/symbols/AAPL/lineage", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["runs"]) == 1, f"Expected 1 run: {body}"
 
-    def test_symbol_lineage_runs_have_required_fields(
-        self, client: TestClient
-    ) -> None:
+    def test_symbol_lineage_runs_have_required_fields(self, client: TestClient) -> None:
         """
         GIVEN AAPL lineage with runs
         WHEN GET /symbols/AAPL/lineage is requested
         THEN each run has 'run_id' and 'started_at' fields.
         """
-        resp = client.get("/symbols/AAPL/lineage")
+        resp = client.get("/symbols/AAPL/lineage", headers=AUTH_HEADERS)
         body = resp.json()
         for run in body["runs"]:
             for field in ("run_id", "started_at"):
                 assert field in run, f"Missing field '{field}' in run: {run}"
 
-    def test_symbol_lineage_returns_404_for_unknown_symbol(
-        self, client: TestClient
-    ) -> None:
+    def test_symbol_lineage_returns_404_for_unknown_symbol(self, client: TestClient) -> None:
         """
         GIVEN no lineage saved for 'UNKNOWN'
         WHEN GET /symbols/UNKNOWN/lineage is requested
@@ -773,10 +750,8 @@ class TestSymbolLineageEndpoint:
 
         FAILS: route does not exist until GREEN.
         """
-        resp = client.get("/symbols/UNKNOWN/lineage")
-        assert resp.status_code == 404, (
-            f"Expected 404, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get("/symbols/UNKNOWN/lineage", headers=AUTH_HEADERS)
+        assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
     def test_symbol_lineage_empty_feeds_and_runs_when_none_saved(self) -> None:
         """
@@ -794,7 +769,7 @@ class TestSymbolLineageEndpoint:
         app.dependency_overrides[get_symbol_lineage_repository] = lambda: bare_repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/symbols/BARE/lineage")
+            resp = tc.get("/symbols/BARE/lineage", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
             assert body.get("feeds") == []

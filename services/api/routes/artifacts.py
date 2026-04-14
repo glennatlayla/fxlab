@@ -32,8 +32,9 @@ Example (curl):
 from __future__ import annotations
 
 import os
+from typing import Any
+
 import structlog
-from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # MIME type registry for downloadable artifact formats.
@@ -52,11 +53,14 @@ _EXTENSION_MEDIA_TYPES: dict[str, str] = {
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy.orm import Session
 
 from libs.contracts.artifact import ArtifactQuery, ArtifactQueryResponse, ArtifactType
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.artifact_repository import ArtifactRepositoryInterface
 from libs.storage.base import ArtifactStorageBase
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
 
 logger = structlog.get_logger(__name__)
 
@@ -72,48 +76,89 @@ router = APIRouter(tags=["artifacts"])
 # ---------------------------------------------------------------------------
 
 
-def get_artifact_repository() -> ArtifactRepositoryInterface:
+def get_artifact_repository(db: Session = Depends(get_db)) -> ArtifactRepositoryInterface:
     """
     Provide the active ArtifactRepositoryInterface implementation.
 
-    In tests: overridden via app.dependency_overrides[get_artifact_repository].
-    In production: returns the DB-backed repository wired by the DI container.
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
 
     Returns:
-        ArtifactRepositoryInterface implementation.
-
-    Raises:
-        RuntimeError: If no repository has been wired (bootstrap safeguard).
+        ArtifactRepositoryInterface implementation (SQL-backed).
     """
-    # ISS-011: Wire SQL-backed ArtifactRepository
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_artifact_repository import SqlArtifactRepository
+    from services.api.repositories.sql_artifact_repository import SqlArtifactRepository
 
-        db = next(get_db())
-        return SqlArtifactRepository(db=db)
-
-    from libs.contracts.mocks.mock_artifact_repository import MockArtifactRepository
-    return MockArtifactRepository()
+    return SqlArtifactRepository(db=db)
 
 
 def get_artifact_storage() -> ArtifactStorageBase:
     """
     Provide the active ArtifactStorageBase implementation.
 
-    In tests: overridden via app.dependency_overrides[get_artifact_storage].
-    In production: returns the MinIO or S3 storage wired by the DI container.
+    Reads ARTIFACT_STORAGE_BACKEND from the environment to select the backend:
+
+    - ``"local"`` (default): Uses LocalArtifactStorage with ARTIFACT_STORAGE_ROOT
+      (defaults to ``/var/lib/fxlab/artifacts`` in production).
+    - ``"minio"``: Uses MinIOArtifactStorage for S3-compatible object storage.
+      Requires MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY environment
+      variables.  Optional MINIO_SECURE (default ``"false"``).
+
+    In tests: overridden via ``app.dependency_overrides[get_artifact_storage]``.
 
     Returns:
         ArtifactStorageBase implementation.
-    """
-    # TODO: ISS-012 — Wire MinIOArtifactStorage via lifespan DI container.
-    #       This stub exists so startup does not fail before DI is wired.
-    #       Replace with MinIOArtifactStorage (or S3ArtifactStorage) configured
-    #       from environment variables in the M6+ DI bootstrap.
-    from libs.storage.local_storage import LocalArtifactStorage
 
-    return LocalArtifactStorage(root="/tmp/fxlab-artifacts-stub")
+    Raises:
+        ConfigError: If the selected backend requires environment variables
+            that are not set (e.g. missing MINIO_ENDPOINT for minio backend).
+        ValueError: If the backend string is not a supported value.
+
+    Example:
+        # Environment: ARTIFACT_STORAGE_BACKEND=minio MINIO_ENDPOINT=minio:9000 ...
+        storage = get_artifact_storage()
+        # → MinIOArtifactStorage(endpoint="minio:9000", ...)
+    """
+    import os
+
+    from libs.contracts.errors import ConfigError
+
+    backend = os.environ.get("ARTIFACT_STORAGE_BACKEND", "local")
+
+    if backend == "local":
+        from libs.storage.local_storage import LocalArtifactStorage
+
+        root = os.environ.get("ARTIFACT_STORAGE_ROOT", "/var/lib/fxlab/artifacts")
+        return LocalArtifactStorage(root=root)
+
+    if backend == "minio":
+        from libs.storage.minio_storage import MinIOArtifactStorage
+
+        # All three connection parameters are mandatory — fail fast with a
+        # clear message instead of letting the MinIO SDK surface a cryptic
+        # connection error at first use.
+        required_vars = ["MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"]
+        missing = [v for v in required_vars if not os.environ.get(v)]
+        if missing:
+            raise ConfigError(
+                f"MinIO backend requires environment variables: {', '.join(missing)}. "
+                "Set them in .env or your deployment manifest."
+            )
+
+        secure_raw = os.environ.get("MINIO_SECURE", "false").lower()
+        secure = secure_raw in ("true", "1", "yes")
+
+        return MinIOArtifactStorage(
+            endpoint=os.environ["MINIO_ENDPOINT"],
+            access_key=os.environ["MINIO_ACCESS_KEY"],
+            secret_key=os.environ["MINIO_SECRET_KEY"],
+            secure=secure,
+        )
+
+    raise ValueError(
+        f"Unsupported ARTIFACT_STORAGE_BACKEND: '{backend}'. Supported: 'local', 'minio'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +175,11 @@ def get_artifact_storage() -> ArtifactStorageBase:
     ),
 )
 def list_artifacts(
-    artifact_type: Optional[str] = Query(
+    artifact_type: str | None = Query(
         default=None,
         description="Filter by artifact type (e.g. backtest_result, readiness_report).",
     ),
-    subject_id: Optional[str] = Query(
+    subject_id: str | None = Query(
         default=None,
         description="Filter by the ULID of the subject entity (run, candidate, etc.).",
     ),
@@ -150,7 +195,8 @@ def list_artifacts(
         description="Pagination offset.",
     ),
     repo: ArtifactRepositoryInterface = Depends(get_artifact_repository),
-    correlation_id: Optional[str] = Query(default=None, include_in_schema=False),
+    correlation_id: str | None = Query(default=None, include_in_schema=False),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
 ) -> JSONResponse:
     """
     Return paginated artifact metadata.
@@ -183,6 +229,7 @@ def list_artifacts(
         limit=limit,
         offset=offset,
         correlation_id=corr,
+        component="artifacts",
     )
 
     # Resolve artifact_type string to enum (if provided)
@@ -195,6 +242,7 @@ def list_artifacts(
                 "artifacts.list.invalid_type",
                 artifact_type=artifact_type,
                 correlation_id=corr,
+                component="artifacts",
             )
             raise HTTPException(
                 status_code=422,
@@ -222,6 +270,7 @@ def list_artifacts(
         total_count=result.total_count,
         returned=len(result.artifacts),
         correlation_id=corr,
+        component="artifacts",
     )
 
     # Use model_dump() + JSONResponse to bypass pydantic-core stub serialization
@@ -292,7 +341,8 @@ def download_artifact(
     artifact_id: str,
     repo: ArtifactRepositoryInterface = Depends(get_artifact_repository),
     storage: ArtifactStorageBase = Depends(get_artifact_storage),
-    correlation_id: Optional[str] = Query(default=None, include_in_schema=False),
+    correlation_id: str | None = Query(default=None, include_in_schema=False),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
 ) -> Response:
     """
     Stream artifact binary content.
@@ -328,6 +378,7 @@ def download_artifact(
         "artifacts.download.request",
         artifact_id=artifact_id,
         correlation_id=corr,
+        component="artifacts",
     )
 
     # 1. Resolve artifact metadata from registry
@@ -338,6 +389,7 @@ def download_artifact(
             "artifacts.download.not_found",
             artifact_id=artifact_id,
             correlation_id=corr,
+            component="artifacts",
         )
         raise HTTPException(
             status_code=404,
@@ -353,6 +405,7 @@ def download_artifact(
             artifact_id=artifact_id,
             storage_path=storage_path,
             correlation_id=corr,
+            component="artifacts",
         )
         raise HTTPException(
             status_code=500,
@@ -374,6 +427,7 @@ def download_artifact(
             artifact_id=artifact_id,
             storage_path=storage_path,
             correlation_id=corr,
+            component="artifacts",
         )
         raise HTTPException(
             status_code=404,
@@ -393,6 +447,7 @@ def download_artifact(
         filename=filename,
         media_type=media_type,
         correlation_id=corr,
+        component="artifacts",
     )
 
     return Response(

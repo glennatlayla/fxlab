@@ -33,15 +33,14 @@ Example:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from libs.contracts.errors import NotFoundError
 from libs.contracts.feed import FeedHealthListResponse
-from libs.contracts.feed_health import Anomaly, AnomalyType, FeedHealthReport, FeedHealthStatus
+from libs.contracts.feed_health import FeedHealthReport, FeedHealthStatus
 from libs.contracts.interfaces.feed_health_repository import FeedHealthRepositoryInterface
 from libs.contracts.models import Feed as FeedModel
 from libs.contracts.models import FeedHealthEvent as FeedHealthEventModel
@@ -183,8 +182,9 @@ class SqlFeedHealthRepository(FeedHealthRepositoryInterface):
         )
         latest_event = self.db.execute(stmt).scalar_one_or_none()
 
-        # Determine status
-        status = FeedHealthStatus.UNKNOWN
+        # Determine status — default to OFFLINE when no health events exist.
+        # The FeedHealthStatus enum defines: HEALTHY, DEGRADED, QUARANTINED, OFFLINE.
+        status = FeedHealthStatus.OFFLINE
         last_update = datetime.now(timezone.utc)
 
         if latest_event:
@@ -194,8 +194,10 @@ class SqlFeedHealthRepository(FeedHealthRepositoryInterface):
                 status = FeedHealthStatus.HEALTHY
             elif status_str == "degraded":
                 status = FeedHealthStatus.DEGRADED
-            elif status_str == "failed":
-                status = FeedHealthStatus.FAILED
+            elif status_str in ("quarantined", "failed"):
+                status = FeedHealthStatus.QUARANTINED
+            else:
+                status = FeedHealthStatus.OFFLINE
             last_update = latest_event.checked_at
 
         return FeedHealthReport(

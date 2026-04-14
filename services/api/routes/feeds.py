@@ -28,14 +28,18 @@ Example (curl):
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.feed_repository import FeedRepositoryInterface
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
+from services.api.middleware.correlation import correlation_id_var
 
 logger = structlog.get_logger(__name__)
 
@@ -47,28 +51,21 @@ router = APIRouter(prefix="/feeds", tags=["feeds"])
 # ---------------------------------------------------------------------------
 
 
-def get_feed_repository() -> FeedRepositoryInterface:
+def get_feed_repository(db: Session = Depends(get_db)) -> FeedRepositoryInterface:
     """
     Provide the active FeedRepositoryInterface implementation.
 
-    In tests: overridden via app.dependency_overrides[get_feed_repository].
-    In production: returns the DB-backed repository wired by the DI container.
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
 
     Returns:
-        FeedRepositoryInterface implementation.
+        FeedRepositoryInterface implementation (SQL-backed).
     """
-    # ISS-013: Wire SqlFeedRepository
-    import os
+    from services.api.repositories.sql_feed_repository import SqlFeedRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_feed_repository import SqlFeedRepository
-
-        db = next(get_db())
-        return SqlFeedRepository(db=db)
-
-    from libs.contracts.mocks.mock_feed_repository import MockFeedRepository
-    return MockFeedRepository()
+    return SqlFeedRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +171,9 @@ def _serialize_feed_detail(detail: Any) -> dict[str, Any]:
 def list_feeds(
     limit: int = Query(default=20, ge=1, le=200, description="Page size"),
     offset: int = Query(default=0, ge=0, description="Page offset"),
-    correlation_id: Optional[str] = Query(default=None, alias="x-correlation-id"),
+    correlation_id: str | None = Query(default=None, alias="x-correlation-id"),
     repo: FeedRepositoryInterface = Depends(get_feed_repository),
+    user: AuthenticatedUser = Depends(require_scope("feeds:read")),
 ) -> JSONResponse:
     """
     Return a paginated list of registered feeds.
@@ -198,11 +196,13 @@ def list_feeds(
         → {"feeds": [...], "total_count": 5, "limit": 10, "offset": 0}
     """
     corr = correlation_id or "no-corr"
+    corr_id = correlation_id_var.get("no-corr")
     logger.info(
         "feeds.list.request",
         limit=limit,
         offset=offset,
-        correlation_id=corr,
+        correlation_id=corr_id,
+        component="feeds",
     )
 
     # LL-007: pydantic-core cross-arch stub does not coerce query-param strings to int;
@@ -213,7 +213,8 @@ def list_feeds(
         "feeds.list.response",
         total_count=result.total_count,
         returned=len(result.feeds),
-        correlation_id=corr,
+        correlation_id=corr_id,
+        component="feeds",
     )
 
     return JSONResponse(content=_serialize_feed_list(result))
@@ -222,8 +223,9 @@ def list_feeds(
 @router.get("/{feed_id}")
 def get_feed_detail(
     feed_id: str,
-    correlation_id: Optional[str] = Query(default=None, alias="x-correlation-id"),
+    correlation_id: str | None = Query(default=None, alias="x-correlation-id"),
     repo: FeedRepositoryInterface = Depends(get_feed_repository),
+    user: AuthenticatedUser = Depends(require_scope("feeds:read")),
 ) -> JSONResponse:
     """
     Return the full detail record for a single registered feed.
@@ -247,10 +249,12 @@ def get_feed_detail(
         → {"feed": {...}, "version_history": [...], "connectivity_tests": [...]}
     """
     corr = correlation_id or "no-corr"
+    corr_id = correlation_id_var.get("no-corr")
     logger.info(
         "feeds.detail.request",
         feed_id=feed_id,
-        correlation_id=corr,
+        correlation_id=corr_id,
+        component="feeds",
     )
 
     try:
@@ -259,7 +263,8 @@ def get_feed_detail(
         logger.warning(
             "feeds.detail.not_found",
             feed_id=feed_id,
-            correlation_id=corr,
+            correlation_id=corr_id,
+            component="feeds",
         )
         raise HTTPException(
             status_code=404,
@@ -271,7 +276,8 @@ def get_feed_detail(
         feed_id=feed_id,
         version_count=len(detail.version_history),
         connectivity_count=len(detail.connectivity_tests),
-        correlation_id=corr,
+        correlation_id=corr_id,
+        component="feeds",
     )
 
     return JSONResponse(content=_serialize_feed_detail(detail))

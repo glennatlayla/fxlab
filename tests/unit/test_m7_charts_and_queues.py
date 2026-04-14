@@ -20,7 +20,6 @@ LL-010 note: Use explicit int() casts for numeric query params in route handlers
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 
 import pytest
@@ -29,13 +28,14 @@ from fastapi.testclient import TestClient
 from libs.contracts.chart import (
     DrawdownPoint,
     EquityCurvePoint,
-    SamplingMethod,
 )
 from libs.contracts.errors import NotFoundError
 from libs.contracts.mocks.mock_chart_repository import MockChartRepository
 from libs.contracts.mocks.mock_queue_repository import MockQueueRepository
 from libs.contracts.queue import QueueContentionResponse, QueueSnapshotResponse
 from libs.utils.lttb import lttb_downsample
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Shared test data constants
@@ -142,8 +142,7 @@ class TestLttbAlgorithm:
         max_output_y = max(p[1] for p in out)
         # Output peak should be within 10% of the true peak (strict LTTB property)
         assert max_output_y >= 0.9 * max_input_y, (
-            f"Peak not preserved: input max={max_input_y:.3f}, "
-            f"output max={max_output_y:.3f}"
+            f"Peak not preserved: input max={max_input_y:.3f}, output max={max_output_y:.3f}"
         )
 
     def test_lttb_no_downsampling_when_points_le_threshold(self) -> None:
@@ -322,9 +321,7 @@ class TestMockQueueRepository:
             created_at=_NOW,
         )
 
-    def _make_contention(
-        self, queue_class: str, depth: int = 2
-    ) -> QueueContentionResponse:
+    def _make_contention(self, queue_class: str, depth: int = 2) -> QueueContentionResponse:
         """Build a minimal QueueContentionResponse for tests."""
         return QueueContentionResponse(
             queue_class=queue_class,
@@ -439,7 +436,7 @@ class TestRunChartsEndpoint:
 
         FAILS: stub does not implement this endpoint.
         """
-        resp = client.get(f"/runs/{_RUN_ULID_1}/charts")
+        resp = client.get(f"/runs/{_RUN_ULID_1}/charts", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_get_charts_returns_run_id(self, client: TestClient) -> None:
@@ -448,7 +445,7 @@ class TestRunChartsEndpoint:
         WHEN GET /runs/{run_id}/charts is requested
         THEN response contains the correct run_id.
         """
-        resp = client.get(f"/runs/{_RUN_ULID_1}/charts")
+        resp = client.get(f"/runs/{_RUN_ULID_1}/charts", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("run_id") == _RUN_ULID_1
 
@@ -458,7 +455,7 @@ class TestRunChartsEndpoint:
         WHEN GET /runs/{run_id}/charts is requested
         THEN response contains 'equity' and 'drawdown' keys.
         """
-        resp = client.get(f"/runs/{_RUN_ULID_1}/charts")
+        resp = client.get(f"/runs/{_RUN_ULID_1}/charts", headers=AUTH_HEADERS)
         body = resp.json()
         assert "equity" in body, f"Missing 'equity' key: {body}"
         assert "drawdown" in body, f"Missing 'drawdown' key: {body}"
@@ -469,7 +466,7 @@ class TestRunChartsEndpoint:
         WHEN GET /runs/{run_id}/charts is requested
         THEN 404 is returned.
         """
-        resp = client.get(f"/runs/{_RUN_ULID_MISSING}/charts")
+        resp = client.get(f"/runs/{_RUN_ULID_MISSING}/charts", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
 
 
@@ -536,7 +533,7 @@ class TestRunChartsEquityEndpoint:
 
         FAILS: stub endpoint does not exist.
         """
-        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity")
+        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_equity_small_run_sampling_not_applied(self, client_small: TestClient) -> None:
@@ -545,7 +542,7 @@ class TestRunChartsEquityEndpoint:
         WHEN GET /runs/{run_id}/charts/equity is requested
         THEN sampling_applied is false.
         """
-        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity")
+        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("sampling_applied") is False, (
             f"Expected sampling_applied=false for 100-point run: {body}"
@@ -557,11 +554,9 @@ class TestRunChartsEquityEndpoint:
         WHEN GET /runs/{run_id}/charts/equity is requested
         THEN raw_equity_point_count equals 100.
         """
-        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity")
+        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity", headers=AUTH_HEADERS)
         body = resp.json()
-        assert body.get("raw_equity_point_count") == 100, (
-            f"Unexpected raw count: {body}"
-        )
+        assert body.get("raw_equity_point_count") == 100, f"Unexpected raw count: {body}"
 
     def test_equity_large_run_sampling_applied(self, client_large: TestClient) -> None:
         """
@@ -571,7 +566,7 @@ class TestRunChartsEquityEndpoint:
 
         FAILS: stub does not apply LTTB.
         """
-        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity")
+        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("sampling_applied") is True, (
             f"Expected sampling_applied=true for 3000-point run: {body}"
@@ -585,7 +580,7 @@ class TestRunChartsEquityEndpoint:
 
         FAILS: stub does not apply LTTB.
         """
-        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity")
+        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity", headers=AUTH_HEADERS)
         body = resp.json()
         pts = body.get("points", [])
         assert len(pts) <= _EQUITY_LTTB_THRESHOLD, (
@@ -598,7 +593,7 @@ class TestRunChartsEquityEndpoint:
         WHEN GET /runs/{run_id}/charts/equity is requested
         THEN raw_equity_point_count equals 3 000 (original, not downsampled).
         """
-        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity")
+        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("raw_equity_point_count") == 3_000
 
@@ -612,7 +607,7 @@ class TestRunChartsEquityEndpoint:
 
         FAILS: stub does not report truncation.
         """
-        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity")
+        resp = client_large.get(f"/runs/{_RUN_ULID_2}/charts/equity", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("trades_truncated") is True, f"Expected trades_truncated=true: {body}"
         assert body.get("total_trade_count") == 6_000
@@ -623,7 +618,7 @@ class TestRunChartsEquityEndpoint:
         WHEN GET /runs/{run_id}/charts/equity is requested
         THEN trades_truncated is false.
         """
-        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity")
+        resp = client_small.get(f"/runs/{_RUN_ULID_1}/charts/equity", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("trades_truncated") is False
 
@@ -633,7 +628,7 @@ class TestRunChartsEquityEndpoint:
         WHEN GET /runs/{run_id}/charts/equity is requested
         THEN 404 is returned.
         """
-        resp = client_small.get(f"/runs/{_RUN_ULID_MISSING}/charts/equity")
+        resp = client_small.get(f"/runs/{_RUN_ULID_MISSING}/charts/equity", headers=AUTH_HEADERS)
         assert resp.status_code == 404
 
 
@@ -673,7 +668,7 @@ class TestRunChartsDrawdownEndpoint:
 
         FAILS: stub endpoint does not exist.
         """
-        resp = client.get(f"/runs/{_RUN_ULID_1}/charts/drawdown")
+        resp = client.get(f"/runs/{_RUN_ULID_1}/charts/drawdown", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_drawdown_contains_required_fields(self, client: TestClient) -> None:
@@ -682,7 +677,7 @@ class TestRunChartsDrawdownEndpoint:
         WHEN GET /runs/{run_id}/charts/drawdown is requested
         THEN response contains run_id, points, sampling_applied, raw_point_count.
         """
-        resp = client.get(f"/runs/{_RUN_ULID_1}/charts/drawdown")
+        resp = client.get(f"/runs/{_RUN_ULID_1}/charts/drawdown", headers=AUTH_HEADERS)
         body = resp.json()
         for field in ("run_id", "points", "sampling_applied", "raw_point_count"):
             assert field in body, f"Missing field '{field}': {body}"
@@ -693,7 +688,7 @@ class TestRunChartsDrawdownEndpoint:
         WHEN GET /runs/{run_id}/charts/drawdown is requested
         THEN 404 is returned.
         """
-        resp = client.get(f"/runs/{_RUN_ULID_MISSING}/charts/drawdown")
+        resp = client.get(f"/runs/{_RUN_ULID_MISSING}/charts/drawdown", headers=AUTH_HEADERS)
         assert resp.status_code == 404
 
     def test_drawdown_large_run_applies_lttb(self) -> None:
@@ -715,7 +710,7 @@ class TestRunChartsDrawdownEndpoint:
         app.dependency_overrides[get_chart_repository] = lambda: large_repo
         tc = TestClient(app)
         try:
-            resp = tc.get(f"/runs/{_RUN_ULID_2}/charts/drawdown")
+            resp = tc.get(f"/runs/{_RUN_ULID_2}/charts/drawdown", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200, f"Expected 200: {resp.text}"
             assert body.get("sampling_applied") is True, f"Expected LTTB applied: {body}"
@@ -775,7 +770,7 @@ class TestQueuesListEndpoint:
 
         FAILS: stub does not delegate to QueueRepositoryInterface.
         """
-        resp = client.get("/queues/")
+        resp = client.get("/queues/", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_queues_returns_queues_and_generated_at(self, client: TestClient) -> None:
@@ -784,7 +779,7 @@ class TestQueuesListEndpoint:
         WHEN GET /queues is requested
         THEN response contains 'queues' list and 'generated_at' timestamp.
         """
-        resp = client.get("/queues/")
+        resp = client.get("/queues/", headers=AUTH_HEADERS)
         body = resp.json()
         assert "queues" in body, f"Missing 'queues' key: {body}"
         assert "generated_at" in body, f"Missing 'generated_at' key: {body}"
@@ -795,7 +790,7 @@ class TestQueuesListEndpoint:
         WHEN GET /queues is requested
         THEN response contains 2 items.
         """
-        resp = client.get("/queues/")
+        resp = client.get("/queues/", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["queues"]) == 2
 
@@ -812,7 +807,7 @@ class TestQueuesListEndpoint:
         app.dependency_overrides[get_queue_repository] = lambda: empty_repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/queues/")
+            resp = tc.get("/queues/", headers=AUTH_HEADERS)
             body = resp.json()
             assert body.get("queues") == []
         finally:
@@ -867,7 +862,7 @@ class TestQueueContentionEndpoint:
 
         FAILS: stub does not implement per-class contention endpoint.
         """
-        resp = client.get("/queues/research/contention")
+        resp = client.get("/queues/research/contention", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_contention_returns_required_fields(self, client: TestClient) -> None:
@@ -876,7 +871,7 @@ class TestQueueContentionEndpoint:
         WHEN GET /queues/research/contention is requested
         THEN response contains queue_class, depth, running, failed, contention_score.
         """
-        resp = client.get("/queues/research/contention")
+        resp = client.get("/queues/research/contention", headers=AUTH_HEADERS)
         body = resp.json()
         for field in ("queue_class", "depth", "running", "failed", "contention_score"):
             assert field in body, f"Missing field '{field}': {body}"
@@ -887,7 +882,7 @@ class TestQueueContentionEndpoint:
         WHEN GET /queues/optimize/contention is requested
         THEN depth is 7.
         """
-        resp = client.get("/queues/optimize/contention")
+        resp = client.get("/queues/optimize/contention", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("depth") == 7
 
@@ -899,5 +894,5 @@ class TestQueueContentionEndpoint:
 
         FAILS: stub does not raise 404.
         """
-        resp = client.get("/queues/backtest/contention")
+        resp = client.get("/queues/backtest/contention", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"

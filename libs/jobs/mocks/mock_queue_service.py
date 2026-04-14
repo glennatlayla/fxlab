@@ -19,8 +19,6 @@ Example:
     assert report.overall_score == 42.0
 """
 
-from typing import Optional
-
 from libs.jobs.interfaces.queue import (
     ContentionReport,
     QueueDepthSnapshot,

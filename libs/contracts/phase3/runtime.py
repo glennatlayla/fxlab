@@ -25,9 +25,7 @@ class DependencyHealth(BaseModel):
 
     name: str = Field(description="Dependency service name (e.g., 'postgres', 'redis')")
     status: ServiceStatus = Field(description="Current health status of the dependency")
-    latency_ms: float | None = Field(
-        None, description="Last measured latency in milliseconds"
-    )
+    latency_ms: float | None = Field(None, description="Last measured latency in milliseconds")
     error_message: str | None = Field(None, description="Error detail if unhealthy")
 
 
@@ -57,12 +55,8 @@ class ReadinessCheckResponse(BaseModel):
     """
 
     ready: bool = Field(description="True if service can accept traffic")
-    reason: str | None = Field(
-        None, description="Human-readable reason if not ready"
-    )
-    checks: dict[str, bool] = Field(
-        description="Map of readiness check names to pass/fail status"
-    )
+    reason: str | None = Field(None, description="Human-readable reason if not ready")
+    checks: dict[str, bool] = Field(description="Map of readiness check names to pass/fail status")
 
 
 class LivenessCheckResponse(BaseModel):
@@ -98,9 +92,7 @@ class ServiceConfiguration(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         description="Active logging level"
     )
-    cors_origins: list[str] = Field(
-        default_factory=list, description="Allowed CORS origins"
-    )
+    cors_origins: list[str] = Field(default_factory=list, description="Allowed CORS origins")
 
 
 class APIServiceConfiguration(ServiceConfiguration):
@@ -111,9 +103,7 @@ class APIServiceConfiguration(ServiceConfiguration):
     max_request_size_mb: int = Field(
         default=10, description="Maximum allowed request body size in MB"
     )
-    rate_limit_enabled: bool = Field(
-        default=True, description="Whether rate limiting is active"
-    )
+    rate_limit_enabled: bool = Field(default=True, description="Whether rate limiting is active")
 
 
 class WebServiceConfiguration(ServiceConfiguration):

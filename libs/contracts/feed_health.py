@@ -6,7 +6,6 @@ These models represent feed health status, anomaly events, and parity issues.
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,14 +41,10 @@ class Anomaly(BaseModel):
     anomaly_type: AnomalyType = Field(..., description="Anomaly type")
     detected_at: datetime = Field(..., description="Detection timestamp")
     start_time: datetime = Field(..., description="Anomaly start time")
-    end_time: Optional[datetime] = Field(
-        default=None, description="Anomaly end time (if resolved)"
-    )
+    end_time: datetime | None = Field(default=None, description="Anomaly end time (if resolved)")
     severity: str = Field(..., description="Anomaly severity (critical, high, medium, low)")
     message: str = Field(..., description="Human-readable anomaly description")
-    metadata: dict[str, str] = Field(
-        default_factory=dict, description="Additional anomaly context"
-    )
+    metadata: dict[str, str] = Field(default_factory=dict, description="Additional anomaly context")
 
 
 class FeedHealthReport(BaseModel):
@@ -65,7 +60,7 @@ class FeedHealthReport(BaseModel):
     recent_anomalies: list[Anomaly] = Field(
         default_factory=list, description="Recent anomaly events"
     )
-    quarantine_reason: Optional[str] = Field(
+    quarantine_reason: str | None = Field(
         default=None, description="Reason for quarantine (if status=QUARANTINED)"
     )
 

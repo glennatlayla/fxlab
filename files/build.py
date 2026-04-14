@@ -26,6 +26,8 @@ Requirements: Python 3.9+ to run this script itself (it finds 3.12 for the
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import itertools
 import json
 import os
@@ -37,23 +39,21 @@ import sys
 import textwrap
 import threading
 import time
-import ast
-import hashlib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT         = Path(__file__).resolve().parent
-VENV_DIR             = PROJECT_ROOT / ".venv"
-TRACKING_DIR         = PROJECT_ROOT / "docs" / "workplan-tracking"
-SHARED_LESSONS       = TRACKING_DIR / "SHARED_LESSONS.md"
+PROJECT_ROOT = Path(__file__).resolve().parent
+VENV_DIR = PROJECT_ROOT / ".venv"
+TRACKING_DIR = PROJECT_ROOT / "docs" / "workplan-tracking"
+SHARED_LESSONS = TRACKING_DIR / "SHARED_LESSONS.md"
 ACTIVE_WORKPLAN_FILE = TRACKING_DIR / ".active_workplan"  # persists as JSON
 # User Spec dir: where workplan and software-spec .md files live.
 # Checked in order; first match wins.
@@ -62,37 +62,38 @@ SPEC_DIR = next(
     (PROJECT_ROOT / d for d in _SPEC_DIR_CANDIDATES if (PROJECT_ROOT / d).is_dir()),
     PROJECT_ROOT,  # fallback: browse project root
 )
-ENV_FILE             = PROJECT_ROOT / ".env"
-REQUIREMENTS         = PROJECT_ROOT / "requirements.txt"
-REQUIREMENTS_DEV     = PROJECT_ROOT / "requirements-dev.txt"
+ENV_FILE = PROJECT_ROOT / ".env"
+REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
+REQUIREMENTS_DEV = PROJECT_ROOT / "requirements-dev.txt"
 
-ANTHROPIC_API_URL     = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
-DEFAULT_MODEL         = "claude-sonnet-4-5"   # override via .env ANTHROPIC_MODEL
+DEFAULT_MODEL = "claude-sonnet-4-5"  # override via .env ANTHROPIC_MODEL
 
 if platform.system() == "Windows":
-    VENV_PYTHON   = VENV_DIR / "Scripts" / "python.exe"
-    VENV_PIP      = VENV_DIR / "Scripts" / "pip.exe"
+    VENV_PYTHON = VENV_DIR / "Scripts" / "python.exe"
+    VENV_PIP = VENV_DIR / "Scripts" / "pip.exe"
     VENV_ACTIVATE = VENV_DIR / "Scripts" / "activate.bat"
 else:
-    VENV_PYTHON   = VENV_DIR / "bin" / "python"
-    VENV_PIP      = VENV_DIR / "bin" / "pip"
+    VENV_PYTHON = VENV_DIR / "bin" / "python"
+    VENV_PIP = VENV_DIR / "bin" / "pip"
     VENV_ACTIVATE = VENV_DIR / "bin" / "activate"
 
 USE_COLOUR = sys.stdout.isatty() and platform.system() != "Windows"
 
-C_RESET   = "\033[0m"  if USE_COLOUR else ""
-C_BOLD    = "\033[1m"  if USE_COLOUR else ""
-C_DIM     = "\033[2m"  if USE_COLOUR else ""
-C_RED     = "\033[91m" if USE_COLOUR else ""
-C_YELLOW  = "\033[93m" if USE_COLOUR else ""
-C_GREEN   = "\033[92m" if USE_COLOUR else ""
-C_CYAN    = "\033[96m" if USE_COLOUR else ""
+C_RESET = "\033[0m" if USE_COLOUR else ""
+C_BOLD = "\033[1m" if USE_COLOUR else ""
+C_DIM = "\033[2m" if USE_COLOUR else ""
+C_RED = "\033[91m" if USE_COLOUR else ""
+C_YELLOW = "\033[93m" if USE_COLOUR else ""
+C_GREEN = "\033[92m" if USE_COLOUR else ""
+C_CYAN = "\033[96m" if USE_COLOUR else ""
 C_MAGENTA = "\033[95m" if USE_COLOUR else ""
 
 # ---------------------------------------------------------------------------
 # Print helpers
 # ---------------------------------------------------------------------------
+
 
 def _h1(msg: str) -> None:
     w = 72
@@ -100,16 +101,35 @@ def _h1(msg: str) -> None:
     print(f"{C_BOLD}{C_CYAN}  {msg}{C_RESET}")
     print(f"{C_BOLD}{C_CYAN}{'=' * w}{C_RESET}")
 
-def _h2(msg: str)   -> None: print(f"\n{C_BOLD}{C_MAGENTA}-- {msg} {C_RESET}")
-def _ok(msg: str)   -> None: print(f"  {C_GREEN}+{C_RESET}  {msg}")
-def _warn(msg: str) -> None: print(f"  {C_YELLOW}!{C_RESET}  {msg}")
-def _err(msg: str)  -> None: print(f"  {C_RED}x{C_RESET}  {msg}")
-def _info(msg: str) -> None: print(f"  {C_DIM}.{C_RESET}  {msg}")
-def _sep()          -> None: print(f"{C_DIM}{'-' * 72}{C_RESET}")
+
+def _h2(msg: str) -> None:
+    print(f"\n{C_BOLD}{C_MAGENTA}-- {msg} {C_RESET}")
+
+
+def _ok(msg: str) -> None:
+    print(f"  {C_GREEN}+{C_RESET}  {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"  {C_YELLOW}!{C_RESET}  {msg}")
+
+
+def _err(msg: str) -> None:
+    print(f"  {C_RED}x{C_RESET}  {msg}")
+
+
+def _info(msg: str) -> None:
+    print(f"  {C_DIM}.{C_RESET}  {msg}")
+
+
+def _sep() -> None:
+    print(f"{C_DIM}{'-' * 72}{C_RESET}")
+
 
 # ---------------------------------------------------------------------------
 # .env loader  (pure stdlib -- works before venv exists)
 # ---------------------------------------------------------------------------
+
 
 def load_dotenv(path: Path = ENV_FILE) -> dict[str, str]:
     """
@@ -136,7 +156,7 @@ def load_dotenv(path: Path = ENV_FILE) -> dict[str, str]:
         if "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key   = key.strip()
+        key = key.strip()
         value = value.strip()
         if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
             value = value[1:-1]
@@ -167,6 +187,7 @@ def validate_api_key() -> tuple[bool, str]:
 # Spinner (shows activity during blocking API calls)
 # ---------------------------------------------------------------------------
 
+
 class Spinner:
     """
     Display a terminal spinner in a background thread while work runs.
@@ -175,20 +196,20 @@ class Spinner:
         with Spinner("Calling Claude"):
             result = slow_function()
     """
+
     def __init__(self, msg: str = "Working") -> None:
-        self._msg    = msg
-        self._stop   = threading.Event()
+        self._msg = msg
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._spin, daemon=True)
 
     def _spin(self) -> None:
         frames = itertools.cycle(["|", "/", "-", "\\"])
         while not self._stop.is_set():
-            print(f"\r  {C_CYAN}{next(frames)}{C_RESET}  {self._msg} ...",
-                  end="", flush=True)
+            print(f"\r  {C_CYAN}{next(frames)}{C_RESET}  {self._msg} ...", end="", flush=True)
             time.sleep(0.12)
         print(f"\r{' ' * (len(self._msg) + 14)}\r", end="", flush=True)
 
-    def __enter__(self) -> "Spinner":
+    def __enter__(self) -> Spinner:
         self._thread.start()
         return self
 
@@ -200,6 +221,7 @@ class Spinner:
 # ---------------------------------------------------------------------------
 # Anthropic API  (stdlib urllib only -- no SDK needed)
 # ---------------------------------------------------------------------------
+
 
 def call_claude(
     system: str,
@@ -214,21 +236,23 @@ def call_claude(
     Raises RuntimeError on API or network failures.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    model   = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
 
-    payload = json.dumps({
-        "model":      model,
-        "max_tokens": max_tokens,
-        "system":     system,
-        "messages":   messages,
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": messages,
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         ANTHROPIC_API_URL,
         data=payload,
         headers={
-            "Content-Type":      "application/json",
-            "x-api-key":         api_key,
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
             "anthropic-version": ANTHROPIC_API_VERSION,
         },
         method="POST",
@@ -257,6 +281,7 @@ def call_claude(
 # Venv management
 # ---------------------------------------------------------------------------
 
+
 def _run(
     cmd: list[str],
     check: bool = True,
@@ -277,8 +302,11 @@ def _validate_venv() -> tuple[bool, str]:
         return False, "Python binary not found in .venv"
     try:
         result = _run(
-            [str(VENV_PYTHON), "-c",
-             "import sys, pip; print(sys.version_info.major, sys.version_info.minor)"],
+            [
+                str(VENV_PYTHON),
+                "-c",
+                "import sys, pip; print(sys.version_info.major, sys.version_info.minor)",
+            ],
             capture=True,
         )
         major, minor = map(int, result.stdout.strip().split())
@@ -289,7 +317,7 @@ def _validate_venv() -> tuple[bool, str]:
         return False, f"Validation probe failed: {exc}"
 
 
-def _find_python_312() -> Optional[str]:
+def _find_python_312() -> str | None:
     """
     Return path to the best available Python 3.12+ binary by searching:
       1. Explicitly versioned names on PATH (python3.13, python3.12)
@@ -304,9 +332,10 @@ def _find_python_312() -> Optional[str]:
     def _version_ok(exe: str) -> bool:
         try:
             r = subprocess.run(
-                [exe, "-c",
-                 "import sys; print(sys.version_info.major, sys.version_info.minor)"],
-                capture_output=True, text=True, timeout=5,
+                [exe, "-c", "import sys; print(sys.version_info.major, sys.version_info.minor)"],
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if r.returncode != 0:
                 return False
@@ -431,9 +460,7 @@ def ensure_venv() -> None:
         return
 
     _err(f".venv validation FAILED: {message}")
-    answer = input(
-        f"  {C_YELLOW}Delete and recreate .venv? [y/N]{C_RESET} "
-    ).strip().lower()
+    answer = input(f"  {C_YELLOW}Delete and recreate .venv? [y/N]{C_RESET} ").strip().lower()
     if answer != "y":
         _err("Cannot continue with invalid .venv. Exiting.")
         sys.exit(1)
@@ -455,56 +482,57 @@ def ensure_venv() -> None:
 # Tracking file data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ProgressEntry:
-    milestone_id:   str
-    label:          str
-    status:         str
+    milestone_id: str
+    label: str
+    status: str
     blocking_issue: str = ""
-    steps:          list[tuple[str, str]] = field(default_factory=list)
+    steps: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
 class WorkplanProgress:
-    workplan_name:    str
-    progress_file:    Path
-    last_updated:     str
+    workplan_name: str
+    progress_file: Path
+    last_updated: str
     active_milestone: str
-    active_step:      str
-    resume_detail:    str
-    entries:          list[ProgressEntry] = field(default_factory=list)
+    active_step: str
+    resume_detail: str
+    entries: list[ProgressEntry] = field(default_factory=list)
 
 
 @dataclass
 class Issue:
-    number:     str
-    title:      str
-    status:     str
-    milestone:  str
+    number: str
+    title: str
+    status: str
+    milestone: str
     discovered: str
-    resolved:   str
-    symptoms:   str
+    resolved: str
+    symptoms: str
     root_cause: str
-    fix:        str
+    fix: str
     lesson_ref: str
 
 
 @dataclass
 class Lesson:
-    number:    str
-    title:     str
+    number: str
+    title: str
     milestone: str
-    source:    str
-    lesson:    str
-    apply_to:  str
+    source: str
+    lesson: str
+    apply_to: str
 
 
 @dataclass
 class WorkplanTracking:
     workplan_name: str
-    progress:  Optional[WorkplanProgress]  = None
-    issues:    list[Issue]                 = field(default_factory=list)
-    lessons:   list[Lesson]                = field(default_factory=list)
+    progress: WorkplanProgress | None = None
+    issues: list[Issue] = field(default_factory=list)
+    lessons: list[Lesson] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -524,12 +552,12 @@ _STEP_RE = re.compile(
 _HEADER_RE = re.compile(r"^#\s+(?P<key>[A-Za-z ]+):\s*(?P<value>.+)$")
 
 
-def _parse_progress(path: Path) -> Optional[WorkplanProgress]:
+def _parse_progress(path: Path) -> WorkplanProgress | None:
     if not path.exists():
         return None
     headers: dict[str, str] = {}
     entries: list[ProgressEntry] = []
-    current: Optional[ProgressEntry] = None
+    current: ProgressEntry | None = None
 
     for line in path.read_text(encoding="utf-8").splitlines():
         hm = _HEADER_RE.match(line)
@@ -555,9 +583,7 @@ def _parse_progress(path: Path) -> Optional[WorkplanProgress]:
             continue
         step_m = _STEP_RE.match(line)
         if step_m and current:
-            current.steps.append(
-                (step_m.group("label").strip(), step_m.group("status").upper())
-            )
+            current.steps.append((step_m.group("label").strip(), step_m.group("status").upper()))
     if current:
         entries.append(current)
 
@@ -575,7 +601,8 @@ def _parse_progress(path: Path) -> Optional[WorkplanProgress]:
 def _block_field(block: str, name: str) -> str:
     m = re.search(
         rf"^{re.escape(name)}:\s*(.+?)(?=\n[A-Za-z ]+:|$)",
-        block, re.MULTILINE | re.DOTALL,
+        block,
+        re.MULTILINE | re.DOTALL,
     )
     return textwrap.dedent(m.group(1)).strip() if m else ""
 
@@ -588,18 +615,20 @@ def _parse_issues(path: Path) -> list[Issue]:
         m = re.search(r"(ISS-\d+)", block)
         if not m:
             continue
-        issues.append(Issue(
-            number=m.group(1),
-            title=_block_field(block, "Title"),
-            status=_block_field(block, "Status"),
-            milestone=_block_field(block, "Milestone"),
-            discovered=_block_field(block, "Discovered"),
-            resolved=_block_field(block, "Resolved"),
-            symptoms=_block_field(block, "Symptoms"),
-            root_cause=_block_field(block, "Root cause"),
-            fix=_block_field(block, "Fix"),
-            lesson_ref=_block_field(block, "Lesson"),
-        ))
+        issues.append(
+            Issue(
+                number=m.group(1),
+                title=_block_field(block, "Title"),
+                status=_block_field(block, "Status"),
+                milestone=_block_field(block, "Milestone"),
+                discovered=_block_field(block, "Discovered"),
+                resolved=_block_field(block, "Resolved"),
+                symptoms=_block_field(block, "Symptoms"),
+                root_cause=_block_field(block, "Root cause"),
+                fix=_block_field(block, "Fix"),
+                lesson_ref=_block_field(block, "Lesson"),
+            )
+        )
     return issues
 
 
@@ -611,14 +640,16 @@ def _parse_lessons(path: Path) -> list[Lesson]:
         m = re.search(r"(LL-\d+)", block)
         if not m:
             continue
-        lessons.append(Lesson(
-            number=m.group(1),
-            title=_block_field(block, "Title"),
-            milestone=_block_field(block, "Milestone"),
-            source=_block_field(block, "Source"),
-            lesson=_block_field(block, "Lesson"),
-            apply_to=_block_field(block, "Apply to"),
-        ))
+        lessons.append(
+            Lesson(
+                number=m.group(1),
+                title=_block_field(block, "Title"),
+                milestone=_block_field(block, "Milestone"),
+                source=_block_field(block, "Source"),
+                lesson=_block_field(block, "Lesson"),
+                apply_to=_block_field(block, "Apply to"),
+            )
+        )
     return lessons
 
 
@@ -635,8 +666,8 @@ def discover_tracking() -> list[WorkplanTracking]:
     for stem in sorted(stems):
         wt = WorkplanTracking(workplan_name=stem)
         wt.progress = _parse_progress(TRACKING_DIR / f"{stem}.progress")
-        wt.issues   = _parse_issues(TRACKING_DIR / f"{stem}.issues")
-        wt.lessons  = _parse_lessons(TRACKING_DIR / f"{stem}.lessons-learned")
+        wt.issues = _parse_issues(TRACKING_DIR / f"{stem}.issues")
+        wt.lessons = _parse_lessons(TRACKING_DIR / f"{stem}.lessons-learned")
         results.append(wt)
     return results
 
@@ -653,21 +684,22 @@ def discover_tracking() -> list[WorkplanTracking]:
 #   }
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ActiveSelection:
-    workplan_stem: str        # stem used for tracking files
-    workplan_path: Path       # absolute path to the workplan .md
-    spec_path:     Optional[Path]  # absolute path to the software spec .md (optional)
+    workplan_stem: str  # stem used for tracking files
+    workplan_path: Path  # absolute path to the workplan .md
+    spec_path: Path | None  # absolute path to the software spec .md (optional)
 
 
-def load_active_selection() -> Optional[ActiveSelection]:
+def load_active_selection() -> ActiveSelection | None:
     """Load the persisted workplan + spec selection from .active_workplan (JSON)."""
     if not ACTIVE_WORKPLAN_FILE.exists():
         return None
     try:
         data = json.loads(ACTIVE_WORKPLAN_FILE.read_text(encoding="utf-8"))
         wp_path = PROJECT_ROOT / data["workplan_path"]
-        sp_raw  = data.get("spec_path", "")
+        sp_raw = data.get("spec_path", "")
         sp_path = PROJECT_ROOT / sp_raw if sp_raw else None
         return ActiveSelection(
             workplan_stem=data["workplan_stem"],
@@ -684,16 +716,14 @@ def save_active_selection(sel: ActiveSelection) -> None:
     data = {
         "workplan_stem": sel.workplan_stem,
         "workplan_path": str(sel.workplan_path.relative_to(PROJECT_ROOT)),
-        "spec_path":     str(sel.spec_path.relative_to(PROJECT_ROOT)) if sel.spec_path else "",
+        "spec_path": str(sel.spec_path.relative_to(PROJECT_ROOT)) if sel.spec_path else "",
     }
-    ACTIVE_WORKPLAN_FILE.write_text(
-        json.dumps(data, indent=2) + "\n", encoding="utf-8"
-    )
+    ACTIVE_WORKPLAN_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def resolve_active_workplan(
     all_wt: list[WorkplanTracking],
-) -> Optional[WorkplanTracking]:
+) -> WorkplanTracking | None:
     """
     Return the active WorkplanTracking for menu display / brief scoping.
     Priority:
@@ -718,6 +748,7 @@ def resolve_active_workplan(
 # .md file browser (for User Spec directory)
 # ---------------------------------------------------------------------------
 
+
 def _collect_md_files(directory: Path) -> list[Path]:
     """
     Recursively collect all .md files under directory, sorted with files in
@@ -734,7 +765,7 @@ def browse_md_files(
     directory: Path,
     prompt: str = "Select a file",
     allow_skip: bool = False,
-) -> Optional[Path]:
+) -> Path | None:
     """
     Display a numbered list of .md files found under `directory` and return
     the user's choice.  Files are grouped: root-level first, then by subfolder.
@@ -751,7 +782,7 @@ def browse_md_files(
         return None
 
     # Group by parent for display
-    last_parent: Optional[Path] = None
+    last_parent: Path | None = None
     for idx, fp in enumerate(files, 1):
         parent = fp.parent
         if parent != last_parent:
@@ -761,12 +792,14 @@ def browse_md_files(
         size_kb = fp.stat().st_size / 1024
         print(f"    {C_BOLD}[{idx:>2}]{C_RESET}  {fp.name}  {C_DIM}({size_kb:.1f} KB){C_RESET}")
 
-    skip_hint = f" / s=skip" if allow_skip else ""
+    skip_hint = " / s=skip" if allow_skip else ""
     print()
     try:
-        raw = input(
-            f"  {C_YELLOW}{prompt} (1-{len(files)}{skip_hint} / Enter=cancel):{C_RESET} "
-        ).strip().lower()
+        raw = (
+            input(f"  {C_YELLOW}{prompt} (1-{len(files)}{skip_hint} / Enter=cancel):{C_RESET} ")
+            .strip()
+            .lower()
+        )
     except (KeyboardInterrupt, EOFError):
         print()
         return None
@@ -789,7 +822,7 @@ def browse_md_files(
         return None
 
 
-def action_select_workplan(all_wt: list[WorkplanTracking]) -> Optional[WorkplanTracking]:
+def action_select_workplan(all_wt: list[WorkplanTracking]) -> WorkplanTracking | None:
     """
     Two-step interactive picker:
       Step 1 -- Browse User Spec dir and pick a workplan .md file.
@@ -851,7 +884,7 @@ def action_select_workplan(all_wt: list[WorkplanTracking]) -> Optional[WorkplanT
     return None
 
 
-def find_resume(all_wt: list[WorkplanTracking]) -> Optional[tuple[str, str, str]]:
+def find_resume(all_wt: list[WorkplanTracking]) -> tuple[str, str, str] | None:
     """
     Return (workplan_name, active_milestone, resume_detail) for the active
     workplan, or the first in-progress workplan if no explicit selection exists.
@@ -871,7 +904,7 @@ def find_resume(all_wt: list[WorkplanTracking]) -> Optional[tuple[str, str, str]
     return None
 
 
-def find_workplan_file(workplan_name: str) -> Optional[Path]:
+def find_workplan_file(workplan_name: str) -> Path | None:
     """
     Return the workplan .md Path.  Priority:
       1. The path saved in .active_workplan (most reliable).
@@ -894,7 +927,7 @@ def find_workplan_file(workplan_name: str) -> Optional[Path]:
     return None
 
 
-def find_spec_file() -> Optional[Path]:
+def find_spec_file() -> Path | None:
     """Return the saved software spec Path, or None."""
     sel = load_active_selection()
     if sel and sel.spec_path and sel.spec_path.exists():
@@ -934,11 +967,11 @@ def find_spec_file() -> Optional[Path]:
 #   ## Milestone M0: Bootstrap
 #   ## M0
 _DISTIL_SECTION_RE = re.compile(
-    r"##\s+"                                      # ## (required)
-    r"(?:MILESTONE:\s*)?"                         # optional "MILESTONE:" prefix
-    r"(?:Milestone\s+)?"                          # optional "Milestone " prefix
-    r"(?P<mid>M\d+[A-Z]?)"                        # M0, M1 … M12
-    r"(?:\s*(?:--|:)\s*(?P<label>[^\n]+))?"     # optional " -- label" or ": label"
+    r"##\s+"  # ## (required)
+    r"(?:MILESTONE:\s*)?"  # optional "MILESTONE:" prefix
+    r"(?:Milestone\s+)?"  # optional "Milestone " prefix
+    r"(?P<mid>M\d+[A-Z]?)"  # M0, M1 … M12
+    r"(?:\s*(?:--|:)\s*(?P<label>[^\n]+))?"  # optional " -- label" or ": label"
     r"\n(?P<body>.*?)(?=\n##\s+(?:MILESTONE:|Milestone\s+)?M\d|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
@@ -981,7 +1014,7 @@ def load_spec_content_raw(max_chars: int = 60_000) -> str:
 
     keep_head = int(max_chars * 0.55)
     keep_tail = int(max_chars * 0.35)
-    omitted   = len(raw) - keep_head - keep_tail
+    omitted = len(raw) - keep_head - keep_tail
     return (
         raw[:keep_head]
         + f"\n\n[... {omitted:,} chars omitted -- middle sections ...] \n\n"
@@ -1033,19 +1066,26 @@ def build_state_dump(all_wt: list[WorkplanTracking]) -> str:
 # Status colour helper
 # ---------------------------------------------------------------------------
 
+
 def _col(s: str) -> str:
     up = s.upper()
-    if up == "DONE":         return f"{C_GREEN}{s}{C_RESET}"
-    if up == "IN_PROGRESS":  return f"{C_CYAN}{s}{C_RESET}"
-    if up == "BLOCKED":      return f"{C_RED}{s}{C_RESET}"
-    if up in ("WORKING", "IDENTIFIED"): return f"{C_YELLOW}{s}{C_RESET}"
-    if up == "RESOLVED":     return f"{C_GREEN}{s}{C_RESET}"
+    if up == "DONE":
+        return f"{C_GREEN}{s}{C_RESET}"
+    if up == "IN_PROGRESS":
+        return f"{C_CYAN}{s}{C_RESET}"
+    if up == "BLOCKED":
+        return f"{C_RED}{s}{C_RESET}"
+    if up in ("WORKING", "IDENTIFIED"):
+        return f"{C_YELLOW}{s}{C_RESET}"
+    if up == "RESOLVED":
+        return f"{C_GREEN}{s}{C_RESET}"
     return f"{C_DIM}{s}{C_RESET}"
 
 
 # ---------------------------------------------------------------------------
 # Plain-text brief (fallback when API unavailable)
 # ---------------------------------------------------------------------------
+
 
 def print_plain_brief(all_wt: list[WorkplanTracking]) -> None:
     _h1("FXLab -- Session State (plain)")
@@ -1167,7 +1207,7 @@ Rules:
 
 
 def _distil_refresh_section(
-    sel: "ActiveSelection",
+    sel: ActiveSelection,
     dp: Path,
     milestone_id: str,
     all_wt: list[WorkplanTracking],
@@ -1198,14 +1238,13 @@ def _distil_refresh_section(
     for wt in all_wt:
         if wt.workplan_name == sel.workplan_stem and wt.lessons:
             relevant = [
-                ll for ll in wt.lessons
-                if milestone_id.lower() in ll.apply_to.lower()
-                or "all" in ll.apply_to.lower()
+                ll
+                for ll in wt.lessons
+                if milestone_id.lower() in ll.apply_to.lower() or "all" in ll.apply_to.lower()
             ]
             if relevant:
                 lessons_text = "\n".join(
-                    f"- {ll.number}: {ll.title}\n  {ll.lesson}"
-                    for ll in relevant
+                    f"- {ll.number}: {ll.title}\n  {ll.lesson}" for ll in relevant
                 )
 
     spec_excerpt = ""
@@ -1277,7 +1316,7 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
 
     raw = dp.read_text(encoding="utf-8")
     _info(f"File: {dp}")
-    _info(f"Size: {len(raw):,} chars  ({len(raw)//4} tokens approx)")
+    _info(f"Size: {len(raw):,} chars  ({len(raw) // 4} tokens approx)")
     print()
 
     # Show first 400 chars so user can see the actual heading format
@@ -1293,9 +1332,11 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
         _ok(f"Regex matched {len(sections)} section(s):")
         for m in sections:
             tokens = len(m.group("body")) // 4
-            print(f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
-                  f"{(m.group('label') or '').strip():<45s}  "
-                  f"{C_DIM}~{tokens} tokens{C_RESET}")
+            print(
+                f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
+                f"{(m.group('label') or '').strip():<45s}  "
+                f"{C_DIM}~{tokens} tokens{C_RESET}"
+            )
     else:
         _err("Regex matched 0 sections.")
         print()
@@ -1306,7 +1347,7 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
             for h in headings[:20]:
                 print(f"  {C_DIM}{h}{C_RESET}")
             if len(headings) > 20:
-                _info(f"... and {len(headings)-20} more")
+                _info(f"... and {len(headings) - 20} more")
         print()
         _warn("The distilled file uses headings that don't match the regex.")
         _warn("Option 1: Delete the file and re-run [d] (the prompt is now stricter).")
@@ -1316,7 +1357,7 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
 
 def action_distil(
     all_wt: list[WorkplanTracking],
-    refresh_milestone: Optional[str] = None,
+    refresh_milestone: str | None = None,
 ) -> None:
     """
     Distil spec + workplan into per-milestone context blocks.
@@ -1339,17 +1380,19 @@ def action_distil(
 
     # ── Refresh mode: regenerate one section only ────────────────────────────
     if refresh_milestone is None and dp.exists():
-        answer = input(
-            f"  {C_YELLOW}Distilled file exists.  "
-            f"[f]ull regen / [r]efresh one milestone / [c]ancel:{C_RESET} "
-        ).strip().lower()
+        answer = (
+            input(
+                f"  {C_YELLOW}Distilled file exists.  "
+                f"[f]ull regen / [r]efresh one milestone / [c]ancel:{C_RESET} "
+            )
+            .strip()
+            .lower()
+        )
         if answer == "c":
             _info("Cancelled.")
             return
         if answer == "r":
-            mid = input(
-                f"  {C_YELLOW}Milestone to refresh (e.g. M3):{C_RESET} "
-            ).strip().upper()
+            mid = input(f"  {C_YELLOW}Milestone to refresh (e.g. M3):{C_RESET} ").strip().upper()
             refresh_milestone = mid if mid else None
 
     if refresh_milestone:
@@ -1359,10 +1402,14 @@ def action_distil(
     # Full regeneration -- warn if file exists
     if dp.exists():
         size_kb = dp.stat().st_size / 1024
-        answer = input(
-            f"  {C_YELLOW}Distilled file already exists ({size_kb:.1f} KB).  "
-            f"Regenerate all? [y/N]{C_RESET} "
-        ).strip().lower()
+        answer = (
+            input(
+                f"  {C_YELLOW}Distilled file already exists ({size_kb:.1f} KB).  "
+                f"Regenerate all? [y/N]{C_RESET} "
+            )
+            .strip()
+            .lower()
+        )
         if answer != "y":
             _info("Keeping existing distilled file.")
             return
@@ -1375,29 +1422,28 @@ def action_distil(
         return
 
     workplan_text = workplan_path.read_text(encoding="utf-8")
-    spec_text     = load_spec_content_raw()
+    spec_text = load_spec_content_raw()
 
     if not spec_text:
-        answer = input(
-            f"  {C_YELLOW}No spec file selected.  "
-            f"Distil from workplan only? [y/N]{C_RESET} "
-        ).strip().lower()
+        answer = (
+            input(f"  {C_YELLOW}No spec file selected.  Distil from workplan only? [y/N]{C_RESET} ")
+            .strip()
+            .lower()
+        )
         if answer != "y":
             _info("Aborted. Use [w] to select a spec file first.")
             return
 
     # Estimate and show token counts (rough: 1 token ≈ 4 chars)
-    wp_tokens   = len(workplan_text) // 4
+    wp_tokens = len(workplan_text) // 4
     spec_tokens = len(spec_text) // 4
-    total_in    = wp_tokens + spec_tokens
+    total_in = wp_tokens + spec_tokens
     _info(f"Workplan:  ~{wp_tokens:,} tokens")
     _info(f"Spec:      ~{spec_tokens:,} tokens")
     _info(f"Total in:  ~{total_in:,} tokens  (one-time cost)")
-    _info(f"Output:    per-milestone context blocks (~400-600 tokens each, reused every build)")
+    _info("Output:    per-milestone context blocks (~400-600 tokens each, reused every build)")
 
-    answer = input(
-        f"  {C_YELLOW}Proceed with distillation? [y/N]{C_RESET} "
-    ).strip().lower()
+    answer = input(f"  {C_YELLOW}Proceed with distillation? [y/N]{C_RESET} ").strip().lower()
     if answer != "y":
         _info("Aborted.")
         return
@@ -1468,8 +1514,10 @@ def action_distil(
     print()
     for m in sections:
         ctx_tokens = len(m.group("body")) // 4
-        print(f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
-              f"{m.group('label'):<45s}  {C_DIM}~{ctx_tokens} tokens{C_RESET}")
+        print(
+            f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
+            f"{m.group('label'):<45s}  {C_DIM}~{ctx_tokens} tokens{C_RESET}"
+        )
 
     print()
     _info(f"Path: {dp}")
@@ -1488,13 +1536,15 @@ def action_ai_brief(all_wt: list[WorkplanTracking]) -> None:
         return
 
     # Prefer distilled per-milestone context over raw spec.
-    active_wt   = resolve_active_workplan(all_wt)
+    active_wt = resolve_active_workplan(all_wt)
     active_stem = active_wt.workplan_name if active_wt else ""
-    active_mid  = active_wt.progress.active_milestone if (active_wt and active_wt.progress) else ""
+    active_mid = active_wt.progress.active_milestone if (active_wt and active_wt.progress) else ""
 
-    distilled_ctx = load_milestone_context(active_stem, active_mid) if active_stem and active_mid else ""
+    distilled_ctx = (
+        load_milestone_context(active_stem, active_mid) if active_stem and active_mid else ""
+    )
     if distilled_ctx:
-        _info(f"Using distilled context for {active_mid} (~{len(distilled_ctx)//4} tokens)")
+        _info(f"Using distilled context for {active_mid} (~{len(distilled_ctx) // 4} tokens)")
         spec_section = f"\n\n## Milestone Context (distilled)\n\n{distilled_ctx}"
     else:
         dp = distilled_file_path(active_stem) if active_stem else None
@@ -1536,8 +1586,7 @@ def action_ai_brief(all_wt: list[WorkplanTracking]) -> None:
 # ---------------------------------------------------------------------------
 
 _STEP_PROMPTS: dict[str, str] = {
-
-"S1": """You are a senior software architect performing a spec review.
+    "S1": """You are a senior software architect performing a spec review.
 You will receive a workplan milestone spec, distilled context, and project state.
 
 OUTPUT ONLY a structured understanding document -- no code, no file blocks.
@@ -1560,8 +1609,7 @@ YES or BLOCKED (with reason)
 Keep it under 300 words. Be direct. This output will be saved as the session
 understanding record before any implementation begins.
 """,
-
-"S2": """You are a senior software architect defining interface contracts.
+    "S2": """You are a senior software architect defining interface contracts.
 You will receive a workplan milestone spec and distilled context.
 
 OUTPUT ONLY abstract interfaces, Pydantic v2 schemas, and enums.
@@ -1586,8 +1634,7 @@ After files, add:
 ## Interface Summary
 - List every class name and its layer (Contract / ServiceInterface / RepositoryInterface)
 """,
-
-"S3": """You are a senior software engineer writing a failing test suite (RED phase).
+    "S3": """You are a senior software engineer writing a failing test suite (RED phase).
 You will receive interface contracts defined in S2 and milestone acceptance criteria.
 
 OUTPUT ONLY test files -- no implementation code whatsoever.
@@ -1610,8 +1657,7 @@ After files, add:
 - List each test and what behaviour it verifies
 - Confirm each test will fail before implementation exists
 """,
-
-"S4": """You are a senior software engineer writing minimal implementations (GREEN phase).
+    "S4": """You are a senior software engineer writing minimal implementations (GREEN phase).
 You will receive failing tests from S3 and interface contracts from S2.
 
 YOUR ONLY GOAL: make the failing tests pass with the minimum code required.
@@ -1635,8 +1681,7 @@ After files, add:
 
 State which acceptance criteria from the workplan are now satisfied.
 """,
-
-"S5": """You are a senior software engineer performing a quality gate review.
+    "S5": """You are a senior software engineer performing a quality gate review.
 Analyse the code written so far against the quality rules below and
 output a structured report -- no new implementation files.
 
@@ -1666,8 +1711,7 @@ PASS or FAIL (with count of blockers)
 
 If FAIL, output corrected files using <<<FILE>>> blocks after the report.
 """,
-
-"S6": """You are a senior software engineer performing a refactor (GREEN is passing).
+    "S6": """You are a senior software engineer performing a refactor (GREEN is passing).
 Tests are passing. Your job is to improve code quality WITHOUT changing behaviour.
 
 Allowed changes:
@@ -1685,8 +1729,7 @@ Forbidden changes:
 Output only the files that actually changed using <<<FILE>>> blocks.
 If no refactoring is needed, say so explicitly and output no files.
 """,
-
-"S7": """You are a senior software engineer writing integration tests.
+    "S7": """You are a senior software engineer writing integration tests.
 Unit tests pass. Now write tests that exercise real I/O against
 the Docker Compose stack (PostgreSQL, Redis, MinIO).
 
@@ -1705,8 +1748,7 @@ After files, add:
 - <docker compose up command>
 - <pytest integration test command>
 """,
-
-"S8": """You are a senior software engineer performing a final checklist review.
+    "S8": """You are a senior software engineer performing a final checklist review.
 All tests pass, quality gate is clean. Produce a review checklist sign-off.
 
 Output format:
@@ -1749,7 +1791,6 @@ def _system_for_step(step_id: str) -> str:
 _AGENT_SYSTEM = _STEP_PROMPTS["S4"]  # legacy alias for direct calls
 
 
-
 def _extract_files(response: str) -> list[tuple[str, str]]:
     """Parse <<<FILE: path>>> ... <<<END_FILE>>> blocks from a Claude response."""
     pattern = re.compile(
@@ -1776,9 +1817,7 @@ def _confirm_write(rel_path: str, content: str) -> bool:
     """Prompt before writing a file to disk. Returns True to write."""
     line_count = len(content.splitlines())
     print(f"\n  {C_BOLD}File:{C_RESET} {C_CYAN}{rel_path}{C_RESET}  ({line_count} lines)")
-    answer = input(
-        f"  {C_YELLOW}Write? [Y/n/p=preview]{C_RESET} "
-    ).strip().lower()
+    answer = input(f"  {C_YELLOW}Write? [Y/n/p=preview]{C_RESET} ").strip().lower()
     if answer == "p":
         for i, line in enumerate(content.splitlines()[:50], 1):
             print(f"  {C_DIM}{i:3d}{C_RESET}  {line}")
@@ -1795,24 +1834,22 @@ def _confirm_write(rel_path: str, content: str) -> bool:
 # Hardcoded dependency chain matching the workplan milestone graph.
 # Key = milestone that has prerequisites; value = list of required-DONE milestones.
 _MILESTONE_DEPS: dict[str, list[str]] = {
-    "M1":  ["M0"],
-    "M2":  ["M1"],
-    "M3":  ["M2"],
-    "M4":  ["M3"],
-    "M5":  ["M4"],
-    "M6":  ["M5"],
-    "M7":  ["M6"],
-    "M8":  ["M7"],
-    "M9":  ["M2", "M7"],
+    "M1": ["M0"],
+    "M2": ["M1"],
+    "M3": ["M2"],
+    "M4": ["M3"],
+    "M5": ["M4"],
+    "M6": ["M5"],
+    "M7": ["M6"],
+    "M8": ["M7"],
+    "M9": ["M2", "M7"],
     "M10": ["M4", "M7"],
     "M11": ["M4", "M8", "M10"],
-    "M12": ["M0","M1","M2","M3","M4","M5","M6","M7","M8","M9","M10","M11"],
+    "M12": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11"],
 }
 
 
-def check_prerequisites(
-    active_wt: WorkplanTracking, milestone_id: str
-) -> tuple[bool, list[str]]:
+def check_prerequisites(active_wt: WorkplanTracking, milestone_id: str) -> tuple[bool, list[str]]:
     """
     Check that all prerequisite milestones are DONE in the progress file.
     Returns (ok, list_of_blocking_milestone_ids).
@@ -1824,11 +1861,7 @@ def check_prerequisites(
     if not required:
         return True, []
 
-    done_ids = {
-        e.milestone_id.upper()
-        for e in active_wt.progress.entries
-        if e.status == "DONE"
-    }
+    done_ids = {e.milestone_id.upper() for e in active_wt.progress.entries if e.status == "DONE"}
     blocking = [r for r in required if r.upper() not in done_ids]
     return len(blocking) == 0, blocking
 
@@ -1875,18 +1908,17 @@ def store_contract_fingerprints(progress_path: Path, milestone_id: str) -> dict[
     # Append to progress file
     text = progress_path.read_text(encoding="utf-8")
     # Remove any existing fingerprint block
-    text = re.sub(
-        re.escape(_FINGERPRINT_MARKER) + r".*?(?=\n#|\Z)",
-        "",
-        text,
-        flags=re.DOTALL,
-    ).rstrip() + "\n"
-    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    block = (
-        "\n"
-        + _FINGERPRINT_MARKER
-        + f" milestone={milestone_id} ts={now_ts}\n"
+    text = (
+        re.sub(
+            re.escape(_FINGERPRINT_MARKER) + r".*?(?=\n#|\Z)",
+            "",
+            text,
+            flags=re.DOTALL,
+        ).rstrip()
+        + "\n"
     )
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    block = "\n" + _FINGERPRINT_MARKER + f" milestone={milestone_id} ts={now_ts}\n"
     for rel, h in fps.items():
         block += f"#   {h}  {rel}\n"
     progress_path.write_text(text + block, encoding="utf-8")
@@ -1928,6 +1960,7 @@ def check_contract_fingerprints(progress_path: Path) -> tuple[bool, list[str]]:
 # Contract completeness AST check  (improvement #7)
 # ---------------------------------------------------------------------------
 
+
 def _method_names_from_contracts_section(distilled_text: str) -> list[str]:
     """
     Extract method/function names mentioned in an '### Interface Contracts'
@@ -1936,7 +1969,8 @@ def _method_names_from_contracts_section(distilled_text: str) -> list[str]:
     """
     section_m = re.search(
         r"###\s+Interface Contracts\s*\n(.*?)(?=\n###|\Z)",
-        distilled_text, re.DOTALL | re.IGNORECASE,
+        distilled_text,
+        re.DOTALL | re.IGNORECASE,
     )
     if not section_m:
         return []
@@ -1945,9 +1979,28 @@ def _method_names_from_contracts_section(distilled_text: str) -> list[str]:
     names = re.findall(r"([a-z_][a-z0-9_]{2,})\s*\(", section, re.IGNORECASE)
     # Exclude Python builtins and common noise words
     skip = {
-        "def", "class", "if", "for", "while", "return", "raise", "print",
-        "isinstance", "hasattr", "getattr", "setattr", "len", "str", "int",
-        "dict", "list", "tuple", "set", "type", "super", "object",
+        "def",
+        "class",
+        "if",
+        "for",
+        "while",
+        "return",
+        "raise",
+        "print",
+        "isinstance",
+        "hasattr",
+        "getattr",
+        "setattr",
+        "len",
+        "str",
+        "int",
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "type",
+        "super",
+        "object",
     }
     return [n for n in names if n.lower() not in skip]
 
@@ -1991,15 +2044,17 @@ def run_contract_completeness_check(
 # Test runner with failure capture (for iteration loop)
 # ---------------------------------------------------------------------------
 
+
 def run_tests_capture(test_dir: str = "tests/") -> tuple[bool, str]:
     """
     Run pytest and capture output.  Returns (passed, failure_output).
     failure_output is empty string on success.
     """
     result = subprocess.run(
-        [str(VENV_PYTHON), "-m", "pytest", test_dir,
-         "--tb=short", "-q", "--no-header"],
-        capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        [str(VENV_PYTHON), "-m", "pytest", test_dir, "--tb=short", "-q", "--no-header"],
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
     )
     passed = result.returncode == 0
     output = (result.stdout + result.stderr).strip()
@@ -2010,13 +2065,14 @@ def run_tests_capture(test_dir: str = "tests/") -> tuple[bool, str]:
 # Progress file auto-advance  (improvement #4)
 # ---------------------------------------------------------------------------
 
+
 def _step_sequence() -> list[str]:
     return [sid for sid, _ in STEP_LABELS]
 
 
 def advance_progress_step(
     progress_path: Path, milestone_id: str, completed_step_id: str
-) -> Optional[str]:
+) -> str | None:
     """
     Mark completed_step_id as DONE for milestone_id and advance Active step.
     Returns the next step ID, or None if the milestone is now fully complete.
@@ -2026,7 +2082,7 @@ def advance_progress_step(
         return None
 
     text = progress_path.read_text(encoding="utf-8")
-    seq  = _step_sequence()
+    seq = _step_sequence()
 
     # Mark the completed step DONE
     old_entry = f"[{milestone_id}-{completed_step_id}]"
@@ -2040,7 +2096,7 @@ def advance_progress_step(
     # Find next step
     try:
         current_idx = seq.index(completed_step_id.upper())
-        next_step   = seq[current_idx + 1] if current_idx + 1 < len(seq) else None
+        next_step = seq[current_idx + 1] if current_idx + 1 < len(seq) else None
     except ValueError:
         next_step = None
 
@@ -2051,13 +2107,17 @@ def advance_progress_step(
     if next_step:
         # Find the label for next step
         next_label = next((lbl for sid, lbl in STEP_LABELS if sid == next_step), next_step)
-        new_active = f"STEP {seq.index(next_step)+1} -- {next_label} ({milestone_id})"
+        new_active = f"STEP {seq.index(next_step) + 1} -- {next_label} ({milestone_id})"
         text = re.sub(
             r"^# Active step:.*$", f"# Active step: {new_active}", text, flags=re.MULTILINE
         )
         # Mark the next step IN_PROGRESS
         text = re.sub(
-            r"(\["  + re.escape(milestone_id) + r"-" + re.escape(next_step) + r"\][^\n]+?)NOT_STARTED",
+            r"(\["
+            + re.escape(milestone_id)
+            + r"-"
+            + re.escape(next_step)
+            + r"\][^\n]+?)NOT_STARTED",
             r"\1IN_PROGRESS",
             text,
         )
@@ -2071,7 +2131,8 @@ def advance_progress_step(
         text = re.sub(
             r"^# Active step:.*$",
             f"# Active step: {milestone_id} COMPLETE -- advance Active milestone",
-            text, flags=re.MULTILINE,
+            text,
+            flags=re.MULTILINE,
         )
 
     progress_path.write_text(text, encoding="utf-8")
@@ -2082,6 +2143,7 @@ def advance_progress_step(
 # Auto-commit helper  (improvement #6)
 # ---------------------------------------------------------------------------
 
+
 def _git_available() -> bool:
     return shutil.which("git") is not None
 
@@ -2090,7 +2152,9 @@ def _git_status_clean() -> bool:
     """True if there are staged or unstaged changes (i.e. something to commit)."""
     r = subprocess.run(
         ["git", "status", "--porcelain"],
-        capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
     )
     return bool(r.stdout.strip())
 
@@ -2108,14 +2172,11 @@ def action_auto_commit(milestone_id: str, step_id: str, step_label: str) -> None
         return
 
     msg = (
-        f"feat({milestone_id.lower()}-{step_id.lower()}): "
-        f"{step_label.lower().replace(' -- ', ' ')}"
+        f"feat({milestone_id.lower()}-{step_id.lower()}): {step_label.lower().replace(' -- ', ' ')}"
     )
     print(f"\n  {C_BOLD}Proposed commit message:{C_RESET}")
     print(f"  {C_CYAN}{msg}{C_RESET}")
-    answer = input(
-        f"  {C_YELLOW}Commit all changes? [y/N/e=edit]{C_RESET} "
-    ).strip().lower()
+    answer = input(f"  {C_YELLOW}Commit all changes? [y/N/e=edit]{C_RESET} ").strip().lower()
     if answer == "e":
         try:
             msg = input(f"  {C_YELLOW}Enter commit message:{C_RESET} ").strip()
@@ -2129,7 +2190,9 @@ def action_auto_commit(milestone_id: str, step_id: str, step_label: str) -> None
     subprocess.run(["git", "add", "-A"], cwd=str(PROJECT_ROOT), check=False)
     r = subprocess.run(
         ["git", "commit", "-m", msg],
-        cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
     )
     if r.returncode == 0:
         _ok(f"Committed: {msg}")
@@ -2187,14 +2250,18 @@ def action_handoff(all_wt: list[WorkplanTracking], api_ok: bool) -> None:
     if _git_available():
         r = subprocess.run(
             ["git", "diff", "--stat", "HEAD"],
-            capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            cwd=str(PROJECT_ROOT),
         )
         git_diff = r.stdout.strip()
         if not git_diff:
             # Try against last commit if nothing staged
             r2 = subprocess.run(
                 ["git", "diff", "--stat"],
-                capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
             )
             git_diff = r2.stdout.strip() or "(no changes detected -- already committed)"
     else:
@@ -2267,12 +2334,12 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         _warn("Run [b] to bootstrap tracking files.")
         return
 
-    wp               = active_wt.progress
-    wname            = active_wt.workplan_name
+    wp = active_wt.progress
+    wname = active_wt.workplan_name
     active_milestone = wp.active_milestone
-    active_step      = wp.resume_detail
-    step_id          = _step_id_from_detail(active_step)
-    system_prompt    = _system_for_step(step_id)
+    active_step = wp.resume_detail
+    step_id = _step_id_from_detail(active_step)
+    system_prompt = _system_for_step(step_id)
 
     _info(f"Workplan:  {wname}")
     _info(f"Milestone: {C_BOLD}{active_milestone}{C_RESET}")
@@ -2284,9 +2351,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         _err(f"Prerequisites not met for {active_milestone}:")
         for b in blocking:
             _err(f"  {b} must be DONE first")
-        answer = input(
-            f"  {C_YELLOW}Override and proceed anyway? [y/N]{C_RESET} "
-        ).strip().lower()
+        answer = input(f"  {C_YELLOW}Override and proceed anyway? [y/N]{C_RESET} ").strip().lower()
         if answer != "y":
             return
 
@@ -2301,7 +2366,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             _warn("Consider re-running [d] to refresh distilled context.")
 
     # ── Load workplan spec section ───────────────────────────────────────────
-    workplan_path    = find_workplan_file(wname)
+    workplan_path = find_workplan_file(wname)
     workplan_section = ""
     if workplan_path and workplan_path.exists():
         full_text = workplan_path.read_text(encoding="utf-8")
@@ -2322,7 +2387,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
 
     distilled_ctx = load_milestone_context(wname, active_milestone)
     if distilled_ctx:
-        _info(f"Distilled context: ~{len(distilled_ctx)//4} tokens")
+        _info(f"Distilled context: ~{len(distilled_ctx) // 4} tokens")
         spec_section = f"## Distilled Context for {active_milestone}\n\n{distilled_ctx}\n\n"
     else:
         if not distilled_file_path(wname).exists():
@@ -2350,9 +2415,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         )
 
     print()
-    confirm = input(
-        f"  {C_YELLOW}Send to Claude and generate? [y/N]{C_RESET} "
-    ).strip().lower()
+    confirm = input(f"  {C_YELLOW}Send to Claude and generate? [y/N]{C_RESET} ").strip().lower()
     if confirm != "y":
         _info("Aborted.")
         return
@@ -2383,9 +2446,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             return
 
         # Print narrative
-        narrative = re.sub(
-            r"<<<FILE:.*?<<<END_FILE>>>", "", response, flags=re.DOTALL
-        ).strip()
+        narrative = re.sub(r"<<<FILE:.*?<<<END_FILE>>>", "", response, flags=re.DOTALL).strip()
         if narrative:
             print()
             print(narrative)
@@ -2468,8 +2529,8 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 _info(f"     -> {bin_dir / exe}")
 
     # ── Improvement #4: auto-advance progress ───────────────────────────────
-    tests_clean = (step_id not in ("S3","S4","S7")) or (
-        step_id in ("S3","S4","S7") and run_tests_capture()[0]
+    tests_clean = (step_id not in ("S3", "S4", "S7")) or (
+        step_id in ("S3", "S4", "S7") and run_tests_capture()[0]
     )
     if written_paths and tests_clean and wp.progress_file.exists():
         next_step = advance_progress_step(wp.progress_file, active_milestone, step_id)
@@ -2491,17 +2552,26 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
 # Other build actions
 # ---------------------------------------------------------------------------
 
+
 def action_run_tests() -> None:
     _h2("Test suite (pytest + coverage)")
     _run(
-        [str(VENV_PYTHON), "-m", "pytest",
-         "tests/", "--tb=short", "--cov=.", "--cov-report=term-missing", "-q"],
+        [
+            str(VENV_PYTHON),
+            "-m",
+            "pytest",
+            "tests/",
+            "--tb=short",
+            "--cov=.",
+            "--cov-report=term-missing",
+            "-q",
+        ],
         check=False,
     )
 
 
 def action_quality_gate(
-    all_wt: Optional[list[WorkplanTracking]] = None,
+    all_wt: list[WorkplanTracking] | None = None,
     auto_advance: bool = False,
 ) -> bool:
     """
@@ -2515,12 +2585,10 @@ def action_quality_gate(
     _h2("Quality gate: format -> lint -> type-check -> tests")
     bin_dir = VENV_PYTHON.parent
     gates = [
-        ([str(bin_dir / "black"), "--check", "."],          "Format check (black)"),
-        ([str(bin_dir / "ruff"),  "check", "."],             "Lint (ruff)"),
-        ([str(bin_dir / "mypy"),  ".",
-          "--ignore-missing-imports"],                        "Type check (mypy)"),
-        ([str(VENV_PYTHON), "-m", "pytest",
-          "tests/", "-q", "--tb=short"],                     "Tests (pytest)"),
+        ([str(bin_dir / "black"), "--check", "."], "Format check (black)"),
+        ([str(bin_dir / "ruff"), "check", "."], "Lint (ruff)"),
+        ([str(bin_dir / "mypy"), ".", "--ignore-missing-imports"], "Type check (mypy)"),
+        ([str(VENV_PYTHON), "-m", "pytest", "tests/", "-q", "--tb=short"], "Tests (pytest)"),
     ]
     all_ok = True
     for cmd, label in gates:
@@ -2541,12 +2609,10 @@ def action_quality_gate(
     if all_ok and all_wt is not None:
         active_wt = resolve_active_workplan(all_wt)
         if active_wt and active_wt.progress and active_wt.progress.progress_file.exists():
-            wp       = active_wt.progress
-            step_id  = _step_id_from_detail(wp.resume_detail)
+            wp = active_wt.progress
+            step_id = _step_id_from_detail(wp.resume_detail)
             if step_id == "S5":  # quality gate IS step S5
-                next_s = advance_progress_step(
-                    wp.progress_file, wp.active_milestone, "S5"
-                )
+                next_s = advance_progress_step(wp.progress_file, wp.active_milestone, "S5")
                 if next_s:
                     _ok(f"Progress: S5 DONE -> {next_s}")
             step_label = next((lbl for sid, lbl in STEP_LABELS if sid == step_id), step_id)
@@ -2557,8 +2623,10 @@ def action_quality_gate(
 
 def action_docker_up() -> None:
     _h2("Docker Compose up")
-    for p in (PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
-              PROJECT_ROOT / "docker-compose.yml"):
+    for p in (
+        PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
+        PROJECT_ROOT / "docker-compose.yml",
+    ):
         if p.exists():
             _run(["docker", "compose", "-f", str(p), "up", "-d"], check=False)
             return
@@ -2567,8 +2635,10 @@ def action_docker_up() -> None:
 
 def action_docker_down() -> None:
     _h2("Docker Compose down")
-    for p in (PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
-              PROJECT_ROOT / "docker-compose.yml"):
+    for p in (
+        PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
+        PROJECT_ROOT / "docker-compose.yml",
+    ):
         if p.exists():
             _run(["docker", "compose", "-f", str(p), "down"], check=False)
             return
@@ -2632,16 +2702,16 @@ def action_show_lessons(all_wt: list[WorkplanTracking]) -> None:
 
 
 MILESTONE_LIST = [
-    ("M0",  "Bootstrap"),
-    ("M1",  "Docker Runtime"),
-    ("M2",  "DB Schema + Migrations + Audit Ledger"),
-    ("M3",  "Auth + RBAC"),
-    ("M4",  "Jobs + Queue Classes + Compute Policy"),
-    ("M5",  "Artifact Registry + Storage Abstraction"),
-    ("M6",  "Feed Registry + Versioned Config + Connectivity Tests"),
-    ("M7",  "Ingest Pipeline"),
-    ("M8",  "Verification + Gaps + Anomalies + Certification"),
-    ("M9",  "Symbol Lineage"),
+    ("M0", "Bootstrap"),
+    ("M1", "Docker Runtime"),
+    ("M2", "DB Schema + Migrations + Audit Ledger"),
+    ("M3", "Auth + RBAC"),
+    ("M4", "Jobs + Queue Classes + Compute Policy"),
+    ("M5", "Artifact Registry + Storage Abstraction"),
+    ("M6", "Feed Registry + Versioned Config + Connectivity Tests"),
+    ("M7", "Ingest Pipeline"),
+    ("M8", "Verification + Gaps + Anomalies + Certification"),
+    ("M9", "Symbol Lineage"),
     ("M10", "Parity Service"),
     ("M11", "Alerting + Observability Hardening"),
     ("M12", "Operator API Docs + Acceptance Pack"),
@@ -2725,14 +2795,14 @@ def action_bootstrap() -> None:
 
     # Discover workplan files from SPEC_DIR (and project root as fallback)
     found = [
-        p.stem for p in SPEC_DIR.rglob("*.md")
+        p.stem
+        for p in SPEC_DIR.rglob("*.md")
         if "workplan-tracking" not in str(p)
-           and ("workplan" in p.stem.lower() or "plan" in p.stem.lower())
+        and ("workplan" in p.stem.lower() or "plan" in p.stem.lower())
     ]
     if not found:
         found = [
-            p.stem for p in PROJECT_ROOT.rglob("*workplan*.md")
-            if "workplan-tracking" not in str(p)
+            p.stem for p in PROJECT_ROOT.rglob("*workplan*.md") if "workplan-tracking" not in str(p)
         ]
     names = found or ["FXLab_Phase_1_workplan_v3"]
 
@@ -2758,11 +2828,12 @@ def action_show_env() -> None:
     _h2("Environment configuration")
     _info(f".env file:         {ENV_FILE}  ({'found' if ENV_FILE.exists() else 'NOT FOUND'})")
     ok, msg = validate_api_key()
-    ((_ok if ok else _err))(f"ANTHROPIC_API_KEY: {msg}")
-    _info(f"ANTHROPIC_MODEL:   {os.environ.get('ANTHROPIC_MODEL', DEFAULT_MODEL)} "
-          f"{'(default)' if 'ANTHROPIC_MODEL' not in os.environ else '(from env)'}")
-    _info(f"VENV_PYTHON:       {VENV_PYTHON}  "
-          f"({'exists' if VENV_PYTHON.exists() else 'missing'})")
+    (_ok if ok else _err)(f"ANTHROPIC_API_KEY: {msg}")
+    _info(
+        f"ANTHROPIC_MODEL:   {os.environ.get('ANTHROPIC_MODEL', DEFAULT_MODEL)} "
+        f"{'(default)' if 'ANTHROPIC_MODEL' not in os.environ else '(from env)'}"
+    )
+    _info(f"VENV_PYTHON:       {VENV_PYTHON}  ({'exists' if VENV_PYTHON.exists() else 'missing'})")
 
 
 def action_open_shell() -> None:
@@ -2776,30 +2847,30 @@ def action_open_shell() -> None:
 # ---------------------------------------------------------------------------
 
 MENU_ITEMS: list[tuple[str, str]] = [
-    ("w",  "Workplan -- browse User Spec/ and select workplan + spec"),
-    ("d",  "Distil -- generate/refresh per-milestone context from spec [AI]"),
+    ("w", "Workplan -- browse User Spec/ and select workplan + spec"),
+    ("d", "Distil -- generate/refresh per-milestone context from spec [AI]"),
     ("dv", "Distil debug -- diagnose why sections show as 0"),
-    ("r",  "Resume -- continue from last saved position"),
-    ("a",  "Agentic build -- drive next milestone step with Claude [AI]"),
-    ("c",  "Claude brief -- AI session summary [AI]"),
-    ("p",  "Show full progress summary"),
-    ("i",  "Show all open issues"),
-    ("l",  "Show all lessons learned"),
-    ("b",  "Bootstrap / refresh tracking files"),
-    ("t",  "Run test suite"),
-    ("q",  "Run quality gate (format + lint + type + tests)"),
-    ("h",  "Handoff -- write session summary doc [AI]"),
+    ("r", "Resume -- continue from last saved position"),
+    ("a", "Agentic build -- drive next milestone step with Claude [AI]"),
+    ("c", "Claude brief -- AI session summary [AI]"),
+    ("p", "Show full progress summary"),
+    ("i", "Show all open issues"),
+    ("l", "Show all lessons learned"),
+    ("b", "Bootstrap / refresh tracking files"),
+    ("t", "Run test suite"),
+    ("q", "Run quality gate (format + lint + type + tests)"),
+    ("h", "Handoff -- write session summary doc [AI]"),
     ("du", "Docker Compose up"),
     ("dd", "Docker Compose down"),
-    ("m",  "Run database migrations (Alembic)"),
-    ("e",  "Show environment / API key status"),
+    ("m", "Run database migrations (Alembic)"),
+    ("e", "Show environment / API key status"),
     ("sh", "Show venv activate command"),
-    ("x",  "Exit"),
+    ("x", "Exit"),
 ]
 
 
 def print_menu(
-    resume: Optional[tuple[str, str, str]],
+    resume: tuple[str, str, str] | None,
     api_ok: bool,
     all_wt: list[WorkplanTracking],
 ) -> None:
@@ -2807,7 +2878,7 @@ def print_menu(
 
     # Show active workplan + spec prominently at the top
     active = resolve_active_workplan(all_wt)
-    sel    = load_active_selection()
+    sel = load_active_selection()
     if active:
         print(f"  Workplan: {C_BOLD}{C_CYAN}{active.workplan_name}{C_RESET}", end="")
         if active.progress:
@@ -2821,13 +2892,17 @@ def print_menu(
         dp = distilled_file_path(active.workplan_name)
         if dp.exists():
             sections = list(_DISTIL_SECTION_RE.finditer(dp.read_text()))
-            print(f"  Context:  {C_GREEN}{dp.name}  ({len(sections)} milestones distilled){C_RESET}")
+            print(
+                f"  Context:  {C_GREEN}{dp.name}  ({len(sections)} milestones distilled){C_RESET}"
+            )
         else:
             print(f"  Context:  {C_YELLOW}not distilled yet -- run [d]{C_RESET}")
     elif all_wt:
         print(f"  {C_YELLOW}No workplan selected -- use [w] to choose one{C_RESET}")
     else:
-        print(f"  {C_YELLOW}No tracking files -- use [w] to select a workplan from User Spec/{C_RESET}")
+        print(
+            f"  {C_YELLOW}No tracking files -- use [w] to select a workplan from User Spec/{C_RESET}"
+        )
     print()
 
     api_tag = f" {C_GREEN}[API OK]{C_RESET}" if api_ok else f" {C_RED}[API KEY MISSING]{C_RESET}"
@@ -2835,7 +2910,7 @@ def print_menu(
         prefix = f"  {C_BOLD}[{key:>2s}]{C_RESET}"
         if key == "w":
             if sel:
-                wp_short   = sel.workplan_path.name if sel.workplan_path else sel.workplan_stem
+                wp_short = sel.workplan_path.name if sel.workplan_path else sel.workplan_stem
                 spec_short = sel.spec_path.name if sel.spec_path else "no spec"
                 hint = f"{wp_short} / {spec_short}"
             else:
@@ -2858,7 +2933,7 @@ def print_menu(
 
 def handle_choice(
     choice: str,
-    resume: Optional[tuple[str, str, str]],
+    resume: tuple[str, str, str] | None,
     all_wt: list[WorkplanTracking],
     api_ok: bool,
 ) -> bool:
@@ -2894,19 +2969,30 @@ def handle_choice(
     elif c == "c":
         if _need_api():
             action_ai_brief(all_wt)
-    elif c == "p":   action_show_progress(all_wt)
-    elif c == "i":   action_show_issues(all_wt)
-    elif c == "l":   action_show_lessons(all_wt)
-    elif c == "b":   action_bootstrap()
-    elif c == "t":   action_run_tests()
-    elif c == "q":   action_quality_gate(all_wt=all_wt)
+    elif c == "p":
+        action_show_progress(all_wt)
+    elif c == "i":
+        action_show_issues(all_wt)
+    elif c == "l":
+        action_show_lessons(all_wt)
+    elif c == "b":
+        action_bootstrap()
+    elif c == "t":
+        action_run_tests()
+    elif c == "q":
+        action_quality_gate(all_wt=all_wt)
     elif c == "h":
         action_handoff(all_wt, api_ok)
-    elif c == "du":  action_docker_up()
-    elif c == "dd":  action_docker_down()
-    elif c == "m":   action_run_migrations()
-    elif c == "e":   action_show_env()
-    elif c == "sh":  action_open_shell()
+    elif c == "du":
+        action_docker_up()
+    elif c == "dd":
+        action_docker_down()
+    elif c == "m":
+        action_run_migrations()
+    elif c == "e":
+        action_show_env()
+    elif c == "sh":
+        action_open_shell()
     elif c == "x":
         print(f"\n{C_DIM}Goodbye.{C_RESET}\n")
         return False
@@ -2920,16 +3006,19 @@ def handle_choice(
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="FXLab build menu -- venv, tracking, and agentic dev tasks.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--no-brief", action="store_true",
-                        help="Skip the AI session brief at startup.")
-    parser.add_argument("--run", metavar="CHOICE",
-                        help="Run one menu action non-interactively (e.g. --run t).")
+    parser.add_argument(
+        "--no-brief", action="store_true", help="Skip the AI session brief at startup."
+    )
+    parser.add_argument(
+        "--run", metavar="CHOICE", help="Run one menu action non-interactively (e.g. --run t)."
+    )
     args = parser.parse_args()
 
     # 1. Load .env and validate API key

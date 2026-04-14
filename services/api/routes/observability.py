@@ -46,6 +46,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from libs.contracts.interfaces.dependency_health_repository import (
     DependencyHealthRepositoryInterface,
@@ -53,7 +54,13 @@ from libs.contracts.interfaces.dependency_health_repository import (
 from libs.contracts.interfaces.diagnostics_repository import (
     DiagnosticsRepositoryInterface,
 )
-from libs.contracts.observability import DependencyHealthRecord, DependencyHealthResponse, DiagnosticsSnapshot
+from libs.contracts.observability import (
+    DependencyHealthRecord,
+    DependencyHealthResponse,
+    DiagnosticsSnapshot,
+)
+from services.api.auth import AuthenticatedUser, get_current_user
+from services.api.db import get_db
 
 logger = structlog.get_logger(__name__)
 
@@ -69,50 +76,33 @@ def get_dependency_health_repository() -> DependencyHealthRepositoryInterface:
     """
     Provide a DependencyHealthRepositoryInterface implementation.
 
-    In production this will be wired to a real connectivity checker via the
-    lifespan DI container.  In unit tests the default is overridden via
-    app.dependency_overrides.
+    Always returns the real connectivity checker (not mocked).
 
     Returns:
-        MockDependencyHealthRepository in bootstrap/test; real adapter in production.
+        DependencyHealthRepositoryInterface implementation (real adapter).
     """
-    import os
-
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.repositories.real_dependency_health_repository import RealDependencyHealthRepository
-
-        return RealDependencyHealthRepository()
-
-    from libs.contracts.mocks.mock_dependency_health_repository import (  # pragma: no cover
-        MockDependencyHealthRepository,  # pragma: no cover
+    from services.api.repositories.real_dependency_health_repository import (
+        RealDependencyHealthRepository,
     )
-    return MockDependencyHealthRepository()  # pragma: no cover
+
+    return RealDependencyHealthRepository()
 
 
-def get_diagnostics_repository() -> DiagnosticsRepositoryInterface:
+def get_diagnostics_repository(db: Session = Depends(get_db)) -> DiagnosticsRepositoryInterface:
     """
     Provide a DiagnosticsRepositoryInterface implementation.
 
-    In production this will be wired to a SQL aggregator via the lifespan DI
-    container.  In unit tests the default is overridden via
-    app.dependency_overrides.
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
 
     Returns:
-        MockDiagnosticsRepository in bootstrap/test; real adapter in production.
+        DiagnosticsRepositoryInterface implementation (SQL-backed).
     """
-    import os
+    from services.api.repositories.sql_diagnostics_repository import SqlDiagnosticsRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_diagnostics_repository import SqlDiagnosticsRepository
-
-        db = next(get_db())
-        return SqlDiagnosticsRepository(db=db)
-
-    from libs.contracts.mocks.mock_diagnostics_repository import (  # pragma: no cover
-        MockDiagnosticsRepository,  # pragma: no cover
-    )
-    return MockDiagnosticsRepository()  # pragma: no cover
+    return SqlDiagnosticsRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +182,7 @@ def _serialize_diagnostics_snapshot(snap: DiagnosticsSnapshot) -> dict[str, Any]
 def get_dependency_health(
     x_correlation_id: str = Header(default="no-corr"),
     repo: DependencyHealthRepositoryInterface = Depends(get_dependency_health_repository),
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> JSONResponse:
     """
     Check reachability and health of all platform dependencies.
@@ -238,6 +229,7 @@ def get_dependency_health(
 def get_diagnostics(
     x_correlation_id: str = Header(default="no-corr"),
     repo: DiagnosticsRepositoryInterface = Depends(get_diagnostics_repository),
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> JSONResponse:
     """
     Return platform-wide operational counts snapshot.

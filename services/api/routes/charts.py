@@ -49,6 +49,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from libs.contracts.chart import (
     DrawdownChartResponse,
@@ -61,6 +62,8 @@ from libs.contracts.chart import (
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.chart_repository import ChartRepositoryInterface
 from libs.utils.lttb import lttb_downsample
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
 
 logger = structlog.get_logger(__name__)
 
@@ -70,7 +73,7 @@ router = APIRouter()
 # Phase 3 M24 thresholds (Phase 3 Workplan Milestone 24 / spec §10 results)
 # ---------------------------------------------------------------------------
 
-EQUITY_LTTB_THRESHOLD: int = 2_000    # max wire points for equity curve
+EQUITY_LTTB_THRESHOLD: int = 2_000  # max wire points for equity curve
 TRADES_TRUNCATE_THRESHOLD: int = 5_000  # max trades before truncation flag
 
 
@@ -79,27 +82,21 @@ TRADES_TRUNCATE_THRESHOLD: int = 5_000  # max trades before truncation flag
 # ---------------------------------------------------------------------------
 
 
-def get_chart_repository() -> ChartRepositoryInterface:
+def get_chart_repository(db: Session = Depends(get_db)) -> ChartRepositoryInterface:
     """
     Provide a ChartRepositoryInterface implementation.
 
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
+
     Returns:
-        MockChartRepository bootstrap stub until SQL wiring is complete.
-
-    Note:
-        ISS-016 — Wire SqlChartRepository via lifespan DI container.
+        ChartRepositoryInterface implementation (SQL-backed).
     """
-    import os
+    from services.api.repositories.sql_chart_repository import SqlChartRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_chart_repository import SqlChartRepository
-
-        db = next(get_db())
-        return SqlChartRepository(db=db)
-
-    from libs.contracts.mocks.mock_chart_repository import MockChartRepository  # pragma: no cover
-    return MockChartRepository()  # pragma: no cover
+    return SqlChartRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +120,7 @@ def _serialize_equity_point(pt: EquityCurvePoint) -> dict[str, Any]:
     """
     return {
         "timestamp": (
-            pt.timestamp.isoformat()
-            if hasattr(pt.timestamp, "isoformat")
-            else str(pt.timestamp)
+            pt.timestamp.isoformat() if hasattr(pt.timestamp, "isoformat") else str(pt.timestamp)
         ),
         "equity": pt.equity,
     }
@@ -147,9 +142,7 @@ def _serialize_drawdown_point(pt: DrawdownPoint) -> dict[str, Any]:
     """
     return {
         "timestamp": (
-            pt.timestamp.isoformat()
-            if hasattr(pt.timestamp, "isoformat")
-            else str(pt.timestamp)
+            pt.timestamp.isoformat() if hasattr(pt.timestamp, "isoformat") else str(pt.timestamp)
         ),
         "drawdown": pt.drawdown,
     }
@@ -265,9 +258,7 @@ def _build_equity_response(
         downsampled = lttb_downsample(numeric_pts, threshold=EQUITY_LTTB_THRESHOLD)
         # Rebuild EquityCurvePoint objects by matching sampled x values back to
         # original objects (avoids floating-point datetime reconstruction).
-        ts_map: dict[float, EquityCurvePoint] = {
-            pt.timestamp.timestamp(): pt for pt in raw_equity
-        }
+        ts_map: dict[float, EquityCurvePoint] = {pt.timestamp.timestamp(): pt for pt in raw_equity}
         points: list[EquityCurvePoint] = []
         for x, y in downsampled:
             matched = ts_map.get(x)
@@ -290,6 +281,7 @@ def _build_equity_response(
             raw_count=raw_count,
             sampled_count=len(points),
             correlation_id=correlation_id,
+            component="charts",
         )
     else:
         points = raw_equity
@@ -334,9 +326,7 @@ def _build_drawdown_response(
     if apply_lttb:
         numeric_pts = [(pt.timestamp.timestamp(), pt.drawdown) for pt in raw_drawdown]
         downsampled = lttb_downsample(numeric_pts, threshold=EQUITY_LTTB_THRESHOLD)
-        ts_map: dict[float, DrawdownPoint] = {
-            pt.timestamp.timestamp(): pt for pt in raw_drawdown
-        }
+        ts_map: dict[float, DrawdownPoint] = {pt.timestamp.timestamp(): pt for pt in raw_drawdown}
         points_dd: list[DrawdownPoint] = []
         for x, y in downsampled:
             matched = ts_map.get(x)
@@ -371,6 +361,7 @@ def get_run_charts(
     run_id: str,
     x_correlation_id: str = "no-corr",
     repo: ChartRepositoryInterface = Depends(get_chart_repository),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
 ) -> JSONResponse:
     """
     Return composite chart payload (equity + drawdown) for a run.
@@ -391,19 +382,19 @@ def get_run_charts(
         → {"run_id": "...", "equity": {...}, "drawdown": {...}, "generated_at": "..."}
     """
     corr = x_correlation_id or "no-corr"
-    logger.info("charts.composite.request", run_id=run_id, correlation_id=corr)
+    logger.info("charts.composite.request", run_id=run_id, correlation_id=corr, component="charts")
     try:
         raw_equity = repo.find_equity_by_run_id(run_id, corr)
         raw_drawdown = repo.find_drawdown_by_run_id(run_id, corr)
         trade_count = repo.find_trade_count_by_run_id(run_id, corr)
-    except NotFoundError as exc:
+    except NotFoundError:
         logger.warning(
             "charts.composite.not_found",
             run_id=run_id,
-            detail=str(exc),
             correlation_id=corr,
+            component="charts",
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Run not found.") from None
 
     equity_resp = _build_equity_response(run_id, raw_equity, trade_count, corr)
     drawdown_resp = _build_drawdown_response(run_id, raw_drawdown)
@@ -419,6 +410,7 @@ def get_run_charts(
         equity_points=len(equity_resp.points),
         drawdown_points=len(drawdown_resp.points),
         correlation_id=corr,
+        component="charts",
     )
     return JSONResponse(content=_serialize_charts_payload(payload))
 
@@ -428,6 +420,7 @@ def get_run_equity_chart(
     run_id: str,
     x_correlation_id: str = "no-corr",
     repo: ChartRepositoryInterface = Depends(get_chart_repository),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
 ) -> JSONResponse:
     """
     Return LTTB-downsampled equity curve for a run.
@@ -452,18 +445,18 @@ def get_run_equity_chart(
         → {"run_id": "...", "points": [...], "sampling_applied": true, ...}
     """
     corr = x_correlation_id or "no-corr"
-    logger.info("charts.equity.request", run_id=run_id, correlation_id=corr)
+    logger.info("charts.equity.request", run_id=run_id, correlation_id=corr, component="charts")
     try:
         raw_equity = repo.find_equity_by_run_id(run_id, corr)
         trade_count = repo.find_trade_count_by_run_id(run_id, corr)
-    except NotFoundError as exc:
+    except NotFoundError:
         logger.warning(
             "charts.equity.not_found",
             run_id=run_id,
-            detail=str(exc),
             correlation_id=corr,
+            component="charts",
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Run not found.") from None
 
     resp = _build_equity_response(run_id, raw_equity, trade_count, corr)
     logger.info(
@@ -473,6 +466,7 @@ def get_run_equity_chart(
         points_served=len(resp.points),
         raw_count=resp.raw_equity_point_count,
         correlation_id=corr,
+        component="charts",
     )
     return JSONResponse(content=_serialize_equity_response(resp))
 
@@ -482,6 +476,7 @@ def get_run_drawdown_chart(
     run_id: str,
     x_correlation_id: str = "no-corr",
     repo: ChartRepositoryInterface = Depends(get_chart_repository),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
 ) -> JSONResponse:
     """
     Return LTTB-downsampled drawdown series for a run.
@@ -502,17 +497,17 @@ def get_run_drawdown_chart(
         → {"run_id": "...", "points": [...], "sampling_applied": false, ...}
     """
     corr = x_correlation_id or "no-corr"
-    logger.info("charts.drawdown.request", run_id=run_id, correlation_id=corr)
+    logger.info("charts.drawdown.request", run_id=run_id, correlation_id=corr, component="charts")
     try:
         raw_drawdown = repo.find_drawdown_by_run_id(run_id, corr)
-    except NotFoundError as exc:
+    except NotFoundError:
         logger.warning(
             "charts.drawdown.not_found",
             run_id=run_id,
-            detail=str(exc),
             correlation_id=corr,
+            component="charts",
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Run not found.") from None
 
     resp = _build_drawdown_response(run_id, raw_drawdown)
     logger.info(
@@ -520,5 +515,6 @@ def get_run_drawdown_chart(
         run_id=run_id,
         points_served=len(resp.points),
         correlation_id=corr,
+        component="charts",
     )
     return JSONResponse(content=_serialize_drawdown_response(resp))

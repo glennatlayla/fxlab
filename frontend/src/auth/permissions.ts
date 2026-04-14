@@ -1,30 +1,30 @@
 /**
  * Permission utilities for FXLab UI
- * 
+ *
  * Maps backend roles to UI capabilities.
  * All actual authorization happens server-side; this is for UI hints only.
  */
 
 export enum Permission {
-  VIEW_STRATEGIES = 'view_strategies',
-  CREATE_STRATEGY = 'create_strategy',
-  EDIT_STRATEGY = 'edit_strategy',
-  DELETE_STRATEGY = 'delete_strategy',
-  
-  VIEW_RUNS = 'view_runs',
-  EXECUTE_RUN = 'execute_run',
-  
-  VIEW_FEEDS = 'view_feeds',
-  MANAGE_FEEDS = 'manage_feeds',
-  
-  REQUEST_PROMOTION = 'request_promotion',
-  APPROVE_PROMOTION = 'approve_promotion',
-  
-  VIEW_AUDIT = 'view_audit',
-  EXPORT_DATA = 'export_data',
-  
-  MANAGE_OVERRIDES = 'manage_overrides',
-  VIEW_GOVERNANCE = 'view_governance',
+  VIEW_STRATEGIES = "view_strategies",
+  CREATE_STRATEGY = "create_strategy",
+  EDIT_STRATEGY = "edit_strategy",
+  DELETE_STRATEGY = "delete_strategy",
+
+  VIEW_RUNS = "view_runs",
+  EXECUTE_RUN = "execute_run",
+
+  VIEW_FEEDS = "view_feeds",
+  MANAGE_FEEDS = "manage_feeds",
+
+  REQUEST_PROMOTION = "request_promotion",
+  APPROVE_PROMOTION = "approve_promotion",
+
+  VIEW_AUDIT = "view_audit",
+  EXPORT_DATA = "export_data",
+
+  MANAGE_OVERRIDES = "manage_overrides",
+  VIEW_GOVERNANCE = "view_governance",
 }
 
 export interface Role {
@@ -38,7 +38,7 @@ export interface Role {
  */
 export const ROLES: Record<string, Role> = {
   viewer: {
-    name: 'Viewer',
+    name: "Viewer",
     permissions: [
       Permission.VIEW_STRATEGIES,
       Permission.VIEW_RUNS,
@@ -47,7 +47,7 @@ export const ROLES: Record<string, Role> = {
     ],
   },
   developer: {
-    name: 'Developer',
+    name: "Developer",
     permissions: [
       Permission.VIEW_STRATEGIES,
       Permission.CREATE_STRATEGY,
@@ -61,7 +61,7 @@ export const ROLES: Record<string, Role> = {
     ],
   },
   approver: {
-    name: 'Approver',
+    name: "Approver",
     permissions: [
       Permission.VIEW_STRATEGIES,
       Permission.VIEW_RUNS,
@@ -72,7 +72,7 @@ export const ROLES: Record<string, Role> = {
     ],
   },
   admin: {
-    name: 'Admin',
+    name: "Admin",
     permissions: Object.values(Permission),
   },
 };
@@ -93,12 +93,12 @@ export function hasPermission(role: string, permission: Permission): boolean {
  * Check if a role has any of the specified permissions.
  */
 export function hasAnyPermission(role: string, permissions: Permission[]): boolean {
-  return permissions.some(p => hasPermission(role, p));
+  return permissions.some((p) => hasPermission(role, p));
 }
 
 /**
  * Check if a role has all of the specified permissions.
  */
 export function hasAllPermissions(role: string, permissions: Permission[]): boolean {
-  return permissions.every(p => hasPermission(role, p));
+  return permissions.every((p) => hasPermission(role, p));
 }

@@ -36,7 +36,7 @@ Known lessons:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -46,6 +46,8 @@ from libs.contracts.mocks.mock_dependency_health_repository import (
 )
 from libs.contracts.mocks.mock_diagnostics_repository import MockDiagnosticsRepository
 from libs.contracts.observability import DependencyStatus
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # MockDependencyHealthRepository tests
@@ -117,9 +119,7 @@ class TestMockDependencyHealthRepository:
         repo = MockDependencyHealthRepository()
         repo.set_dependency_status("artifact_store", DependencyStatus.DEGRADED)
         resp = repo.check(correlation_id="c")
-        assert resp.overall_status == "DEGRADED", (
-            f"Expected DEGRADED, got {resp.overall_status}"
-        )
+        assert resp.overall_status == "DEGRADED", f"Expected DEGRADED, got {resp.overall_status}"
 
     def test_overall_status_is_down_when_any_dep_down(self) -> None:
         """
@@ -130,9 +130,7 @@ class TestMockDependencyHealthRepository:
         repo = MockDependencyHealthRepository()
         repo.set_dependency_status("database", DependencyStatus.DOWN, detail="connection refused")
         resp = repo.check(correlation_id="c")
-        assert resp.overall_status == "DOWN", (
-            f"Expected DOWN, got {resp.overall_status}"
-        )
+        assert resp.overall_status == "DOWN", f"Expected DOWN, got {resp.overall_status}"
 
     def test_down_beats_degraded_in_overall_status(self) -> None:
         """
@@ -284,15 +282,11 @@ class TestDependencyHealthEndpoint:
         return MockDependencyHealthRepository()
 
     @pytest.fixture
-    def client_healthy(
-        self, healthy_repo: MockDependencyHealthRepository
-    ) -> TestClient:
+    def client_healthy(self, healthy_repo: MockDependencyHealthRepository) -> TestClient:
         from services.api.main import app
         from services.api.routes.observability import get_dependency_health_repository
 
-        app.dependency_overrides[get_dependency_health_repository] = (
-            lambda: healthy_repo
-        )
+        app.dependency_overrides[get_dependency_health_repository] = lambda: healthy_repo
         tc = TestClient(app)
         yield tc
         app.dependency_overrides.clear()
@@ -305,65 +299,51 @@ class TestDependencyHealthEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client_healthy.get("/health/dependencies")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client_healthy.get("/health/dependencies", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
-    def test_dependencies_contains_required_keys(
-        self, client_healthy: TestClient
-    ) -> None:
+    def test_dependencies_contains_required_keys(self, client_healthy: TestClient) -> None:
         """
         GIVEN all deps OK
         WHEN GET /health/dependencies is requested
         THEN response contains 'dependencies', 'overall_status', 'generated_at'.
         """
-        resp = client_healthy.get("/health/dependencies")
+        resp = client_healthy.get("/health/dependencies", headers=AUTH_HEADERS)
         body = resp.json()
         for key in ("dependencies", "overall_status", "generated_at"):
             assert key in body, f"Missing key '{key}': {body}"
 
-    def test_dependencies_list_has_four_entries(
-        self, client_healthy: TestClient
-    ) -> None:
+    def test_dependencies_list_has_four_entries(self, client_healthy: TestClient) -> None:
         """
         GIVEN healthy mock repo
         WHEN GET /health/dependencies is requested
         THEN dependencies list has 4 entries.
         """
-        resp = client_healthy.get("/health/dependencies")
+        resp = client_healthy.get("/health/dependencies", headers=AUTH_HEADERS)
         body = resp.json()
-        assert len(body["dependencies"]) == 4, (
-            f"Expected 4 dependencies: {body}"
-        )
+        assert len(body["dependencies"]) == 4, f"Expected 4 dependencies: {body}"
 
-    def test_dependencies_each_entry_has_required_fields(
-        self, client_healthy: TestClient
-    ) -> None:
+    def test_dependencies_each_entry_has_required_fields(self, client_healthy: TestClient) -> None:
         """
         GIVEN healthy repo
         WHEN GET /health/dependencies is requested
         THEN each dependency entry has name, status, latency_ms, detail.
         """
-        resp = client_healthy.get("/health/dependencies")
+        resp = client_healthy.get("/health/dependencies", headers=AUTH_HEADERS)
         body = resp.json()
         for dep in body["dependencies"]:
             for field in ("name", "status", "latency_ms", "detail"):
                 assert field in dep, f"Missing field '{field}' in dep: {dep}"
 
-    def test_dependencies_overall_status_ok_when_all_ok(
-        self, client_healthy: TestClient
-    ) -> None:
+    def test_dependencies_overall_status_ok_when_all_ok(self, client_healthy: TestClient) -> None:
         """
         GIVEN all deps OK
         WHEN GET /health/dependencies is requested
         THEN overall_status is 'OK'.
         """
-        resp = client_healthy.get("/health/dependencies")
+        resp = client_healthy.get("/health/dependencies", headers=AUTH_HEADERS)
         body = resp.json()
-        assert body["overall_status"] == "OK", (
-            f"Expected OK, got: {body['overall_status']}"
-        )
+        assert body["overall_status"] == "OK", f"Expected OK, got: {body['overall_status']}"
 
     def test_dependencies_overall_status_down_when_dep_is_down(self) -> None:
         """
@@ -381,12 +361,10 @@ class TestDependencyHealthEndpoint:
         app.dependency_overrides[get_dependency_health_repository] = lambda: repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/health/dependencies")
+            resp = tc.get("/health/dependencies", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
-            assert body["overall_status"] == "DOWN", (
-                f"Expected DOWN, got: {body['overall_status']}"
-            )
+            assert body["overall_status"] == "DOWN", f"Expected DOWN, got: {body['overall_status']}"
         finally:
             app.dependency_overrides.clear()
 
@@ -404,11 +382,9 @@ class TestDependencyHealthEndpoint:
         app.dependency_overrides[get_dependency_health_repository] = lambda: repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/health/dependencies")
+            resp = tc.get("/health/dependencies", headers=AUTH_HEADERS)
             body = resp.json()
-            queues_entry = next(
-                (d for d in body["dependencies"] if d["name"] == "queues"), None
-            )
+            queues_entry = next((d for d in body["dependencies"] if d["name"] == "queues"), None)
             assert queues_entry is not None, f"queues dep missing: {body}"
             assert queues_entry["detail"] == "high latency"
         finally:
@@ -439,15 +415,11 @@ class TestDiagnosticsEndpoint:
         return MockDiagnosticsRepository()
 
     @pytest.fixture
-    def client_clean(
-        self, diagnostics_repo_clean: MockDiagnosticsRepository
-    ) -> TestClient:
+    def client_clean(self, diagnostics_repo_clean: MockDiagnosticsRepository) -> TestClient:
         from services.api.main import app
         from services.api.routes.observability import get_diagnostics_repository
 
-        app.dependency_overrides[get_diagnostics_repository] = (
-            lambda: diagnostics_repo_clean
-        )
+        app.dependency_overrides[get_diagnostics_repository] = lambda: diagnostics_repo_clean
         tc = TestClient(app)
         yield tc
         app.dependency_overrides.clear()
@@ -460,10 +432,8 @@ class TestDiagnosticsEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client_clean.get("/health/diagnostics")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client_clean.get("/health/diagnostics", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_diagnostics_contains_required_keys(self, client_clean: TestClient) -> None:
         """
@@ -471,7 +441,7 @@ class TestDiagnosticsEndpoint:
         WHEN GET /health/diagnostics is requested
         THEN response contains all four count fields and generated_at.
         """
-        resp = client_clean.get("/health/diagnostics")
+        resp = client_clean.get("/health/diagnostics", headers=AUTH_HEADERS)
         body = resp.json()
         for key in (
             "queue_contention_count",
@@ -482,15 +452,13 @@ class TestDiagnosticsEndpoint:
         ):
             assert key in body, f"Missing key '{key}': {body}"
 
-    def test_diagnostics_all_zeros_for_clean_system(
-        self, client_clean: TestClient
-    ) -> None:
+    def test_diagnostics_all_zeros_for_clean_system(self, client_clean: TestClient) -> None:
         """
         GIVEN no events in the diagnostics repo
         WHEN GET /health/diagnostics is requested
         THEN all four count fields are 0.
         """
-        resp = client_clean.get("/health/diagnostics")
+        resp = client_clean.get("/health/diagnostics", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["queue_contention_count"] == 0
         assert body["feed_health_count"] == 0
@@ -513,7 +481,7 @@ class TestDiagnosticsEndpoint:
         app.dependency_overrides[get_diagnostics_repository] = lambda: repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/health/diagnostics")
+            resp = tc.get("/health/diagnostics", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
             assert body["parity_critical_count"] == 3
@@ -535,7 +503,7 @@ class TestDiagnosticsEndpoint:
         app.dependency_overrides[get_diagnostics_repository] = lambda: repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/health/diagnostics")
+            resp = tc.get("/health/diagnostics", headers=AUTH_HEADERS)
             body = resp.json()
             assert body["certification_blocked_count"] == 2
         finally:

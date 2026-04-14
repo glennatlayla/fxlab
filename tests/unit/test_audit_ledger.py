@@ -4,11 +4,10 @@ Tests verify AC2: Audit ledger table captures actor, action, object_id, object_t
 """
 
 import pytest
-import json
-from datetime import datetime
 from sqlalchemy import inspect
-from libs.contracts.models import AuditEvent
+
 from libs.contracts.audit import write_audit_event
+from libs.contracts.models import AuditEvent
 
 
 class TestAC2AuditLedgerSchema:
@@ -132,9 +131,9 @@ class TestAC2AuditWriteFunction:
             metadata={"name": "Test Strategy", "version": 1},
         )
 
-        # Should have called add() and commit()
+        # Should have called add() and flush() — commit is deferred to get_db().
         assert mock_session.add.called
-        assert mock_session.commit.called
+        assert mock_session.flush.called
 
     def test_ac2_write_audit_event_generates_ulid_id(self, mock_session, sample_ulid):
         """Verify write_audit_event generates ULID for event ID."""
@@ -209,7 +208,6 @@ class TestAC2AuditWriteFunction:
         )
 
         event = in_memory_db.query(AuditEvent).filter_by(object_id=sample_ulid).first()
-        original_action = event.action
 
         # Attempt to modify
         event.action = "strategy.deleted"
@@ -218,7 +216,7 @@ class TestAC2AuditWriteFunction:
 
         # Should still be the original value (or raise error on commit)
         # This test expects immutability to be enforced
-        assert event.action == original_action or True  # Will fail when immutability is added
+        assert True  # Will fail when immutability is added
 
     def test_ac2_write_audit_event_handles_empty_metadata(self, in_memory_db, sample_ulid):
         """Verify write_audit_event handles empty metadata."""

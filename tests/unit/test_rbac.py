@@ -10,18 +10,21 @@ Tests verify:
 - Approvals endpoint enforces RBAC.
 """
 
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from libs.authz.interfaces.rbac import (
+    ROLE_PERMISSIONS,
     Permission,
     RBACInterface,
     Role,
-    ROLE_PERMISSIONS,
 )
 from libs.authz.mocks.mock_rbac import MockRBACService
 from libs.contracts.errors import NotFoundError
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Role enum tests
@@ -39,9 +42,9 @@ class TestRoleEnum:
         """Role.OPERATOR must exist."""
         assert Role.OPERATOR == "operator"
 
-    def test_role_researcher_exists(self):
-        """Role.RESEARCHER must exist."""
-        assert Role.RESEARCHER == "researcher"
+    def test_role_reviewer_exists(self):
+        """Role.REVIEWER must exist."""
+        assert Role.REVIEWER == "reviewer"
 
     def test_role_viewer_exists(self):
         """Role.VIEWER must exist."""
@@ -109,11 +112,11 @@ class TestRolePermissionsPolicy:
 
     def test_researcher_can_request_promotion(self):
         """Researcher can request promotions."""
-        assert Permission.REQUEST_PROMOTION in ROLE_PERMISSIONS[Role.RESEARCHER]
+        assert Permission.REQUEST_PROMOTION in ROLE_PERMISSIONS[Role.REVIEWER]
 
     def test_researcher_cannot_approve_promotion(self):
         """Researcher cannot approve promotions (only operators/admins can)."""
-        assert Permission.APPROVE_PROMOTION not in ROLE_PERMISSIONS[Role.RESEARCHER]
+        assert Permission.APPROVE_PROMOTION not in ROLE_PERMISSIONS[Role.REVIEWER]
 
     def test_viewer_cannot_request_promotion(self):
         """Viewer has read-only access — cannot request promotions."""
@@ -134,9 +137,9 @@ class TestRolePermissionsPolicy:
     def test_all_roles_have_view_audit(self):
         """All roles can view the audit log."""
         for role in Role:
-            assert (
-                Permission.VIEW_AUDIT in ROLE_PERMISSIONS[role]
-            ), f"Role {role} should have VIEW_AUDIT permission"
+            assert Permission.VIEW_AUDIT in ROLE_PERMISSIONS[role], (
+                f"Role {role} should have VIEW_AUDIT permission"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +158,8 @@ class TestMockRBACService:
         """set_role / get_role round-trips correctly."""
         rbac = MockRBACService()
         user_id = "01HQAAAAAAAAAAAAAAAAAAAAAA"
-        rbac.set_role(user_id, Role.RESEARCHER)
-        assert rbac.get_role(user_id) == Role.RESEARCHER
+        rbac.set_role(user_id, Role.REVIEWER)
+        assert rbac.get_role(user_id) == Role.REVIEWER
 
     def test_unknown_user_raises_not_found_without_default(self):
         """get_role raises NotFoundError for unknown user when no default."""
@@ -173,14 +176,14 @@ class TestMockRBACService:
         """has_permission returns True when the role grants the permission."""
         rbac = MockRBACService()
         user_id = "01HQDDDDDDDDDDDDDDDDDDDDDD"
-        rbac.set_role(user_id, Role.RESEARCHER)
+        rbac.set_role(user_id, Role.REVIEWER)
         assert rbac.has_permission(user_id, Permission.REQUEST_PROMOTION)
 
     def test_has_permission_false_for_denied(self):
         """has_permission returns False when the role lacks the permission."""
         rbac = MockRBACService()
         user_id = "01HQEEEEEEEEEEEEEEEEEEEEEE"
-        rbac.set_role(user_id, Role.RESEARCHER)
+        rbac.set_role(user_id, Role.REVIEWER)
         assert not rbac.has_permission(user_id, Permission.APPROVE_PROMOTION)
 
     def test_call_count_increments(self):
@@ -247,6 +250,7 @@ class TestPromotionEndpointRBAC:
                     "target_environment": "paper",
                     "requester_id": "01HQBBBBBBBBBBBBBBBBBBBBBB",
                 },
+                headers=AUTH_HEADERS,
             )
             assert response.status_code == 403
             mock_perm.assert_called_once()
@@ -268,6 +272,7 @@ class TestPromotionEndpointRBAC:
                             "target_environment": "paper",
                             "requester_id": "01HQBBBBBBBBBBBBBBBBBBBBBB",
                         },
+                        headers=AUTH_HEADERS,
                     )
                     assert response.status_code == 202
 
@@ -326,6 +331,6 @@ class TestCheckPermissionRBACIntegration:
             permission=Permission.REQUEST_PROMOTION,
             rbac_service=rbac,
         )
-        assert (
-            result is False
-        ), "Viewer should be denied REQUEST_PROMOTION when an RBAC service is provided."
+        assert result is False, (
+            "Viewer should be denied REQUEST_PROMOTION when an RBAC service is provided."
+        )

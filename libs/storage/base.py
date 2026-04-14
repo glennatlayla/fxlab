@@ -39,7 +39,7 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 
 class ArtifactStorageBase(ABC):
@@ -104,8 +104,8 @@ class ArtifactStorageBase(ABC):
         data: bytes,
         bucket: str,
         key: str,
-        metadata: Optional[dict[str, Any]] = None,
-        correlation_id: Optional[str] = None,
+        metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """
         Store binary data at the given bucket/key, optionally with metadata.
@@ -183,7 +183,7 @@ class ArtifactStorageBase(ABC):
         bucket: str,
         prefix: str,
         correlation_id: str,
-        max_keys: Optional[int] = None,
+        max_keys: int | None = None,
     ) -> list[str]:
         """
         List object keys in a bucket that match the given prefix.

@@ -36,7 +36,6 @@ Example:
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -81,16 +80,15 @@ class ChartData(BaseModel):
     points: list[EquityCurvePoint] = Field(
         ..., description="Chart data points (max 2000 for wire transfer)"
     )
-    sampling_applied: bool = Field(
-        ..., description="Whether data was downsampled before serving"
-    )
-    sampling_method: Optional[SamplingMethod] = Field(
+    sampling_applied: bool = Field(..., description="Whether data was downsampled before serving")
+    sampling_method: SamplingMethod | None = Field(
         default=None, description="Sampling method used (if sampling_applied=true)"
     )
     original_point_count: int = Field(
         ..., description="Original data point count before sampling", ge=0
     )
     generated_at: datetime = Field(..., description="Chart data generation timestamp")
+
 
 class DrawdownPoint(BaseModel):
     """
@@ -135,10 +133,8 @@ class EquityChartResponse(BaseModel):
     points: list[EquityCurvePoint] = Field(
         ..., description="Equity curve data points (LTTB-reduced if sampling_applied)"
     )
-    sampling_applied: bool = Field(
-        ..., description="True when LTTB downsampling was applied"
-    )
-    sampling_method: Optional[SamplingMethod] = Field(
+    sampling_applied: bool = Field(..., description="True when LTTB downsampling was applied")
+    sampling_method: SamplingMethod | None = Field(
         default=None, description="Sampling algorithm used (populated when sampling_applied)"
     )
     raw_equity_point_count: int = Field(
@@ -175,12 +171,8 @@ class DrawdownChartResponse(BaseModel):
     """
 
     run_id: str = Field(..., description="Run ULID this chart belongs to")
-    points: list[DrawdownPoint] = Field(
-        ..., description="Drawdown curve data points"
-    )
-    sampling_applied: bool = Field(
-        ..., description="True when LTTB downsampling was applied"
-    )
+    points: list[DrawdownPoint] = Field(..., description="Drawdown curve data points")
+    sampling_applied: bool = Field(..., description="True when LTTB downsampling was applied")
     raw_point_count: int = Field(
         ..., description="Original point count before any downsampling", ge=0
     )

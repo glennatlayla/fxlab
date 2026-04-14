@@ -12,17 +12,15 @@ Does NOT:
 
 Example:
     rbac = MockRBACService()
-    rbac.set_role("01HQ...", Role.RESEARCHER)
+    rbac.set_role("01HQ...", Role.REVIEWER)
     assert rbac.has_permission("01HQ...", Permission.REQUEST_PROMOTION)
 """
 
-from typing import Optional
-
 from libs.authz.interfaces.rbac import (
+    ROLE_PERMISSIONS,
     Permission,
     RBACInterface,
     Role,
-    ROLE_PERMISSIONS,
 )
 from libs.contracts.errors import NotFoundError
 
@@ -47,7 +45,7 @@ class MockRBACService(RBACInterface):
         assert rbac.call_count == 1
     """
 
-    def __init__(self, default_role: Optional[Role] = None) -> None:
+    def __init__(self, default_role: Role | None = None) -> None:
         """
         Initialise the mock RBAC service.
 
@@ -59,7 +57,7 @@ class MockRBACService(RBACInterface):
         self._roles: dict[str, Role] = {}
         self._default_role = default_role
         self.call_count = 0  # total has_permission calls (for assertions)
-        self.last_checked_permission: Optional[Permission] = None
+        self.last_checked_permission: Permission | None = None
 
     def set_role(self, user_id: str, role: Role) -> None:
         """

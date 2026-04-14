@@ -36,9 +36,9 @@ Example:
 from __future__ import annotations
 
 import io
-import structlog
-from typing import Any, Optional
+from typing import Any
 
+import structlog
 from minio import Minio
 from minio.error import S3Error
 
@@ -186,8 +186,8 @@ class MinIOArtifactStorage(ArtifactStorageBase):
         data: bytes,
         bucket: str,
         key: str,
-        metadata: Optional[dict[str, Any]] = None,
-        correlation_id: Optional[str] = None,
+        metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """
         Store artifact data in object storage.
@@ -229,7 +229,7 @@ class MinIOArtifactStorage(ArtifactStorageBase):
                 object_name=key,
                 data=data_stream,
                 length=len(data),
-                metadata=str_metadata,
+                metadata=str_metadata,  # type: ignore[arg-type]
             )
 
             object_key = f"artifacts/{key}" if not key.startswith("artifacts/") else key
@@ -353,7 +353,7 @@ class MinIOArtifactStorage(ArtifactStorageBase):
 
             # Get metadata via stat_object
             stat = self.client.stat_object(bucket, key)
-            metadata = stat.metadata or {}
+            metadata = dict(stat.metadata) if stat.metadata else {}
 
             logger.info(
                 "artifact_storage.get_with_metadata_success",
@@ -363,7 +363,7 @@ class MinIOArtifactStorage(ArtifactStorageBase):
                 size=len(data),
             )
 
-            return data, metadata
+            return data, metadata  # type: ignore[return-value]
 
         except S3Error as e:
             if e.code == "NoSuchKey":
@@ -386,7 +386,7 @@ class MinIOArtifactStorage(ArtifactStorageBase):
         bucket: str,
         prefix: str,
         correlation_id: str,
-        max_keys: Optional[int] = None,
+        max_keys: int | None = None,
     ) -> list[str]:
         """
         List object keys in bucket with optional prefix filter.

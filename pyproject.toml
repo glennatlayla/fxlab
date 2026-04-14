@@ -18,11 +18,24 @@ dependencies = [
     "redis==5.0.1",
     "structlog==24.1.0",
     "python-ulid==2.2.0",
+    # Auth — JWT and password hashing
+    "python-jose[cryptography]>=3.3.0",  # JWT encoding/decoding (HS256, RS256)
+    "PyJWT[crypto]>=2.8.0",               # JWT decoding with RSA (used by Keycloak validator)
+    "bcrypt>=4.0.0",                      # password hashing for local accounts
+    # HTTP — ASGI server and request parsing
+    "uvicorn[standard]>=0.25.0",          # production ASGI server
+    "python-multipart>=0.0.6",            # form data parsing for OAuth2 token endpoint
     # Phase 2 — research & strategy compiler
     "optuna>=3.5.0",       # hyperparameter optimisation sampler
     "numpy>=1.26.0",       # numerical operations across compiler/IR layers
     "polars>=0.20.0",      # bar-level computation (columnar, fast)
     "pyarrow>=14.0.0",     # parquet I/O for research artefacts
+    # Build tooling
+    "nodeenv>=1.9.0",      # manages Node.js/npm inside Python venv for frontend builds
+    # Observability — OpenTelemetry distributed tracing
+    "opentelemetry-api>=1.20.0",                  # tracer and span API
+    "opentelemetry-sdk>=1.20.0",                  # TracerProvider, exporters, samplers
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",  # OTLP gRPC exporter for Jaeger/Tempo
 ]
 
 [project.optional-dependencies]
@@ -40,7 +53,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 # Mirror pytest.ini — must be kept in sync.  norecursedirs prevents pytest
 # from collecting third-party library tests inside .venv (passlib, pyarrow…).
-norecursedirs = [".venv", ".archive", "__pycache__", "*.egg-info", ".git", ".mypy_cache"]
+norecursedirs = [".venv", ".archive", ".claude", "__pycache__", "*.egg-info", ".git", ".mypy_cache"]
 addopts = [
     "-v",
     "--strict-markers",
@@ -60,8 +73,11 @@ target-version = "py312"
 exclude = [
     ".venv",
     ".archive",
+    ".claude",
     "migrations/versions",
     "__pycache__",
+    "node_modules",
+    "build.py",
 ]
 
 [tool.ruff.lint]
@@ -70,6 +86,18 @@ ignore = [
     "E501",   # line too long (handled by formatter)
     "B008",   # do not perform function calls in default args (FastAPI Depends pattern)
     "UP007",  # use X | Y for union (requires Python 3.10+ runtime)
+    "UP017",  # use datetime.UTC alias (requires Python 3.11+ runtime)
+    "UP042",  # str+Enum → StrEnum (requires Python 3.11+ runtime; codebase-wide pattern)
+    "B904",   # raise from in except (pre-existing; fix incrementally)
+    "B017",   # pytest.raises(Exception) in tests (intentional for frozen model tests)
+    "SIM117",  # nested with → combined with (readability preference)
+    "SIM102",  # nested if → combined if (readability preference)
+    "E402",    # module-level import not at top (intentional in several modules)
+    "F405",    # name may be undefined from star imports (__init__ re-exports)
+    "UP035",   # deprecated typing imports (AsyncContextManager → contextlib)
+    "SIM105",  # contextlib.suppress vs try/except/pass (readability preference)
+    "UP046",   # PEP 695 Generic class syntax (requires Python 3.12+ runtime)
+    "UP047",   # PEP 695 generic function syntax (requires Python 3.12+ runtime)
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -80,3 +108,4 @@ python_version = "3.12"
 ignore_missing_imports = true
 no_strict_optional = true
 warn_unused_ignores = false
+exclude = [".claude", ".archive", "migrations"]

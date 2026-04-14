@@ -29,7 +29,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from libs.contracts.artifact import Artifact, ArtifactQuery, ArtifactQueryResponse
-from libs.contracts.errors import NotFoundError
 
 
 class ArtifactRepositoryInterface(ABC):

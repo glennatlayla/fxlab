@@ -30,9 +30,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # Phase 1 / 2 contracts — preserved unchanged for backward compatibility
@@ -65,8 +65,7 @@ class FeedResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FeedHealthSnapshotResponse(BaseModel):
@@ -90,15 +89,14 @@ class FeedHealthSnapshotResponse(BaseModel):
     id: str = Field(..., description="Snapshot ULID")
     feed_id: str
     timestamp: datetime
-    latency_ms: Optional[int] = None
+    latency_ms: int | None = None
     gap_count: int
     anomaly_count: int
     health_score: float = Field(..., ge=0.0, le=100.0)
     metadata: dict[str, Any]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ParityEventResponse(BaseModel):
@@ -125,12 +123,11 @@ class ParityEventResponse(BaseModel):
     symbol: str
     timestamp: datetime
     discrepancy_type: str
-    magnitude: Optional[float] = None
+    magnitude: float | None = None
     metadata: dict[str, Any]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +171,7 @@ class FeedConfigVersion(BaseModel):
     config: dict[str, Any] = Field(..., description="Configuration snapshot at this version")
     created_at: datetime = Field(..., description="Version creation timestamp")
     created_by: str = Field(..., description="ULID of user who created this version")
-    change_summary: Optional[str] = Field(
+    change_summary: str | None = Field(
         default=None, description="Optional description of what changed"
     )
 
@@ -208,8 +205,8 @@ class FeedConnectivityResult(BaseModel):
     feed_id: str = Field(..., description="Feed ULID")
     tested_at: datetime = Field(..., description="Test execution timestamp")
     status: ConnectivityStatus = Field(..., description="Test outcome")
-    latency_ms: Optional[int] = Field(default=None, description="Latency in ms (None on failure)")
-    error_message: Optional[str] = Field(default=None, description="Error detail (None on success)")
+    latency_ms: int | None = Field(default=None, description="Latency in ms (None on failure)")
+    error_message: str | None = Field(default=None, description="Error detail (None on success)")
 
 
 class FeedDetailResponse(BaseModel):

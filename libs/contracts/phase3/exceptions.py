@@ -6,7 +6,6 @@ before serializing to clients.
 """
 
 from enum import Enum
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -50,13 +49,9 @@ class ErrorResponse(BaseModel):
         default_factory=list,
         description="Granular error details (e.g., validation failures per field)",
     )
-    request_id: str = Field(
-        description="Unique request identifier for log correlation"
-    )
+    request_id: str = Field(description="Unique request identifier for log correlation")
     timestamp: str = Field(description="ISO 8601 UTC timestamp of error occurrence")
-    retryable: bool = Field(
-        default=False, description="Whether client should retry the request"
-    )
+    retryable: bool = Field(default=False, description="Whether client should retry the request")
 
 
 class ValidationErrorResponse(ErrorResponse):
@@ -83,9 +78,7 @@ class AuthorizationErrorResponse(ErrorResponse):
     required_permission: str | None = Field(
         None, description="Permission required to perform the requested action"
     )
-    current_role: str | None = Field(
-        None, description="Authenticated user's current role"
-    )
+    current_role: str | None = Field(None, description="Authenticated user's current role")
 
 
 class NotFoundErrorResponse(ErrorResponse):
@@ -146,6 +139,4 @@ class DependencyErrorResponse(ErrorResponse):
     dependency_name: str = Field(
         description="Name of the failed dependency (e.g., 'postgres', 'redis')"
     )
-    retryable: bool = Field(
-        default=True, description="Dependency errors are typically retryable"
-    )
+    retryable: bool = Field(default=True, description="Dependency errors are typically retryable")

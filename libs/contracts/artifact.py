@@ -6,7 +6,6 @@ These models represent artifact metadata and retrieval requests.
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,22 +47,20 @@ class ArtifactQuery(BaseModel):
     Submitted from the artifact browser UI to filter and retrieve artifacts.
     """
 
-    artifact_types: Optional[list[ArtifactType]] = Field(
+    artifact_types: list[ArtifactType] | None = Field(
         default=None, description="Filter by artifact types"
     )
-    subject_id: Optional[str] = Field(
-        default=None, description="Filter by subject entity ULID"
-    )
-    created_by: Optional[str] = Field(
-        default=None, description="Filter by creator user ULID"
-    )
-    start_time: Optional[datetime] = Field(
+    subject_id: str | None = Field(default=None, description="Filter by subject entity ULID")
+    created_by: str | None = Field(default=None, description="Filter by creator user ULID")
+    start_time: datetime | None = Field(
         default=None, description="Filter by creation start timestamp (inclusive)"
     )
-    end_time: Optional[datetime] = Field(
+    end_time: datetime | None = Field(
         default=None, description="Filter by creation end timestamp (inclusive)"
     )
-    limit: int = Field(default=100, description="Maximum number of artifacts to return", ge=1, le=1000)
+    limit: int = Field(
+        default=100, description="Maximum number of artifacts to return", ge=1, le=1000
+    )
     offset: int = Field(default=0, description="Pagination offset", ge=0)
 
 

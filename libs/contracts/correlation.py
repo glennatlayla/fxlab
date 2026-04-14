@@ -1,17 +1,19 @@
 """Correlation ID contracts for distributed tracing."""
 
-from pydantic import BaseModel, Field, field_validator
 import uuid
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class CorrelationContext(BaseModel):
     """Correlation tracking context.
-    
+
     Attributes:
         correlation_id: Unique request/operation identifier.
         parent_id: Parent operation ID if nested.
         service_name: Service that created this context.
     """
+
     correlation_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Correlation identifier",

@@ -1,13 +1,22 @@
 [run]
-source = libs,services
-data_file = /tmp/.fxlab_coverage
+source = services,libs
 omit =
-    */tests/*
-    */test_*
-    */.venv/*
+    tests/*
+    **/tests/*
+    **/test_*
+    **/*_test.py
+    **/conftest.py
+    **/mocks/*
 
 [report]
+fail_under = 80
+show_missing = true
 exclude_lines =
     pragma: no cover
     def __repr__
+    if TYPE_CHECKING:
     raise NotImplementedError
+    pass
+
+[html]
+directory = htmlcov

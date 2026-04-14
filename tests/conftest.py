@@ -11,6 +11,7 @@ Does NOT:
 
 Fixtures provided:
 - correlation_id: fresh ULID string per test
+- auth_headers: dict with Authorization Bearer TEST_TOKEN header
 - mock_logger: structlog-compatible mock
 - mock_metadata_db: mock database connection
 - mock_artifact_storage: mock ArtifactStorage implementation
@@ -22,8 +23,8 @@ Fixtures provided:
 """
 
 import sys
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 from unittest.mock import MagicMock
 
 import pytest
@@ -43,6 +44,34 @@ if str(_PROJECT_ROOT) not in sys.path:
 # ---------------------------------------------------------------------------
 # Core test-infrastructure fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def ensure_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Ensure ENVIRONMENT=test is set for every test so that JWT auth
+    accepts the TEST_TOKEN bypass.  Autouse guarantees no test
+    accidentally runs with a production-like environment.
+
+    Args:
+        monkeypatch: pytest's built-in monkeypatch fixture.
+    """
+    monkeypatch.setenv("ENVIRONMENT", "test")
+
+
+@pytest.fixture
+def auth_headers() -> dict[str, str]:
+    """
+    Return HTTP headers containing the TEST_TOKEN for authenticated requests.
+
+    Use this fixture when calling protected endpoints via TestClient:
+
+        response = client.get("/some-protected-route", headers=auth_headers)
+
+    Returns:
+        Dict with Authorization: Bearer TEST_TOKEN.
+    """
+    return {"Authorization": "Bearer TEST_TOKEN"}
 
 
 @pytest.fixture
@@ -315,6 +344,44 @@ def health_check_interval() -> int:
 
 
 # ---------------------------------------------------------------------------
+# SQLite schema synchronization — ensures file-based test DB has all columns
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _ensure_sqlite_schema() -> Generator[None, None, None]:
+    """
+    Ensure the file-based SQLite test database has up-to-date schema.
+
+    When the ORM models gain new columns (e.g. row_version), SQLAlchemy's
+    ``create_all()`` only creates missing *tables* — it does NOT add missing
+    columns to existing tables. This leaves a stale ``fxlab_test.db`` file
+    that triggers ``OperationalError: no such column`` at query time.
+
+    Fix: before the first test runs, drop all tables and recreate them from
+    the current ORM metadata. This is safe because the file-based SQLite DB
+    is for testing only — it has no production data to preserve.
+
+    Only applies when the engine URL starts with ``sqlite:///`` (file-based).
+    In-memory SQLite (``sqlite://``) and PostgreSQL are unaffected.
+
+    Yields:
+        None — schema sync runs once per pytest session as setup.
+    """
+    try:
+        from services.api.db import Base, engine
+
+        db_url = str(engine.url)
+        if db_url.startswith("sqlite") and ":memory:" not in db_url:
+            # Drop and recreate all tables to pick up schema changes.
+            Base.metadata.drop_all(engine)
+            Base.metadata.create_all(engine)
+    except Exception:
+        pass  # If db module fails to import, skip — tests will fail naturally
+    yield
+
+
+# ---------------------------------------------------------------------------
 # pytest configuration hooks
 # ---------------------------------------------------------------------------
 
@@ -338,15 +405,45 @@ def reset_rate_limiter() -> Generator[None, None, None]:
     """
     try:
         from services.api.middleware.rate_limit import _window
+
         _window._store.clear()
     except Exception:
         pass  # Middleware not yet imported — safe to ignore
     yield
     try:
         from services.api.middleware.rate_limit import _window
+
         _window._store.clear()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_fastapi_dependency_overrides() -> Generator[None, None, None]:
+    """
+    Clear FastAPI dependency_overrides after every test.
+
+    Multiple route test modules override ``get_current_user`` or other
+    FastAPI dependencies on the shared ``app`` singleton but fail to
+    clean them up.  This leaves stale dependency overrides that leak
+    into later test modules causing spurious auth failures (e.g., a
+    viewer-scoped user override from indicator_routes polluting
+    kill_switch_routes which expects TEST_TOKEN bypass).
+
+    Clearing the dict on teardown is safe: each test that needs overrides
+    re-applies them in its own setup/fixture.
+
+    Yields:
+        None — runs the test, then clears dependency_overrides.
+    """
+    yield
+    try:
+        from services.api.main import app
+
+        if app.dependency_overrides:
+            app.dependency_overrides.clear()
+    except Exception:
+        pass  # App not imported yet — nothing to clean
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -359,6 +456,4 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "integration: mark test as integration test requiring Docker"
     )
-    config.addinivalue_line(
-        "markers", "unit: mark test as unit test (no external dependencies)"
-    )
+    config.addinivalue_line("markers", "unit: mark test as unit test (no external dependencies)")

@@ -185,16 +185,17 @@ class SqlArtifactRepository(ArtifactRepositoryInterface):
         # Convert contract to ORM
         orm_artifact = ArtifactModel(
             id=artifact.id,
-            run_id=artifact.run_id,
             artifact_type=artifact.artifact_type,
-            uri=artifact.uri,
+            subject_id=artifact.subject_id,
+            storage_path=artifact.storage_path,
             size_bytes=artifact.size_bytes,
-            checksum=artifact.checksum,
+            created_at=artifact.created_at,
+            created_by=artifact.created_by,
         )
 
         try:
             self.db.add(orm_artifact)
-            self.db.commit()
+            self.db.flush()  # Emit SQL but keep transaction open for atomicity.
             self.db.refresh(orm_artifact)
             logger.info(
                 "artifact.saved",
@@ -228,11 +229,10 @@ class SqlArtifactRepository(ArtifactRepositoryInterface):
         """
         return Artifact(
             id=orm_artifact.id,
-            run_id=orm_artifact.run_id,
             artifact_type=orm_artifact.artifact_type,
-            uri=orm_artifact.uri,
+            subject_id=orm_artifact.subject_id,
+            storage_path=orm_artifact.storage_path,
             size_bytes=orm_artifact.size_bytes,
-            checksum=orm_artifact.checksum,
             created_at=orm_artifact.created_at,
-            updated_at=orm_artifact.updated_at,
+            created_by=orm_artifact.created_by,
         )

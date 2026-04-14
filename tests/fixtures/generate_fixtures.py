@@ -4,6 +4,7 @@
 Run once to create / refresh the fixture data:
     python tests/fixtures/generate_fixtures.py
 """
+
 import csv
 import random
 from datetime import datetime, timedelta, timezone
@@ -19,16 +20,25 @@ BARS_PER_SYMBOL = 20
 TIMEFRAME = "1m"
 
 HEADERS = [
-    "canonical_symbol", "source_symbol", "venue", "asset_class",
-    "timeframe", "ts", "open", "high", "low", "close", "volume",
+    "canonical_symbol",
+    "source_symbol",
+    "venue",
+    "asset_class",
+    "timeframe",
+    "ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
 ]
 
 
 def make_bar(symbol: str, ts: datetime, base_price: float = 100.0) -> dict:
     o = round(base_price + random.uniform(-0.5, 0.5), 2)
     h = round(o + random.uniform(0.01, 1.0), 2)
-    l = round(o - random.uniform(0.01, 1.0), 2)
-    c = round(random.uniform(l, h), 2)
+    low = round(o - random.uniform(0.01, 1.0), 2)
+    c = round(random.uniform(low, h), 2)
     v = random.randint(100, 10_000)
     return {
         "canonical_symbol": symbol,
@@ -37,7 +47,11 @@ def make_bar(symbol: str, ts: datetime, base_price: float = 100.0) -> dict:
         "asset_class": "equity",
         "timeframe": TIMEFRAME,
         "ts": ts.isoformat(),
-        "open": o, "high": h, "low": l, "close": c, "volume": v,
+        "open": o,
+        "high": h,
+        "low": low,
+        "close": c,
+        "volume": v,
     }
 
 

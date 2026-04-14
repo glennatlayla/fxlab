@@ -20,11 +20,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from libs.jobs.interfaces.job import ComputePolicy, Job, JobStatus, JobType
-from libs.jobs.interfaces.queue import ContentionReport, QueueDepthSnapshot
+from libs.jobs.interfaces.queue import QueueDepthSnapshot
 from libs.jobs.mocks.mock_job_repository import MockJobRepository
 from libs.jobs.mocks.mock_queue_service import MockQueueService
 from services.api.main import app
 
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -75,9 +76,7 @@ class TestJobLifecycleIntegration:
     MockJobRepository, simulating a PENDING → RUNNING → COMPLETED flow.
     """
 
-    def test_job_pending_to_running_transition(
-        self, job_repo: MockJobRepository
-    ) -> None:
+    def test_job_pending_to_running_transition(self, job_repo: MockJobRepository) -> None:
         """Job can be saved in PENDING, then updated to RUNNING."""
         job = _make_job("01HQAAAAAAAAAAAAAAAAAAAAAA", status=JobStatus.PENDING)
         job_repo.save(job)
@@ -95,9 +94,7 @@ class TestJobLifecycleIntegration:
         assert retrieved.status == JobStatus.RUNNING
         assert retrieved.is_active() is True
 
-    def test_job_running_to_completed_transition(
-        self, job_repo: MockJobRepository
-    ) -> None:
+    def test_job_running_to_completed_transition(self, job_repo: MockJobRepository) -> None:
         """Job can be updated from RUNNING to COMPLETED."""
         running = _make_job("01HQBBBBBBBBBBBBBBBBBBBBBB", status=JobStatus.RUNNING)
         job_repo.save(running)
@@ -114,9 +111,7 @@ class TestJobLifecycleIntegration:
         assert retrieved.status == JobStatus.COMPLETED
         assert retrieved.is_terminal() is True
 
-    def test_multiple_jobs_different_statuses(
-        self, job_repo: MockJobRepository
-    ) -> None:
+    def test_multiple_jobs_different_statuses(self, job_repo: MockJobRepository) -> None:
         """Repository correctly segregates jobs by status."""
         pending_ids = [
             "01HQAAAAAAAAAAAAAAAAAAAAAA",
@@ -135,12 +130,10 @@ class TestJobLifecycleIntegration:
         assert len(completed) == 1
         assert completed[0].id == completed_id
 
-    def test_different_job_types_stored_and_retrieved(
-        self, job_repo: MockJobRepository
-    ) -> None:
+    def test_different_job_types_stored_and_retrieved(self, job_repo: MockJobRepository) -> None:
         """Jobs of different types coexist in the repository."""
         for i, jtype in enumerate(JobType):
-            uid = f"01HQAAAAAAAAAAAAAAAAAAAAAA"[: -1] + str(i)
+            uid = "01HQAAAAAAAAAAAAAAAAAAAAAA"[:-1] + str(i)
             uid = "01HQAAAAAAAAAAAAAAAAAAAAAA"[:25] + str(i)
             job_repo.save(
                 Job(
@@ -153,9 +146,7 @@ class TestJobLifecycleIntegration:
 
         assert job_repo.count() == len(JobType)
 
-    def test_compute_policy_preserved_on_round_trip(
-        self, job_repo: MockJobRepository
-    ) -> None:
+    def test_compute_policy_preserved_on_round_trip(self, job_repo: MockJobRepository) -> None:
         """ComputePolicy is preserved when saving and retrieving a job."""
         job = _make_job(
             "01HQDDDDDDDDDDDDDDDDDDDDDD",
@@ -177,17 +168,13 @@ class TestQueueServiceIntegration:
     multiple snapshots and that the overall_score is preserved.
     """
 
-    def test_empty_service_returns_zero_score(
-        self, queue_svc: MockQueueService
-    ) -> None:
+    def test_empty_service_returns_zero_score(self, queue_svc: MockQueueService) -> None:
         """A fresh service with no snapshots returns overall_score=0.0."""
         report = queue_svc.get_contention_report()
         assert report.overall_score == 0.0
         assert report.queues == []
 
-    def test_report_includes_all_registered_snapshots(
-        self, queue_svc: MockQueueService
-    ) -> None:
+    def test_report_includes_all_registered_snapshots(self, queue_svc: MockQueueService) -> None:
         """All snapshots added to the service appear in the report."""
         queue_svc.set_overall_score(45.0)
         queue_svc.add_snapshot(
@@ -204,22 +191,16 @@ class TestQueueServiceIntegration:
         assert names == {"optimization", "backtest"}
         assert report.overall_score == 45.0
 
-    def test_contention_report_is_immutable(
-        self, queue_svc: MockQueueService
-    ) -> None:
+    def test_contention_report_is_immutable(self, queue_svc: MockQueueService) -> None:
         """ContentionReport returned by the service is a frozen model."""
         queue_svc.set_overall_score(10.0)
         report = queue_svc.get_contention_report()
         with pytest.raises(Exception):  # ValidationError or TypeError (frozen model)
             report.overall_score = 99.0  # type: ignore[misc]
 
-    def test_clear_produces_empty_report_on_next_call(
-        self, queue_svc: MockQueueService
-    ) -> None:
+    def test_clear_produces_empty_report_on_next_call(self, queue_svc: MockQueueService) -> None:
         """After clear(), the next report has no queues and score 0."""
-        queue_svc.add_snapshot(
-            QueueDepthSnapshot(queue_name="q", depth=5, contention_score=60.0)
-        )
+        queue_svc.add_snapshot(QueueDepthSnapshot(queue_name="q", depth=5, contention_score=60.0))
         queue_svc.set_overall_score(60.0)
         queue_svc.clear()
 
@@ -227,9 +208,7 @@ class TestQueueServiceIntegration:
         assert report.queues == []
         assert report.overall_score == 0.0
 
-    def test_multiple_calls_all_tracked(
-        self, queue_svc: MockQueueService
-    ) -> None:
+    def test_multiple_calls_all_tracked(self, queue_svc: MockQueueService) -> None:
         """call_count correctly counts multiple get_contention_report() calls."""
         for _ in range(5):
             queue_svc.get_contention_report()
@@ -257,30 +236,28 @@ class TestQueuesContentionEndpointIntegration:
         RATIONALE: M7 removed the aggregate /queues/contention endpoint.
         The canonical queue list endpoint is GET /queues/.
         """
-        response = api_client.get("/queues/")
+        response = api_client.get("/queues/", headers=AUTH_HEADERS)
         assert response.status_code == 200
 
     def test_queues_list_has_queues_key(self, api_client: TestClient) -> None:
         """GET /queues/ response body contains a 'queues' key."""
-        response = api_client.get("/queues/")
+        response = api_client.get("/queues/", headers=AUTH_HEADERS)
         body = response.json()
         assert "queues" in body
 
-    def test_per_class_contention_unknown_class_returns_404(
-        self, api_client: TestClient
-    ) -> None:
+    def test_per_class_contention_unknown_class_returns_404(self, api_client: TestClient) -> None:
         """
         GET /queues/{unknown_class}/contention returns 404.
 
         RATIONALE: M7 routes contention per queue_class; an unknown class
         raises NotFoundError which the handler maps to HTTP 404.
         """
-        response = api_client.get("/queues/NONEXISTENT_CLASS/contention")
+        response = api_client.get("/queues/NONEXISTENT_CLASS/contention", headers=AUTH_HEADERS)
         assert response.status_code == 404
 
     def test_queues_field_is_list(self, api_client: TestClient) -> None:
         """GET /queues/ response 'queues' field is a JSON array."""
-        response = api_client.get("/queues/")
+        response = api_client.get("/queues/", headers=AUTH_HEADERS)
         body = response.json()
         assert isinstance(body["queues"], list)
 
@@ -294,25 +271,23 @@ class TestFeedHealthEndpointIntegration:
 
     def test_endpoint_returns_200(self, api_client: TestClient) -> None:
         """GET /feed-health returns HTTP 200."""
-        response = api_client.get("/feed-health")
+        response = api_client.get("/feed-health", headers=AUTH_HEADERS)
         assert response.status_code == 200
 
-    def test_response_has_feeds_and_generated_at(
-        self, api_client: TestClient
-    ) -> None:
+    def test_response_has_feeds_and_generated_at(self, api_client: TestClient) -> None:
         """Response body contains 'feeds' list and 'generated_at' timestamp."""
-        response = api_client.get("/feed-health")
+        response = api_client.get("/feed-health", headers=AUTH_HEADERS)
         body = response.json()
         assert "feeds" in body
         assert "generated_at" in body
 
     def test_feeds_field_is_list(self, api_client: TestClient) -> None:
         """Response 'feeds' field is a JSON array."""
-        response = api_client.get("/feed-health")
+        response = api_client.get("/feed-health", headers=AUTH_HEADERS)
         body = response.json()
         assert isinstance(body["feeds"], list)
 
     def test_stub_returns_empty_feeds_list(self, api_client: TestClient) -> None:
         """Stub phase returns an empty feeds list."""
-        response = api_client.get("/feed-health")
+        response = api_client.get("/feed-health", headers=AUTH_HEADERS)
         assert response.json()["feeds"] == []

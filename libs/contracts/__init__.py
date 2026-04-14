@@ -6,7 +6,7 @@ and interface definitions used across services.
 
 __all__ = [
     "enums",
-    "base", 
+    "base",
     "errors",
     "config",
     "correlation",

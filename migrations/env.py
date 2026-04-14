@@ -55,6 +55,7 @@ target_metadata = Base.metadata
 # Offline mode — generate SQL script without a live database connection
 # ---------------------------------------------------------------------------
 
+
 def run_migrations_offline() -> None:
     """
     Run migrations in offline mode.
@@ -78,6 +79,7 @@ def run_migrations_offline() -> None:
 # ---------------------------------------------------------------------------
 # Online mode — run migrations against a live database connection
 # ---------------------------------------------------------------------------
+
 
 def run_migrations_online() -> None:
     """

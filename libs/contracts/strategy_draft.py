@@ -7,7 +7,7 @@ that will be compiled and executed by the research orchestration layer.
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -34,18 +34,16 @@ class ParameterDefinition(BaseModel):
     type: ParameterType = Field(..., description="Parameter data type")
     default: Any = Field(..., description="Default value for this parameter")
     required: bool = Field(default=True, description="Whether parameter is required")
-    min_value: Optional[float] = Field(
+    min_value: float | None = Field(
         default=None, description="Minimum value for numeric parameters"
     )
-    max_value: Optional[float] = Field(
+    max_value: float | None = Field(
         default=None, description="Maximum value for numeric parameters"
     )
-    choices: Optional[list[str]] = Field(
+    choices: list[str] | None = Field(
         default=None, description="Valid choices for CHOICE type parameters"
     )
-    description: Optional[str] = Field(
-        default=None, description="Parameter documentation"
-    )
+    description: str | None = Field(default=None, description="Parameter documentation")
 
 
 class StrategyDraftStatus(str, Enum):
@@ -66,7 +64,7 @@ class StrategyDraftRequest(BaseModel):
     """
 
     name: str = Field(..., description="Strategy draft name", min_length=1, max_length=200)
-    description: Optional[str] = Field(
+    description: str | None = Field(
         default=None, description="Strategy description", max_length=2000
     )
     template_id: str = Field(..., description="Strategy template ULID")
@@ -85,7 +83,7 @@ class StrategyDraft(BaseModel):
     id: str = Field(..., description="Draft ULID")
     user_id: str = Field(..., description="Author user ULID")
     name: str = Field(..., description="Strategy draft name")
-    description: Optional[str] = Field(default=None, description="Strategy description")
+    description: str | None = Field(default=None, description="Strategy description")
     template_id: str = Field(..., description="Strategy template ULID")
     parameters: dict[str, Any] = Field(
         default_factory=dict, description="Parameter values keyed by parameter name"

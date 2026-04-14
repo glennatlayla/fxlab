@@ -34,7 +34,7 @@ class Role(str, Enum):
 
     ADMIN = "admin"
     OPERATOR = "operator"
-    RESEARCHER = "researcher"
+    REVIEWER = "reviewer"
     VIEWER = "viewer"
 
 
@@ -76,7 +76,7 @@ class Permission(str, Enum):
 #: Maps each Role to the set of Permissions it grants.
 #: admin has all permissions.
 #: operator can approve/reject and manage overrides.
-#: researcher can request promotions and view everything.
+#: reviewer can request promotions and view everything.
 #: viewer is read-only.
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     Role.ADMIN: frozenset(Permission),  # all permissions
@@ -94,7 +94,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.VIEW_QUEUE_CONTENTION,
         }
     ),
-    Role.RESEARCHER: frozenset(
+    Role.REVIEWER: frozenset(
         {
             Permission.REQUEST_PROMOTION,
             Permission.VIEW_OVERRIDE,

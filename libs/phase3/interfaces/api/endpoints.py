@@ -5,7 +5,7 @@ All FastAPI routers must implement these interfaces to ensure consistent
 error handling, request/response contracts, and observability.
 """
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Protocol
 
 from libs.contracts.phase3.runtime import (

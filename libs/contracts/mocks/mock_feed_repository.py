@@ -37,8 +37,10 @@ Example:
 
 from __future__ import annotations
 
+import builtins
+
 from libs.contracts.errors import NotFoundError
-from libs.contracts.feed import FeedDetailResponse, FeedListResponse, FeedResponse
+from libs.contracts.feed import FeedDetailResponse, FeedListResponse
 from libs.contracts.interfaces.feed_repository import FeedRepositoryInterface
 
 
@@ -150,7 +152,7 @@ class MockFeedRepository(FeedRepositoryInterface):
     # Introspection helpers (test-only, not part of the interface)
     # ------------------------------------------------------------------
 
-    def all(self) -> list[FeedDetailResponse]:
+    def all(self) -> builtins.list[FeedDetailResponse]:
         """
         Return all FeedDetailResponse objects in the store.
 

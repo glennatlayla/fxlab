@@ -31,6 +31,7 @@ Example:
 
 from __future__ import annotations
 
+import builtins
 from typing import Any
 
 import structlog
@@ -90,7 +91,7 @@ class SqlParityRepository(ParityRepositoryInterface):
         instrument: str = "",
         feed_id: str = "",
         correlation_id: str,
-    ) -> list[ParityEvent]:
+    ) -> builtins.list[ParityEvent]:
         """
         Return parity events, optionally filtered.
 
@@ -180,7 +181,7 @@ class SqlParityRepository(ParityRepositoryInterface):
 
         return self._orm_to_contract(orm_event)
 
-    def summarize(self, *, correlation_id: str) -> list[ParityInstrumentSummary]:
+    def summarize(self, *, correlation_id: str) -> builtins.list[ParityInstrumentSummary]:
         """
         Return per-instrument parity severity aggregates.
 
@@ -271,10 +272,12 @@ class SqlParityRepository(ParityRepositoryInterface):
         """
         return ParityEvent(
             id=orm_event.id,
-            feed_id=orm_event.feed_id or "",
-            reference_feed_id=orm_event.reference_feed_id or "",
-            parity_score=orm_event.parity_score or "",
-            status=orm_event.status,
-            checked_at=orm_event.checked_at,
-            details=orm_event.details or {},
+            feed_id_official=orm_event.feed_id_official or "",
+            feed_id_shadow=orm_event.feed_id_shadow or "",
+            instrument=orm_event.instrument or "",
+            timestamp=orm_event.timestamp,
+            delta=float(orm_event.delta or 0),
+            delta_pct=float(orm_event.delta_pct or 0),
+            severity=orm_event.severity,
+            detected_at=orm_event.detected_at,
         )

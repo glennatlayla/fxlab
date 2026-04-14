@@ -26,6 +26,8 @@ Requirements: Python 3.9+ to run this script itself (it finds 3.12 for the
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import itertools
 import json
 import os
@@ -37,23 +39,21 @@ import sys
 import textwrap
 import threading
 import time
-import ast
-import hashlib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT         = Path(__file__).resolve().parent
-VENV_DIR             = PROJECT_ROOT / ".venv"
-TRACKING_DIR         = PROJECT_ROOT / "docs" / "workplan-tracking"
-SHARED_LESSONS       = TRACKING_DIR / "SHARED_LESSONS.md"
+PROJECT_ROOT = Path(__file__).resolve().parent
+VENV_DIR = PROJECT_ROOT / ".venv"
+TRACKING_DIR = PROJECT_ROOT / "docs" / "workplan-tracking"
+SHARED_LESSONS = TRACKING_DIR / "SHARED_LESSONS.md"
 ACTIVE_WORKPLAN_FILE = TRACKING_DIR / ".active_workplan"  # persists as JSON
 # User Spec dir: where workplan and software-spec .md files live.
 # Checked in order; first match wins.
@@ -62,9 +62,9 @@ SPEC_DIR = next(
     (PROJECT_ROOT / d for d in _SPEC_DIR_CANDIDATES if (PROJECT_ROOT / d).is_dir()),
     PROJECT_ROOT,  # fallback: browse project root
 )
-ENV_FILE             = PROJECT_ROOT / ".env"
-REQUIREMENTS         = PROJECT_ROOT / "requirements.txt"
-REQUIREMENTS_DEV     = PROJECT_ROOT / "requirements-dev.txt"
+ENV_FILE = PROJECT_ROOT / ".env"
+REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
+REQUIREMENTS_DEV = PROJECT_ROOT / "requirements-dev.txt"
 
 # Canonical list of dev tool packages required for building.
 # When any of these are missing the readiness check auto-installs them.
@@ -102,33 +102,34 @@ DEV_PACKAGES = [
 # Binaries that should exist in .venv/bin after installation
 DEV_BINARIES = ["pytest", "black", "ruff", "mypy"]
 
-ANTHROPIC_API_URL     = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
-DEFAULT_MODEL         = "claude-sonnet-4-5"   # override via .env ANTHROPIC_MODEL
+DEFAULT_MODEL = "claude-sonnet-4-5"  # override via .env ANTHROPIC_MODEL
 
 if platform.system() == "Windows":
-    VENV_PYTHON   = VENV_DIR / "Scripts" / "python.exe"
-    VENV_PIP      = VENV_DIR / "Scripts" / "pip.exe"
+    VENV_PYTHON = VENV_DIR / "Scripts" / "python.exe"
+    VENV_PIP = VENV_DIR / "Scripts" / "pip.exe"
     VENV_ACTIVATE = VENV_DIR / "Scripts" / "activate.bat"
 else:
-    VENV_PYTHON   = VENV_DIR / "bin" / "python"
-    VENV_PIP      = VENV_DIR / "bin" / "pip"
+    VENV_PYTHON = VENV_DIR / "bin" / "python"
+    VENV_PIP = VENV_DIR / "bin" / "pip"
     VENV_ACTIVATE = VENV_DIR / "bin" / "activate"
 
 USE_COLOUR = sys.stdout.isatty() and platform.system() != "Windows"
 
-C_RESET   = "\033[0m"  if USE_COLOUR else ""
-C_BOLD    = "\033[1m"  if USE_COLOUR else ""
-C_DIM     = "\033[2m"  if USE_COLOUR else ""
-C_RED     = "\033[91m" if USE_COLOUR else ""
-C_YELLOW  = "\033[93m" if USE_COLOUR else ""
-C_GREEN   = "\033[92m" if USE_COLOUR else ""
-C_CYAN    = "\033[96m" if USE_COLOUR else ""
+C_RESET = "\033[0m" if USE_COLOUR else ""
+C_BOLD = "\033[1m" if USE_COLOUR else ""
+C_DIM = "\033[2m" if USE_COLOUR else ""
+C_RED = "\033[91m" if USE_COLOUR else ""
+C_YELLOW = "\033[93m" if USE_COLOUR else ""
+C_GREEN = "\033[92m" if USE_COLOUR else ""
+C_CYAN = "\033[96m" if USE_COLOUR else ""
 C_MAGENTA = "\033[95m" if USE_COLOUR else ""
 
 # ---------------------------------------------------------------------------
 # Print helpers
 # ---------------------------------------------------------------------------
+
 
 def _h1(msg: str) -> None:
     w = 72
@@ -136,12 +137,30 @@ def _h1(msg: str) -> None:
     print(f"{C_BOLD}{C_CYAN}  {msg}{C_RESET}")
     print(f"{C_BOLD}{C_CYAN}{'=' * w}{C_RESET}")
 
-def _h2(msg: str)   -> None: print(f"\n{C_BOLD}{C_MAGENTA}-- {msg} {C_RESET}")
-def _ok(msg: str)   -> None: print(f"  {C_GREEN}+{C_RESET}  {msg}")
-def _warn(msg: str) -> None: print(f"  {C_YELLOW}!{C_RESET}  {msg}")
-def _err(msg: str)  -> None: print(f"  {C_RED}x{C_RESET}  {msg}")
-def _info(msg: str) -> None: print(f"  {C_DIM}.{C_RESET}  {msg}")
-def _sep()          -> None: print(f"{C_DIM}{'-' * 72}{C_RESET}")
+
+def _h2(msg: str) -> None:
+    print(f"\n{C_BOLD}{C_MAGENTA}-- {msg} {C_RESET}")
+
+
+def _ok(msg: str) -> None:
+    print(f"  {C_GREEN}+{C_RESET}  {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"  {C_YELLOW}!{C_RESET}  {msg}")
+
+
+def _err(msg: str) -> None:
+    print(f"  {C_RED}x{C_RESET}  {msg}")
+
+
+def _info(msg: str) -> None:
+    print(f"  {C_DIM}.{C_RESET}  {msg}")
+
+
+def _sep() -> None:
+    print(f"{C_DIM}{'-' * 72}{C_RESET}")
+
 
 class BuildLog:
     """
@@ -192,11 +211,11 @@ class BuildLog:
         for line in lines[:max_lines]:
             self._write(line)
         if len(lines) > max_lines:
-            self._write(f"... ({len(lines)-max_lines} more lines truncated)")
+            self._write(f"... ({len(lines) - max_lines} more lines truncated)")
         self._write("```")
 
     def banner(self, msg: str, ok: bool) -> None:
-        col  = C_GREEN if ok else C_RED
+        col = C_GREEN if ok else C_RED
         icon = "✔" if ok else "✖"
         print(f"\n  {C_BOLD}{col}{icon}  {msg}{C_RESET}\n")
         self._write(f"\n  {icon}  {msg}\n")
@@ -206,10 +225,10 @@ class BuildLog:
         return self._path
 
 
-
 # ---------------------------------------------------------------------------
 # .env loader  (pure stdlib -- works before venv exists)
 # ---------------------------------------------------------------------------
+
 
 def load_dotenv(path: Path = ENV_FILE) -> dict[str, str]:
     """
@@ -236,7 +255,7 @@ def load_dotenv(path: Path = ENV_FILE) -> dict[str, str]:
         if "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key   = key.strip()
+        key = key.strip()
         value = value.strip()
         if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
             value = value[1:-1]
@@ -267,6 +286,7 @@ def validate_api_key() -> tuple[bool, str]:
 # Spinner (shows activity during blocking API calls)
 # ---------------------------------------------------------------------------
 
+
 class Spinner:
     """
     Display a terminal spinner in a background thread while work runs.
@@ -275,20 +295,20 @@ class Spinner:
         with Spinner("Calling Claude"):
             result = slow_function()
     """
+
     def __init__(self, msg: str = "Working") -> None:
-        self._msg    = msg
-        self._stop   = threading.Event()
+        self._msg = msg
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._spin, daemon=True)
 
     def _spin(self) -> None:
         frames = itertools.cycle(["|", "/", "-", "\\"])
         while not self._stop.is_set():
-            print(f"\r  {C_CYAN}{next(frames)}{C_RESET}  {self._msg} ...",
-                  end="", flush=True)
+            print(f"\r  {C_CYAN}{next(frames)}{C_RESET}  {self._msg} ...", end="", flush=True)
             time.sleep(0.12)
         print(f"\r{' ' * (len(self._msg) + 14)}\r", end="", flush=True)
 
-    def __enter__(self) -> "Spinner":
+    def __enter__(self) -> Spinner:
         self._thread.start()
         return self
 
@@ -300,6 +320,7 @@ class Spinner:
 # ---------------------------------------------------------------------------
 # Anthropic API  (stdlib urllib only -- no SDK needed)
 # ---------------------------------------------------------------------------
+
 
 def call_claude(
     system: str,
@@ -314,21 +335,23 @@ def call_claude(
     Raises RuntimeError on API or network failures.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    model   = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
 
-    payload = json.dumps({
-        "model":      model,
-        "max_tokens": max_tokens,
-        "system":     system,
-        "messages":   messages,
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": messages,
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         ANTHROPIC_API_URL,
         data=payload,
         headers={
-            "Content-Type":      "application/json",
-            "x-api-key":         api_key,
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
             "anthropic-version": ANTHROPIC_API_VERSION,
         },
         method="POST",
@@ -357,6 +380,7 @@ def call_claude(
 # Venv management
 # ---------------------------------------------------------------------------
 
+
 def _run(
     cmd: list[str],
     check: bool = True,
@@ -377,8 +401,11 @@ def _validate_venv() -> tuple[bool, str]:
         return False, "Python binary not found in .venv"
     try:
         result = _run(
-            [str(VENV_PYTHON), "-c",
-             "import sys, pip; print(sys.version_info.major, sys.version_info.minor)"],
+            [
+                str(VENV_PYTHON),
+                "-c",
+                "import sys, pip; print(sys.version_info.major, sys.version_info.minor)",
+            ],
             capture=True,
         )
         major, minor = map(int, result.stdout.strip().split())
@@ -389,7 +416,7 @@ def _validate_venv() -> tuple[bool, str]:
         return False, f"Validation probe failed: {exc}"
 
 
-def _find_python_312() -> Optional[str]:
+def _find_python_312() -> str | None:
     """
     Return path to the best available Python 3.10+ binary by searching:
       1. Explicitly versioned names on PATH (python3.13, python3.12, python3.11, python3.10)
@@ -407,9 +434,10 @@ def _find_python_312() -> Optional[str]:
     def _version_ok(exe: str) -> bool:
         try:
             r = subprocess.run(
-                [exe, "-c",
-                 "import sys; print(sys.version_info.major, sys.version_info.minor)"],
-                capture_output=True, text=True, timeout=5,
+                [exe, "-c", "import sys; print(sys.version_info.major, sys.version_info.minor)"],
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if r.returncode != 0:
                 return False
@@ -532,15 +560,16 @@ def _ensure_dev_tools(quiet: bool = False) -> bool:
     for a binary -- then installs any that are missing in a single pip call.
     Called at startup so missing packages are never the user's problem.
     """
+
     def _importable(pkg: str) -> bool:
         # Map install name to import name where they differ
         _import_name = {
-            "python-ulid":       "ulid",
-            "pytest-asyncio":    "pytest_asyncio",
-            "pytest-cov":        "pytest_cov",
-            "psycopg2-binary":   "psycopg2",
-            "python-jose":       "jose",
-            "factory-boy":       "factory",
+            "python-ulid": "ulid",
+            "pytest-asyncio": "pytest_asyncio",
+            "pytest-cov": "pytest_cov",
+            "psycopg2-binary": "psycopg2",
+            "python-jose": "jose",
+            "factory-boy": "factory",
             "prometheus-client": "prometheus_client",
             "opentelemetry-sdk": "opentelemetry",
         }
@@ -601,7 +630,7 @@ def _ensure_package_inits() -> None:
             if not dirpath.is_dir():
                 continue
             has_py = any(dirpath.glob("*.py"))
-            init   = dirpath / "__init__.py"
+            init = dirpath / "__init__.py"
             if has_py and not init.exists():
                 init.write_text(
                     f'"""Auto-created by build.py — {dirpath.relative_to(PROJECT_ROOT)}"""\n'
@@ -618,20 +647,20 @@ def _ensure_package_inits() -> None:
         if not lib_dir.is_dir() or lib_dir.name.startswith("."):
             continue
         if not (lib_dir / "__init__.py").exists():
-            continue   # not yet a package — skip until Phase A promotes it
+            continue  # not yet a package — skip until Phase A promotes it
         for subname in _LIB_SUBDIRS:
-            sub      = lib_dir / subname
+            sub = lib_dir / subname
             sub_init = sub / "__init__.py"
             if sub_init.exists():
-                continue   # already present
+                continue  # already present
             sub.mkdir(exist_ok=True)
             rel = sub.relative_to(PROJECT_ROOT)
             sub_init.write_text(
                 f'"""\n'
-                f'{subname.capitalize()} package for {lib_dir.name}.\n\n'
-                f'{"Abstract ports (ABCs / Protocols) for the" if subname == "interfaces" else "In-memory fakes for unit-testing the"} '
-                f'{lib_dir.name} subsystem.\n'
-                f'Concrete implementations must never be imported here.\n'
+                f"{subname.capitalize()} package for {lib_dir.name}.\n\n"
+                f"{'Abstract ports (ABCs / Protocols) for the' if subname == 'interfaces' else 'In-memory fakes for unit-testing the'} "
+                f"{lib_dir.name} subsystem.\n"
+                f"Concrete implementations must never be imported here.\n"
                 f'"""\n'
             )
 
@@ -649,9 +678,7 @@ def ensure_venv() -> None:
         return
 
     _err(f".venv validation FAILED: {message}")
-    answer = input(
-        f"  {C_YELLOW}Delete and recreate .venv? [y/N]{C_RESET} "
-    ).strip().lower()
+    answer = input(f"  {C_YELLOW}Delete and recreate .venv? [y/N]{C_RESET} ").strip().lower()
     if answer != "y":
         _err("Cannot continue with invalid .venv. Exiting.")
         sys.exit(1)
@@ -674,56 +701,57 @@ def ensure_venv() -> None:
 # Tracking file data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ProgressEntry:
-    milestone_id:   str
-    label:          str
-    status:         str
+    milestone_id: str
+    label: str
+    status: str
     blocking_issue: str = ""
-    steps:          list[tuple[str, str]] = field(default_factory=list)
+    steps: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
 class WorkplanProgress:
-    workplan_name:    str
-    progress_file:    Path
-    last_updated:     str
+    workplan_name: str
+    progress_file: Path
+    last_updated: str
     active_milestone: str
-    active_step:      str
-    resume_detail:    str
-    entries:          list[ProgressEntry] = field(default_factory=list)
+    active_step: str
+    resume_detail: str
+    entries: list[ProgressEntry] = field(default_factory=list)
 
 
 @dataclass
 class Issue:
-    number:     str
-    title:      str
-    status:     str
-    milestone:  str
+    number: str
+    title: str
+    status: str
+    milestone: str
     discovered: str
-    resolved:   str
-    symptoms:   str
+    resolved: str
+    symptoms: str
     root_cause: str
-    fix:        str
+    fix: str
     lesson_ref: str
 
 
 @dataclass
 class Lesson:
-    number:    str
-    title:     str
+    number: str
+    title: str
     milestone: str
-    source:    str
-    lesson:    str
-    apply_to:  str
+    source: str
+    lesson: str
+    apply_to: str
 
 
 @dataclass
 class WorkplanTracking:
     workplan_name: str
-    progress:  Optional[WorkplanProgress]  = None
-    issues:    list[Issue]                 = field(default_factory=list)
-    lessons:   list[Lesson]                = field(default_factory=list)
+    progress: WorkplanProgress | None = None
+    issues: list[Issue] = field(default_factory=list)
+    lessons: list[Lesson] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -743,12 +771,12 @@ _STEP_RE = re.compile(
 _HEADER_RE = re.compile(r"^#\s+(?P<key>[A-Za-z ]+):\s*(?P<value>.+)$")
 
 
-def _parse_progress(path: Path) -> Optional[WorkplanProgress]:
+def _parse_progress(path: Path) -> WorkplanProgress | None:
     if not path.exists():
         return None
     headers: dict[str, str] = {}
     entries: list[ProgressEntry] = []
-    current: Optional[ProgressEntry] = None
+    current: ProgressEntry | None = None
 
     for line in path.read_text(encoding="utf-8").splitlines():
         hm = _HEADER_RE.match(line)
@@ -776,11 +804,9 @@ def _parse_progress(path: Path) -> Optional[WorkplanProgress]:
         if step_m and current:
             # Store (bare_step_id, status) e.g. ("S1", "NOT_STARTED")
             # so the status panel can look up by step ID directly
-            raw_sid = step_m.group("sid")        # e.g. "M0-S1"
-            bare    = raw_sid.split("-")[-1]     # e.g. "S1"
-            current.steps.append(
-                (bare, step_m.group("status").upper())
-            )
+            raw_sid = step_m.group("sid")  # e.g. "M0-S1"
+            bare = raw_sid.split("-")[-1]  # e.g. "S1"
+            current.steps.append((bare, step_m.group("status").upper()))
     if current:
         entries.append(current)
 
@@ -798,7 +824,8 @@ def _parse_progress(path: Path) -> Optional[WorkplanProgress]:
 def _block_field(block: str, name: str) -> str:
     m = re.search(
         rf"^{re.escape(name)}:\s*(.+?)(?=\n[A-Za-z ]+:|$)",
-        block, re.MULTILINE | re.DOTALL,
+        block,
+        re.MULTILINE | re.DOTALL,
     )
     return textwrap.dedent(m.group(1)).strip() if m else ""
 
@@ -811,18 +838,20 @@ def _parse_issues(path: Path) -> list[Issue]:
         m = re.search(r"(ISS-\d+)", block)
         if not m:
             continue
-        issues.append(Issue(
-            number=m.group(1),
-            title=_block_field(block, "Title"),
-            status=_block_field(block, "Status"),
-            milestone=_block_field(block, "Milestone"),
-            discovered=_block_field(block, "Discovered"),
-            resolved=_block_field(block, "Resolved"),
-            symptoms=_block_field(block, "Symptoms"),
-            root_cause=_block_field(block, "Root cause"),
-            fix=_block_field(block, "Fix"),
-            lesson_ref=_block_field(block, "Lesson"),
-        ))
+        issues.append(
+            Issue(
+                number=m.group(1),
+                title=_block_field(block, "Title"),
+                status=_block_field(block, "Status"),
+                milestone=_block_field(block, "Milestone"),
+                discovered=_block_field(block, "Discovered"),
+                resolved=_block_field(block, "Resolved"),
+                symptoms=_block_field(block, "Symptoms"),
+                root_cause=_block_field(block, "Root cause"),
+                fix=_block_field(block, "Fix"),
+                lesson_ref=_block_field(block, "Lesson"),
+            )
+        )
     return issues
 
 
@@ -834,14 +863,16 @@ def _parse_lessons(path: Path) -> list[Lesson]:
         m = re.search(r"(LL-\d+)", block)
         if not m:
             continue
-        lessons.append(Lesson(
-            number=m.group(1),
-            title=_block_field(block, "Title"),
-            milestone=_block_field(block, "Milestone"),
-            source=_block_field(block, "Source"),
-            lesson=_block_field(block, "Lesson"),
-            apply_to=_block_field(block, "Apply to"),
-        ))
+        lessons.append(
+            Lesson(
+                number=m.group(1),
+                title=_block_field(block, "Title"),
+                milestone=_block_field(block, "Milestone"),
+                source=_block_field(block, "Source"),
+                lesson=_block_field(block, "Lesson"),
+                apply_to=_block_field(block, "Apply to"),
+            )
+        )
     return lessons
 
 
@@ -858,8 +889,8 @@ def discover_tracking() -> list[WorkplanTracking]:
     for stem in sorted(stems):
         wt = WorkplanTracking(workplan_name=stem)
         wt.progress = _parse_progress(TRACKING_DIR / f"{stem}.progress")
-        wt.issues   = _parse_issues(TRACKING_DIR / f"{stem}.issues")
-        wt.lessons  = _parse_lessons(TRACKING_DIR / f"{stem}.lessons-learned")
+        wt.issues = _parse_issues(TRACKING_DIR / f"{stem}.issues")
+        wt.lessons = _parse_lessons(TRACKING_DIR / f"{stem}.lessons-learned")
         results.append(wt)
     return results
 
@@ -876,21 +907,22 @@ def discover_tracking() -> list[WorkplanTracking]:
 #   }
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ActiveSelection:
-    workplan_stem: str        # stem used for tracking files
-    workplan_path: Path       # absolute path to the workplan .md
-    spec_path:     Optional[Path]  # absolute path to the software spec .md (optional)
+    workplan_stem: str  # stem used for tracking files
+    workplan_path: Path  # absolute path to the workplan .md
+    spec_path: Path | None  # absolute path to the software spec .md (optional)
 
 
-def load_active_selection() -> Optional[ActiveSelection]:
+def load_active_selection() -> ActiveSelection | None:
     """Load the persisted workplan + spec selection from .active_workplan (JSON)."""
     if not ACTIVE_WORKPLAN_FILE.exists():
         return None
     try:
         data = json.loads(ACTIVE_WORKPLAN_FILE.read_text(encoding="utf-8"))
         wp_path = PROJECT_ROOT / data["workplan_path"]
-        sp_raw  = data.get("spec_path", "")
+        sp_raw = data.get("spec_path", "")
         sp_path = PROJECT_ROOT / sp_raw if sp_raw else None
         return ActiveSelection(
             workplan_stem=data["workplan_stem"],
@@ -907,16 +939,14 @@ def save_active_selection(sel: ActiveSelection) -> None:
     data = {
         "workplan_stem": sel.workplan_stem,
         "workplan_path": str(sel.workplan_path.relative_to(PROJECT_ROOT)),
-        "spec_path":     str(sel.spec_path.relative_to(PROJECT_ROOT)) if sel.spec_path else "",
+        "spec_path": str(sel.spec_path.relative_to(PROJECT_ROOT)) if sel.spec_path else "",
     }
-    ACTIVE_WORKPLAN_FILE.write_text(
-        json.dumps(data, indent=2) + "\n", encoding="utf-8"
-    )
+    ACTIVE_WORKPLAN_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def resolve_active_workplan(
     all_wt: list[WorkplanTracking],
-) -> Optional[WorkplanTracking]:
+) -> WorkplanTracking | None:
     """
     Return the active WorkplanTracking for menu display / brief scoping.
     Priority:
@@ -941,6 +971,7 @@ def resolve_active_workplan(
 # .md file browser (for User Spec directory)
 # ---------------------------------------------------------------------------
 
+
 def _collect_md_files(directory: Path) -> list[Path]:
     """
     Recursively collect all .md files under directory, sorted with files in
@@ -957,7 +988,7 @@ def browse_md_files(
     directory: Path,
     prompt: str = "Select a file",
     allow_skip: bool = False,
-) -> Optional[Path]:
+) -> Path | None:
     """
     Display a numbered list of .md files found under `directory` and return
     the user's choice.  Files are grouped: root-level first, then by subfolder.
@@ -974,7 +1005,7 @@ def browse_md_files(
         return None
 
     # Group by parent for display
-    last_parent: Optional[Path] = None
+    last_parent: Path | None = None
     for idx, fp in enumerate(files, 1):
         parent = fp.parent
         if parent != last_parent:
@@ -984,12 +1015,14 @@ def browse_md_files(
         size_kb = fp.stat().st_size / 1024
         print(f"    {C_BOLD}[{idx:>2}]{C_RESET}  {fp.name}  {C_DIM}({size_kb:.1f} KB){C_RESET}")
 
-    skip_hint = f" / s=skip" if allow_skip else ""
+    skip_hint = " / s=skip" if allow_skip else ""
     print()
     try:
-        raw = input(
-            f"  {C_YELLOW}{prompt} (1-{len(files)}{skip_hint} / Enter=cancel):{C_RESET} "
-        ).strip().lower()
+        raw = (
+            input(f"  {C_YELLOW}{prompt} (1-{len(files)}{skip_hint} / Enter=cancel):{C_RESET} ")
+            .strip()
+            .lower()
+        )
     except (KeyboardInterrupt, EOFError):
         print()
         return None
@@ -1012,7 +1045,7 @@ def browse_md_files(
         return None
 
 
-def action_select_workplan(all_wt: list[WorkplanTracking]) -> Optional[WorkplanTracking]:
+def action_select_workplan(all_wt: list[WorkplanTracking]) -> WorkplanTracking | None:
     """
     Two-step interactive picker:
       Step 1 -- Browse User Spec dir and pick a workplan .md file.
@@ -1074,7 +1107,7 @@ def action_select_workplan(all_wt: list[WorkplanTracking]) -> Optional[WorkplanT
     return None
 
 
-def find_resume(all_wt: list[WorkplanTracking]) -> Optional[tuple[str, str, str]]:
+def find_resume(all_wt: list[WorkplanTracking]) -> tuple[str, str, str] | None:
     """
     Return (workplan_name, active_milestone, resume_detail) for the active
     workplan, or the first in-progress workplan if no explicit selection exists.
@@ -1094,7 +1127,7 @@ def find_resume(all_wt: list[WorkplanTracking]) -> Optional[tuple[str, str, str]
     return None
 
 
-def find_workplan_file(workplan_name: str) -> Optional[Path]:
+def find_workplan_file(workplan_name: str) -> Path | None:
     """
     Return the workplan .md Path.  Priority:
       1. The path saved in .active_workplan (most reliable).
@@ -1117,7 +1150,7 @@ def find_workplan_file(workplan_name: str) -> Optional[Path]:
     return None
 
 
-def find_spec_file() -> Optional[Path]:
+def find_spec_file() -> Path | None:
     """Return the saved software spec Path, or None."""
     sel = load_active_selection()
     if sel and sel.spec_path and sel.spec_path.exists():
@@ -1178,6 +1211,7 @@ def _workplan_hash(workplan_stem: str) -> str:
     Returns "" if no workplan file can be found.
     """
     import hashlib as _hashlib
+
     wp = find_workplan_file(workplan_stem)
     if wp is None or not wp.exists():
         return ""
@@ -1240,7 +1274,7 @@ def load_spec_content_raw(max_chars: int = 60_000) -> str:
 
     keep_head = int(max_chars * 0.55)
     keep_tail = int(max_chars * 0.35)
-    omitted   = len(raw) - keep_head - keep_tail
+    omitted = len(raw) - keep_head - keep_tail
     return (
         raw[:keep_head]
         + f"\n\n[... {omitted:,} chars omitted -- middle sections ...] \n\n"
@@ -1292,19 +1326,26 @@ def build_state_dump(all_wt: list[WorkplanTracking]) -> str:
 # Status colour helper
 # ---------------------------------------------------------------------------
 
+
 def _col(s: str) -> str:
     up = s.upper()
-    if up == "DONE":         return f"{C_GREEN}{s}{C_RESET}"
-    if up == "IN_PROGRESS":  return f"{C_CYAN}{s}{C_RESET}"
-    if up == "BLOCKED":      return f"{C_RED}{s}{C_RESET}"
-    if up in ("WORKING", "IDENTIFIED"): return f"{C_YELLOW}{s}{C_RESET}"
-    if up == "RESOLVED":     return f"{C_GREEN}{s}{C_RESET}"
+    if up == "DONE":
+        return f"{C_GREEN}{s}{C_RESET}"
+    if up == "IN_PROGRESS":
+        return f"{C_CYAN}{s}{C_RESET}"
+    if up == "BLOCKED":
+        return f"{C_RED}{s}{C_RESET}"
+    if up in ("WORKING", "IDENTIFIED"):
+        return f"{C_YELLOW}{s}{C_RESET}"
+    if up == "RESOLVED":
+        return f"{C_GREEN}{s}{C_RESET}"
     return f"{C_DIM}{s}{C_RESET}"
 
 
 # ---------------------------------------------------------------------------
 # Plain-text brief (fallback when API unavailable)
 # ---------------------------------------------------------------------------
+
 
 def print_plain_brief(all_wt: list[WorkplanTracking]) -> None:
     _h1("FXLab -- Session State (plain)")
@@ -1409,7 +1450,7 @@ CANONICAL PROJECT CONVENTIONS (repeat in every section's Key Constraints):
 
 
 def _distil_refresh_section(
-    sel: "ActiveSelection",
+    sel: ActiveSelection,
     dp: Path,
     milestone_id: str,
     all_wt: list[WorkplanTracking],
@@ -1440,14 +1481,13 @@ def _distil_refresh_section(
     for wt in all_wt:
         if wt.workplan_name == sel.workplan_stem and wt.lessons:
             relevant = [
-                ll for ll in wt.lessons
-                if milestone_id.lower() in ll.apply_to.lower()
-                or "all" in ll.apply_to.lower()
+                ll
+                for ll in wt.lessons
+                if milestone_id.lower() in ll.apply_to.lower() or "all" in ll.apply_to.lower()
             ]
             if relevant:
                 lessons_text = "\n".join(
-                    f"- {ll.number}: {ll.title}\n  {ll.lesson}"
-                    for ll in relevant
+                    f"- {ll.number}: {ll.title}\n  {ll.lesson}" for ll in relevant
                 )
 
     spec_excerpt = ""
@@ -1519,7 +1559,7 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
 
     raw = dp.read_text(encoding="utf-8")
     _info(f"File: {dp}")
-    _info(f"Size: {len(raw):,} chars  ({len(raw)//4} tokens approx)")
+    _info(f"Size: {len(raw):,} chars  ({len(raw) // 4} tokens approx)")
     print()
 
     # Show first 400 chars so user can see the actual heading format
@@ -1535,9 +1575,11 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
         _ok(f"Regex matched {len(sections)} section(s):")
         for m in sections:
             tokens = len(m.group("body")) // 4
-            print(f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
-                  f"{(m.group('label') or '').strip():<45s}  "
-                  f"{C_DIM}~{tokens} tokens{C_RESET}")
+            print(
+                f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
+                f"{(m.group('label') or '').strip():<45s}  "
+                f"{C_DIM}~{tokens} tokens{C_RESET}"
+            )
     else:
         _err("Regex matched 0 sections.")
         print()
@@ -1548,7 +1590,7 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
             for h in headings[:20]:
                 print(f"  {C_DIM}{h}{C_RESET}")
             if len(headings) > 20:
-                _info(f"... and {len(headings)-20} more")
+                _info(f"... and {len(headings) - 20} more")
         print()
         _warn("The distilled file uses headings that don't match the regex.")
         _warn("Option 1: Delete the file and re-run [d] (the prompt is now stricter).")
@@ -1558,7 +1600,7 @@ def action_distil_debug(all_wt: list[WorkplanTracking]) -> None:
 
 def action_distil(
     all_wt: list[WorkplanTracking],
-    refresh_milestone: Optional[str] = None,
+    refresh_milestone: str | None = None,
 ) -> None:
     """
     Distil spec + workplan into per-milestone context blocks.
@@ -1581,17 +1623,19 @@ def action_distil(
 
     # ── Refresh mode: regenerate one section only ────────────────────────────
     if refresh_milestone is None and dp.exists():
-        answer = input(
-            f"  {C_YELLOW}Distilled file exists.  "
-            f"[f]ull regen / [r]efresh one milestone / [c]ancel:{C_RESET} "
-        ).strip().lower()
+        answer = (
+            input(
+                f"  {C_YELLOW}Distilled file exists.  "
+                f"[f]ull regen / [r]efresh one milestone / [c]ancel:{C_RESET} "
+            )
+            .strip()
+            .lower()
+        )
         if answer == "c":
             _info("Cancelled.")
             return
         if answer == "r":
-            mid = input(
-                f"  {C_YELLOW}Milestone to refresh (e.g. M3):{C_RESET} "
-            ).strip().upper()
+            mid = input(f"  {C_YELLOW}Milestone to refresh (e.g. M3):{C_RESET} ").strip().upper()
             refresh_milestone = mid if mid else None
 
     if refresh_milestone:
@@ -1601,10 +1645,14 @@ def action_distil(
     # Full regeneration -- warn if file exists
     if dp.exists():
         size_kb = dp.stat().st_size / 1024
-        answer = input(
-            f"  {C_YELLOW}Distilled file already exists ({size_kb:.1f} KB).  "
-            f"Regenerate all? [y/N]{C_RESET} "
-        ).strip().lower()
+        answer = (
+            input(
+                f"  {C_YELLOW}Distilled file already exists ({size_kb:.1f} KB).  "
+                f"Regenerate all? [y/N]{C_RESET} "
+            )
+            .strip()
+            .lower()
+        )
         if answer != "y":
             _info("Keeping existing distilled file.")
             return
@@ -1617,29 +1665,28 @@ def action_distil(
         return
 
     workplan_text = workplan_path.read_text(encoding="utf-8")
-    spec_text     = load_spec_content_raw()
+    spec_text = load_spec_content_raw()
 
     if not spec_text:
-        answer = input(
-            f"  {C_YELLOW}No spec file selected.  "
-            f"Distil from workplan only? [y/N]{C_RESET} "
-        ).strip().lower()
+        answer = (
+            input(f"  {C_YELLOW}No spec file selected.  Distil from workplan only? [y/N]{C_RESET} ")
+            .strip()
+            .lower()
+        )
         if answer != "y":
             _info("Aborted. Use [w] to select a spec file first.")
             return
 
     # Estimate and show token counts (rough: 1 token ≈ 4 chars)
-    wp_tokens   = len(workplan_text) // 4
+    wp_tokens = len(workplan_text) // 4
     spec_tokens = len(spec_text) // 4
-    total_in    = wp_tokens + spec_tokens
+    total_in = wp_tokens + spec_tokens
     _info(f"Workplan:  ~{wp_tokens:,} tokens")
     _info(f"Spec:      ~{spec_tokens:,} tokens")
     _info(f"Total in:  ~{total_in:,} tokens  (one-time cost)")
-    _info(f"Output:    per-milestone context blocks (~400-600 tokens each, reused every build)")
+    _info("Output:    per-milestone context blocks (~400-600 tokens each, reused every build)")
 
-    answer = input(
-        f"  {C_YELLOW}Proceed with distillation? [y/N]{C_RESET} "
-    ).strip().lower()
+    answer = input(f"  {C_YELLOW}Proceed with distillation? [y/N]{C_RESET} ").strip().lower()
     if answer != "y":
         _info("Aborted.")
         return
@@ -1647,8 +1694,8 @@ def action_distil(
     # One call per milestone -- we write the heading, Claude writes the content.
     # This eliminates all heading-format parsing failures.
     all_sections: list[str] = []
-    call_errors  = 0
-    total        = len(MILESTONE_LIST)
+    call_errors = 0
+    total = len(MILESTONE_LIST)
 
     for idx, (mid, label) in enumerate(MILESTONE_LIST, 1):
         # Extract just this milestone's section from the workplan (saves tokens)
@@ -1686,7 +1733,7 @@ def action_distil(
         # We own the heading -- Claude only produces the four ### subsections
         section = f"## MILESTONE: {mid} -- {label}\n\n{content.strip()}"
         all_sections.append(section)
-        _ok(f"{mid} done (~{len(content)//4} tokens)")
+        _ok(f"{mid} done (~{len(content) // 4} tokens)")
 
     if call_errors == total:
         _err("All milestone calls failed. No distilled file written.")
@@ -1721,6 +1768,7 @@ def action_distil(
     # Embed a hash of the workplan source so load_milestone_context() can detect
     # if the workplan has been edited since this file was generated.
     import hashlib as _hashlib
+
     wp_hash = (
         _hashlib.sha256(sel.spec_path.read_bytes()).hexdigest()[:12]
         if sel.spec_path and sel.spec_path.exists()
@@ -1750,8 +1798,10 @@ def action_distil(
     print()
     for m in sections:
         ctx_tokens = len(m.group("body")) // 4
-        print(f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
-              f"{m.group('label'):<45s}  {C_DIM}~{ctx_tokens} tokens{C_RESET}")
+        print(
+            f"  {C_BOLD}{m.group('mid'):>3s}{C_RESET}  "
+            f"{m.group('label'):<45s}  {C_DIM}~{ctx_tokens} tokens{C_RESET}"
+        )
 
     print()
     _info(f"Path: {dp}")
@@ -1770,13 +1820,15 @@ def action_ai_brief(all_wt: list[WorkplanTracking]) -> None:
         return
 
     # Prefer distilled per-milestone context over raw spec.
-    active_wt   = resolve_active_workplan(all_wt)
+    active_wt = resolve_active_workplan(all_wt)
     active_stem = active_wt.workplan_name if active_wt else ""
-    active_mid  = active_wt.progress.active_milestone if (active_wt and active_wt.progress) else ""
+    active_mid = active_wt.progress.active_milestone if (active_wt and active_wt.progress) else ""
 
-    distilled_ctx = load_milestone_context(active_stem, active_mid) if active_stem and active_mid else ""
+    distilled_ctx = (
+        load_milestone_context(active_stem, active_mid) if active_stem and active_mid else ""
+    )
     if distilled_ctx:
-        _info(f"Using distilled context for {active_mid} (~{len(distilled_ctx)//4} tokens)")
+        _info(f"Using distilled context for {active_mid} (~{len(distilled_ctx) // 4} tokens)")
         spec_section = f"\n\n## Milestone Context (distilled)\n\n{distilled_ctx}"
     else:
         dp = distilled_file_path(active_stem) if active_stem else None
@@ -1818,8 +1870,7 @@ def action_ai_brief(all_wt: list[WorkplanTracking]) -> None:
 # ---------------------------------------------------------------------------
 
 _STEP_PROMPTS: dict[str, str] = {
-
-"S1": """You are a senior software architect performing a spec review.
+    "S1": """You are a senior software architect performing a spec review.
 You will receive a workplan milestone spec, distilled context, and project state.
 
 OUTPUT ONLY a structured understanding document -- no code, no file blocks.
@@ -1842,8 +1893,7 @@ YES or BLOCKED (with reason)
 Keep it under 300 words. Be direct. This output will be saved as the session
 understanding record before any implementation begins.
 """,
-
-"S2": """You are a senior software architect defining interface contracts.
+    "S2": """You are a senior software architect defining interface contracts.
 You will receive a workplan milestone spec and distilled context.
 
 OUTPUT ONLY abstract interfaces, Pydantic v2 schemas, and enums.
@@ -1868,8 +1918,7 @@ After files, add:
 ## Interface Summary
 - List every class name and its layer (Contract / ServiceInterface / RepositoryInterface)
 """,
-
-"S3": """You are a senior software engineer writing a failing test suite (RED phase).
+    "S3": """You are a senior software engineer writing a failing test suite (RED phase).
 You will receive interface contracts defined in S2 and milestone acceptance criteria.
 
 OUTPUT ONLY test files -- no implementation code whatsoever.
@@ -1886,8 +1935,7 @@ Rules:
 - Include a conftest.py with shared fixtures if needed.
 
 Output files using <<<FILE>>> blocks. Nothing else — no commentary, no coverage plans, no explanations after the files.""",
-
-"S4": """You are a senior software engineer writing minimal implementations (GREEN phase).
+    "S4": """You are a senior software engineer writing minimal implementations (GREEN phase).
 You will receive failing tests from S3 and interface contracts from S2.
 
 YOUR ONLY GOAL: make the failing tests pass with the minimum code required.
@@ -1911,8 +1959,7 @@ After the files, add one short section:
 <exact pytest command to verify the tests you just wrote pass>
 ```
 Nothing else.""",
-
-"S5": """You are a senior software engineer performing a quality gate review.
+    "S5": """You are a senior software engineer performing a quality gate review.
 Analyse the code written so far against the quality rules below and
 output a structured report -- no new implementation files.
 
@@ -1942,8 +1989,7 @@ PASS or FAIL (with count of blockers)
 
 If FAIL, output corrected files using <<<FILE>>> blocks after the report.
 """,
-
-"S6": """You are a senior software engineer performing a refactor (GREEN is passing).
+    "S6": """You are a senior software engineer performing a refactor (GREEN is passing).
 Tests are passing. Your job is to improve code quality WITHOUT changing behaviour.
 
 Allowed changes:
@@ -1961,8 +2007,7 @@ Forbidden changes:
 Output only the files that actually changed using <<<FILE>>> blocks.
 If no refactoring is needed, say so explicitly and output no files.
 """,
-
-"S7": """You are a senior software engineer writing integration tests.
+    "S7": """You are a senior software engineer writing integration tests.
 Unit tests pass. Now write tests that exercise real I/O against
 the Docker Compose stack (PostgreSQL, Redis, MinIO).
 
@@ -1981,8 +2026,7 @@ After files, add:
 - <docker compose up command>
 - <pytest integration test command>
 """,
-
-"S8": """You are a senior software engineer performing a final checklist review.
+    "S8": """You are a senior software engineer performing a final checklist review.
 All tests pass, quality gate is clean. Produce a review checklist sign-off.
 
 Output format:
@@ -2036,7 +2080,6 @@ def _system_for_step(step_id: str) -> str:
 _AGENT_SYSTEM = _STEP_PROMPTS["S4"]  # legacy alias for direct calls
 
 
-
 def _extract_files(response: str) -> list[tuple[str, str]]:
     """Parse <<<FILE: path>>> ... <<<END_FILE>>> blocks from a Claude response.
 
@@ -2078,24 +2121,22 @@ def _confirm_write(rel_path: str, content: str) -> bool:
 # Hardcoded dependency chain matching the workplan milestone graph.
 # Key = milestone that has prerequisites; value = list of required-DONE milestones.
 _MILESTONE_DEPS: dict[str, list[str]] = {
-    "M1":  ["M0"],
-    "M2":  ["M1"],
-    "M3":  ["M2"],
-    "M4":  ["M3"],
-    "M5":  ["M4"],
-    "M6":  ["M5"],
-    "M7":  ["M6"],
-    "M8":  ["M7"],
-    "M9":  ["M2", "M7"],
+    "M1": ["M0"],
+    "M2": ["M1"],
+    "M3": ["M2"],
+    "M4": ["M3"],
+    "M5": ["M4"],
+    "M6": ["M5"],
+    "M7": ["M6"],
+    "M8": ["M7"],
+    "M9": ["M2", "M7"],
     "M10": ["M4", "M7"],
     "M11": ["M4", "M8", "M10"],
-    "M12": ["M0","M1","M2","M3","M4","M5","M6","M7","M8","M9","M10","M11"],
+    "M12": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11"],
 }
 
 
-def check_prerequisites(
-    active_wt: WorkplanTracking, milestone_id: str
-) -> tuple[bool, list[str]]:
+def check_prerequisites(active_wt: WorkplanTracking, milestone_id: str) -> tuple[bool, list[str]]:
     """
     Check that all prerequisite milestones are DONE in the progress file.
     Returns (ok, list_of_blocking_milestone_ids).
@@ -2107,11 +2148,7 @@ def check_prerequisites(
     if not required:
         return True, []
 
-    done_ids = {
-        e.milestone_id.upper()
-        for e in active_wt.progress.entries
-        if e.status == "DONE"
-    }
+    done_ids = {e.milestone_id.upper() for e in active_wt.progress.entries if e.status == "DONE"}
     blocking = [r for r in required if r.upper() not in done_ids]
     return len(blocking) == 0, blocking
 
@@ -2158,18 +2195,17 @@ def store_contract_fingerprints(progress_path: Path, milestone_id: str) -> dict[
     # Append to progress file
     text = progress_path.read_text(encoding="utf-8")
     # Remove any existing fingerprint block
-    text = re.sub(
-        re.escape(_FINGERPRINT_MARKER) + r".*?(?=\n#|\Z)",
-        "",
-        text,
-        flags=re.DOTALL,
-    ).rstrip() + "\n"
-    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    block = (
-        "\n"
-        + _FINGERPRINT_MARKER
-        + f" milestone={milestone_id} ts={now_ts}\n"
+    text = (
+        re.sub(
+            re.escape(_FINGERPRINT_MARKER) + r".*?(?=\n#|\Z)",
+            "",
+            text,
+            flags=re.DOTALL,
+        ).rstrip()
+        + "\n"
     )
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    block = "\n" + _FINGERPRINT_MARKER + f" milestone={milestone_id} ts={now_ts}\n"
     for rel, h in fps.items():
         block += f"#   {h}  {rel}\n"
     progress_path.write_text(text + block, encoding="utf-8")
@@ -2211,6 +2247,7 @@ def check_contract_fingerprints(progress_path: Path) -> tuple[bool, list[str]]:
 # Contract completeness AST check  (improvement #7)
 # ---------------------------------------------------------------------------
 
+
 def _method_names_from_contracts_section(distilled_text: str) -> list[str]:
     """
     Extract method/function names mentioned in an '### Interface Contracts'
@@ -2219,7 +2256,8 @@ def _method_names_from_contracts_section(distilled_text: str) -> list[str]:
     """
     section_m = re.search(
         r"###\s+Interface Contracts\s*\n(.*?)(?=\n###|\Z)",
-        distilled_text, re.DOTALL | re.IGNORECASE,
+        distilled_text,
+        re.DOTALL | re.IGNORECASE,
     )
     if not section_m:
         return []
@@ -2228,9 +2266,28 @@ def _method_names_from_contracts_section(distilled_text: str) -> list[str]:
     names = re.findall(r"([a-z_][a-z0-9_]{2,})\s*\(", section, re.IGNORECASE)
     # Exclude Python builtins and common noise words
     skip = {
-        "def", "class", "if", "for", "while", "return", "raise", "print",
-        "isinstance", "hasattr", "getattr", "setattr", "len", "str", "int",
-        "dict", "list", "tuple", "set", "type", "super", "object",
+        "def",
+        "class",
+        "if",
+        "for",
+        "while",
+        "return",
+        "raise",
+        "print",
+        "isinstance",
+        "hasattr",
+        "getattr",
+        "setattr",
+        "len",
+        "str",
+        "int",
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "type",
+        "super",
+        "object",
     }
     return [n for n in names if n.lower() not in skip]
 
@@ -2274,6 +2331,7 @@ def run_contract_completeness_check(
 # Test runner with failure capture (for iteration loop)
 # ---------------------------------------------------------------------------
 
+
 def _extract_missing_modules(output: str) -> list[str]:
     """
     Parse pytest output for ModuleNotFoundError / ImportError and return
@@ -2286,28 +2344,28 @@ def _extract_missing_modules(output: str) -> list[str]:
     )
     # Map common import names to installable package names
     _install_map = {
-        "ulid":              "python-ulid",
-        "pydantic":          "pydantic",
-        "fastapi":           "fastapi",
-        "sqlalchemy":        "sqlalchemy",
-        "structlog":         "structlog",
-        "celery":            "celery",
-        "redis":             "redis",
-        "boto3":             "boto3",
-        "polars":            "polars",
-        "pyarrow":           "pyarrow",
-        "jose":              "python-jose",
-        "passlib":           "passlib",
-        "tenacity":          "tenacity",
-        "httpx":             "httpx",
-        "alembic":           "alembic",
-        "psycopg2":          "psycopg2-binary",
-        "opentelemetry":     "opentelemetry-sdk",
+        "ulid": "python-ulid",
+        "pydantic": "pydantic",
+        "fastapi": "fastapi",
+        "sqlalchemy": "sqlalchemy",
+        "structlog": "structlog",
+        "celery": "celery",
+        "redis": "redis",
+        "boto3": "boto3",
+        "polars": "polars",
+        "pyarrow": "pyarrow",
+        "jose": "python-jose",
+        "passlib": "passlib",
+        "tenacity": "tenacity",
+        "httpx": "httpx",
+        "alembic": "alembic",
+        "psycopg2": "psycopg2-binary",
+        "opentelemetry": "opentelemetry-sdk",
         "prometheus_client": "prometheus-client",
-        "APScheduler":       "apscheduler",
-        "apscheduler":       "apscheduler",
-        "ulid_py":           "python-ulid",
-        "python_ulid":       "python-ulid",
+        "APScheduler": "apscheduler",
+        "apscheduler": "apscheduler",
+        "ulid_py": "python-ulid",
+        "python_ulid": "python-ulid",
     }
     packages = []
     for mod in hits:
@@ -2327,9 +2385,10 @@ def run_tests_capture(test_dir: str = "tests/", auto_fix_imports: bool = True) -
     a package that hasn't been installed yet.
     """
     result = subprocess.run(
-        [str(VENV_PYTHON), "-m", "pytest", test_dir,
-         "--tb=short", "-q", "--no-header"],
-        capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        [str(VENV_PYTHON), "-m", "pytest", test_dir, "--tb=short", "-q", "--no-header"],
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
     )
     output = (result.stdout + result.stderr).strip()
 
@@ -2343,9 +2402,10 @@ def run_tests_capture(test_dir: str = "tests/", auto_fix_imports: bool = True) -
             if install_result.returncode == 0:
                 _append_to_requirements_dev(missing)
                 result = subprocess.run(
-                    [str(VENV_PYTHON), "-m", "pytest", test_dir,
-                     "--tb=short", "-q", "--no-header"],
-                    capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+                    [str(VENV_PYTHON), "-m", "pytest", test_dir, "--tb=short", "-q", "--no-header"],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(PROJECT_ROOT),
                 )
                 output = (result.stdout + result.stderr).strip()
 
@@ -2362,8 +2422,9 @@ def _append_to_requirements_dev(packages: list[str]) -> None:
             existing.add(line.strip().split("==")[0].split(">=")[0].lower())
 
     new_lines = [
-        p for p in packages
-        if p.lower() not in existing and p.lower().replace("-","_") not in existing
+        p
+        for p in packages
+        if p.lower() not in existing and p.lower().replace("-", "_") not in existing
     ]
     if new_lines:
         with open(req_file, "a", encoding="utf-8") as fh:
@@ -2376,13 +2437,14 @@ def _append_to_requirements_dev(packages: list[str]) -> None:
 # Progress file auto-advance  (improvement #4)
 # ---------------------------------------------------------------------------
 
+
 def _step_sequence() -> list[str]:
     return [sid for sid, _ in STEP_LABELS]
 
 
 def advance_progress_step(
     progress_path: Path, milestone_id: str, completed_step_id: str
-) -> Optional[str]:
+) -> str | None:
     """
     Mark completed_step_id as DONE for milestone_id and advance Active step.
     Returns the next step ID, or None if the milestone is now fully complete.
@@ -2392,7 +2454,7 @@ def advance_progress_step(
         return None
 
     text = progress_path.read_text(encoding="utf-8")
-    seq  = _step_sequence()
+    seq = _step_sequence()
 
     # Capture group wraps the entire "  [MX-SY] label  " prefix so re.sub
     # preserves it. Without this the bracket expression is consumed and dropped,
@@ -2406,7 +2468,7 @@ def advance_progress_step(
 
     try:
         current_idx = seq.index(completed_step_id.upper())
-        next_step   = seq[current_idx + 1] if current_idx + 1 < len(seq) else None
+        next_step = seq[current_idx + 1] if current_idx + 1 < len(seq) else None
     except ValueError:
         next_step = None
 
@@ -2415,7 +2477,7 @@ def advance_progress_step(
 
     if next_step:
         next_label = next((lbl for sid, lbl in STEP_LABELS if sid == next_step), next_step)
-        new_active = f"STEP {seq.index(next_step)+1} -- {next_label} ({milestone_id})"
+        new_active = f"STEP {seq.index(next_step) + 1} -- {next_label} ({milestone_id})"
         text = re.sub(
             r"^# Active step:.*$", f"# Active step: {new_active}", text, flags=re.MULTILINE
         )
@@ -2433,7 +2495,8 @@ def advance_progress_step(
         text = re.sub(
             r"^# Active step:.*$",
             f"# Active step: {milestone_id} COMPLETE -- advance Active milestone",
-            text, flags=re.MULTILINE,
+            text,
+            flags=re.MULTILINE,
         )
 
     progress_path.write_text(text, encoding="utf-8")
@@ -2444,6 +2507,7 @@ def advance_progress_step(
 # Auto-commit helper  (improvement #6)
 # ---------------------------------------------------------------------------
 
+
 def _git_available() -> bool:
     return shutil.which("git") is not None
 
@@ -2452,7 +2516,9 @@ def _git_status_clean() -> bool:
     """True if there are staged or unstaged changes (i.e. something to commit)."""
     r = subprocess.run(
         ["git", "status", "--porcelain"],
-        capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
     )
     return bool(r.stdout.strip())
 
@@ -2470,14 +2536,11 @@ def action_auto_commit(milestone_id: str, step_id: str, step_label: str) -> None
         return
 
     msg = (
-        f"feat({milestone_id.lower()}-{step_id.lower()}): "
-        f"{step_label.lower().replace(' -- ', ' ')}"
+        f"feat({milestone_id.lower()}-{step_id.lower()}): {step_label.lower().replace(' -- ', ' ')}"
     )
     print(f"\n  {C_BOLD}Proposed commit message:{C_RESET}")
     print(f"  {C_CYAN}{msg}{C_RESET}")
-    answer = input(
-        f"  {C_YELLOW}Commit all changes? [y/N/e=edit]{C_RESET} "
-    ).strip().lower()
+    answer = input(f"  {C_YELLOW}Commit all changes? [y/N/e=edit]{C_RESET} ").strip().lower()
     if answer == "e":
         try:
             msg = input(f"  {C_YELLOW}Enter commit message:{C_RESET} ").strip()
@@ -2491,7 +2554,9 @@ def action_auto_commit(milestone_id: str, step_id: str, step_label: str) -> None
     subprocess.run(["git", "add", "-A"], cwd=str(PROJECT_ROOT), check=False)
     r = subprocess.run(
         ["git", "commit", "-m", msg],
-        cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
     )
     if r.returncode == 0:
         _ok(f"Committed: {msg}")
@@ -2549,14 +2614,18 @@ def action_handoff(all_wt: list[WorkplanTracking], api_ok: bool) -> None:
     if _git_available():
         r = subprocess.run(
             ["git", "diff", "--stat", "HEAD"],
-            capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            cwd=str(PROJECT_ROOT),
         )
         git_diff = r.stdout.strip()
         if not git_diff:
             # Try against last commit if nothing staged
             r2 = subprocess.run(
                 ["git", "diff", "--stat"],
-                capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
             )
             git_diff = r2.stdout.strip() or "(no changes detected -- already committed)"
     else:
@@ -2643,10 +2712,7 @@ def _collect_milestone_test_files(milestone_id: str) -> list[str]:
         patterns.append(f"m{numeric}.")
         patterns.append(f"_{numeric}_")
 
-    matched = [
-        t for t in all_tests
-        if any(pat in Path(t).name.lower() for pat in patterns)
-    ]
+    matched = [t for t in all_tests if any(pat in Path(t).name.lower() for pat in patterns)]
     return matched if matched else all_tests
 
 
@@ -2701,13 +2767,12 @@ def _rollback_writes_since(wname: str, since_ts: str) -> int:
         # all writes since ts have been undone
     """
     import json as _json
+
     journal = TRACKING_DIR / f"{wname}.write-journal.jsonl"
     if not journal.exists():
         return 0
     all_records = [
-        _json.loads(ln)
-        for ln in journal.read_text(encoding="utf-8").splitlines()
-        if ln.strip()
+        _json.loads(ln) for ln in journal.read_text(encoding="utf-8").splitlines() if ln.strip()
     ]
     to_restore = [r for r in all_records if r.get("ts", "") >= since_ts]
     restored = 0
@@ -2722,10 +2787,10 @@ def _rollback_writes_since(wname: str, since_ts: str) -> int:
 
 
 def _run_blast_radius_check(
-    at_risk: "list[str]",
+    at_risk: list[str],
     wname: str,
     since_ts: str,
-) -> "tuple[bool, list[str], int]":
+) -> tuple[bool, list[str], int]:
     """
     Run ``at_risk`` tests immediately after a file write to detect blast-radius
     regressions before they compound.
@@ -2771,8 +2836,7 @@ def _run_blast_radius_check(
 
     # Single pytest invocation across all at-risk files — faster than N calls
     result = subprocess.run(
-        [str(VENV_PYTHON), "-m", "pytest"] + at_risk
-        + ["--tb=line", "-q", "--no-header"],
+        [str(VENV_PYTHON), "-m", "pytest"] + at_risk + ["--tb=line", "-q", "--no-header"],
         capture_output=True,
         text=True,
         cwd=str(PROJECT_ROOT),
@@ -2780,7 +2844,7 @@ def _run_blast_radius_check(
     output = (result.stdout + result.stderr).strip()
 
     if result.returncode == 0:
-        return True, [], 0     # constraint honoured — no blast-radius regressions
+        return True, [], 0  # constraint honoured — no blast-radius regressions
 
     # Constraint violated — identify which at-risk tests now fail
     newly_failing = _collect_failing_test_files(output)
@@ -2802,8 +2866,7 @@ def _merge_conftest(existing: str, new: str) -> str:
     """Append fixture functions from `new` that don't exist in `existing`."""
     existing_fns = set(re.findall(r"^def (\w+)", existing, re.MULTILINE))
     new_imports = [
-        l for l in new.splitlines()
-        if l.startswith(("import ", "from ")) and l not in existing
+        l for l in new.splitlines() if l.startswith(("import ", "from ")) and l not in existing
     ]
     blocks: list[str] = []
     current: list[str] = []
@@ -2878,7 +2941,7 @@ def _accumulator_merge(existing: str, proposed: str, source_hint: str = "") -> s
     # for BOTH the existing file and the proposed file.  We need line spans so we
     # can splice in updated symbol bodies from the proposed source.
 
-    def _symbol_spans(tree: "_ast.Module") -> "dict[str, tuple[int,int]]":
+    def _symbol_spans(tree: _ast.Module) -> dict[str, tuple[int, int]]:
         """Return {name: (start_0idx, end_exclusive)} for all top-level symbols."""
         spans: dict[str, tuple[int, int]] = {}
         for node in tree.body:
@@ -2899,8 +2962,8 @@ def _accumulator_merge(existing: str, proposed: str, source_hint: str = "") -> s
     existing_spans = _symbol_spans(existing_tree)
     proposed_spans = _symbol_spans(proposed_tree)
 
-    existing_lines  = existing.splitlines()
-    proposed_lines  = proposed.splitlines()
+    existing_lines = existing.splitlines()
+    proposed_lines = proposed.splitlines()
 
     # ── Merge strategy ────────────────────────────────────────────────────────
     # Policy: ADD new symbols + UPDATE existing symbols.  NEVER delete a symbol
@@ -2922,12 +2985,12 @@ def _accumulator_merge(existing: str, proposed: str, source_hint: str = "") -> s
 
     # Reconstruct existing body with selective updates
     output_lines: list[str] = []
-    cursor = 0          # tracks how far through existing_lines we've consumed
+    cursor = 0  # tracks how far through existing_lines we've consumed
     updated: set[str] = set()
 
     for node in existing_tree.body:
         start_0 = node.lineno - 1
-        end_exc  = getattr(node, "end_lineno", node.lineno)
+        end_exc = getattr(node, "end_lineno", node.lineno)
 
         # Emit any gap between cursor and this node (blank lines, decorators
         # that appear before the node but after the previous one)
@@ -3008,15 +3071,17 @@ def _parse_failure_cases(failure_output: str, test_file: str) -> list[dict]:
         test_name = name_m.group(1)
         # Find the error line (starts with E  )
         error_lines = [l.lstrip() for l in lines if l.strip().startswith("E ")]
-        error_text  = " ".join(l[2:].strip() for l in error_lines[:3]) if error_lines else header
+        error_text = " ".join(l[2:].strip() for l in error_lines[:3]) if error_lines else header
         # Find the location line (file:line)
         loc_m = re.search(r"(\S+\.py):(\d+):", block)
         location = f"{loc_m.group(1)}:{loc_m.group(2)}" if loc_m else ""
-        cases.append({
-            "test":     test_name,
-            "error":    error_text[:300],
-            "location": location,
-        })
+        cases.append(
+            {
+                "test": test_name,
+                "error": error_text[:300],
+                "location": location,
+            }
+        )
     return cases
 
 
@@ -3037,11 +3102,9 @@ def _read_existing_implementations(test_content: str) -> dict[str, str]:
                 lines = p.read_text(encoding="utf-8").splitlines()
                 preview = "\n".join(lines[:100])
                 if len(lines) > 100:
-                    preview += f"\n# ... ({len(lines)-100} more lines)"
+                    preview += f"\n# ... ({len(lines) - 100} more lines)"
                 found[candidate] = preview
     return found
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -3262,32 +3325,41 @@ def _check_ac_quality(criteria: list[str]) -> list[str]:
             for w in warnings: print(w)
     """
     import shutil as _shutil
+
     warnings: list[str] = []
 
     _VAGUE_PATTERNS = [
-        (r"\bshould work\b|\bis usable\b|\bworks correctly\b|\bfunctions properly\b",
-         "vague outcome — specify a measurable assertion (return value, HTTP status, etc.)"),
-        (r"\bfaster than\b|\bscales to\b|\bhandles many\b|\bhigh throughput\b|\blow latency\b",
-         "unmeasurable performance claim — add specific numbers (e.g. '<100 ms', '>1000 rps')"),
-        (r"\buser can\b|\boperator can\b|\badmin can\b",
-         "UI/UX AC — only testable with a browser or E2E framework; consider splitting"),
+        (
+            r"\bshould work\b|\bis usable\b|\bworks correctly\b|\bfunctions properly\b",
+            "vague outcome — specify a measurable assertion (return value, HTTP status, etc.)",
+        ),
+        (
+            r"\bfaster than\b|\bscales to\b|\bhandles many\b|\bhigh throughput\b|\blow latency\b",
+            "unmeasurable performance claim — add specific numbers (e.g. '<100 ms', '>1000 rps')",
+        ),
+        (
+            r"\buser can\b|\boperator can\b|\badmin can\b",
+            "UI/UX AC — only testable with a browser or E2E framework; consider splitting",
+        ),
     ]
     _ENV_PATTERNS = [
-        (r"\bnpm\b|\bnode_modules\b|\bvite\b|\bwebpack\b",
-         "requires npm/node — testable only if node_modules is installed",
-         "npm"),
-        (r"\bdocker\b|\bcontainer\b|\bdocker-compose\b",
-         "requires Docker — testable only in a Docker-capable environment",
-         "docker"),
-        (r"\bredis\b",
-         "requires Redis — testable only with a running Redis server",
-         "redis-cli"),
-        (r"\bkafka\b",
-         "requires Kafka — testable only with a running Kafka broker",
-         ""),
-        (r"\bpostgres\b|\bpsycopg\b|\basyncpg\b",
-         "requires PostgreSQL — testable only with a live database connection",
-         "psql"),
+        (
+            r"\bnpm\b|\bnode_modules\b|\bvite\b|\bwebpack\b",
+            "requires npm/node — testable only if node_modules is installed",
+            "npm",
+        ),
+        (
+            r"\bdocker\b|\bcontainer\b|\bdocker-compose\b",
+            "requires Docker — testable only in a Docker-capable environment",
+            "docker",
+        ),
+        (r"\bredis\b", "requires Redis — testable only with a running Redis server", "redis-cli"),
+        (r"\bkafka\b", "requires Kafka — testable only with a running Kafka broker", ""),
+        (
+            r"\bpostgres\b|\bpsycopg\b|\basyncpg\b",
+            "requires PostgreSQL — testable only with a live database connection",
+            "psql",
+        ),
     ]
 
     for ac in criteria:
@@ -3307,8 +3379,8 @@ def _check_ac_quality(criteria: list[str]) -> list[str]:
 
 def _check_ac_test_alignment(
     criteria: list[str],
-    test_files: "list[str]",
-) -> "list[str]":
+    test_files: list[str],
+) -> list[str]:
     """
     Verify that each acceptance criterion is represented by at least one
     test assertion in the written test files.
@@ -3359,12 +3431,46 @@ def _check_ac_test_alignment(
         return []
 
     # Common English stopwords that carry no AC-specific signal
-    _STOP = frozenset({
-        "a", "an", "the", "is", "it", "in", "on", "at", "to", "of", "be",
-        "are", "was", "for", "and", "or", "not", "that", "this", "with",
-        "when", "if", "as", "by", "from", "has", "have", "should", "must",
-        "can", "will", "returns", "return", "given", "then", "after",
-    })
+    _STOP = frozenset(
+        {
+            "a",
+            "an",
+            "the",
+            "is",
+            "it",
+            "in",
+            "on",
+            "at",
+            "to",
+            "of",
+            "be",
+            "are",
+            "was",
+            "for",
+            "and",
+            "or",
+            "not",
+            "that",
+            "this",
+            "with",
+            "when",
+            "if",
+            "as",
+            "by",
+            "from",
+            "has",
+            "have",
+            "should",
+            "must",
+            "can",
+            "will",
+            "returns",
+            "return",
+            "given",
+            "then",
+            "after",
+        }
+    )
 
     def _ac_tokens(ac: str) -> list[str]:
         """Extract distinctive lowercase tokens from an AC string."""
@@ -3376,18 +3482,14 @@ def _check_ac_test_alignment(
     for idx, ac in enumerate(criteria, 1):
         tokens = _ac_tokens(ac)
         if not tokens:
-            continue   # AC too short / all stopwords — skip rather than false-positive
+            continue  # AC too short / all stopwords — skip rather than false-positive
         # Consider the AC covered if ANY distinctive token appears near
         # a test function def or assert statement
-        covered = any(
-            tok in test_source
-            for tok in tokens
-        )
+        covered = any(tok in test_source for tok in tokens)
         if not covered:
             short_ac = ac if len(ac) <= 60 else ac[:57] + "..."
             warnings.append(
-                f"AC {idx} ('{short_ac}') has no matching test — "
-                f"searched for: {tokens}"
+                f"AC {idx} ('{short_ac}') has no matching test — searched for: {tokens}"
             )
 
     return warnings
@@ -3397,7 +3499,7 @@ def _check_milestone_complexity(
     criteria: list[str],
     workplan_section: str,
     milestone_id: str,
-) -> "list[str]":
+) -> list[str]:
     """
     Analyse a milestone's spec for structural complexity that predicts S4
     oscillation before any tests or code are written.
@@ -3446,15 +3548,14 @@ def _check_milestone_complexity(
     # ── Check 2: Architectural layer breadth ──────────────────────────────────
     LAYER_TERMS = {
         "controller": ["controller", "route", "endpoint", "handler", "api"],
-        "service":    ["service", "use case", "usecase", "business logic", "orchestrat"],
+        "service": ["service", "use case", "usecase", "business logic", "orchestrat"],
         "repository": ["repository", "repo", "database", "db ", "persist", "store", "dao"],
-        "domain":     ["domain", "model", "schema", "contract", "pydantic", "entity", "enum"],
-        "infra":      ["infrastructure", "config", "logging", "telemetry", "docker", "redis"],
+        "domain": ["domain", "model", "schema", "contract", "pydantic", "entity", "enum"],
+        "infra": ["infrastructure", "config", "logging", "telemetry", "docker", "redis"],
     }
     MAX_LAYERS = 3
     layers_touched = [
-        layer for layer, terms in LAYER_TERMS.items()
-        if any(term in text for term in terms)
+        layer for layer, terms in LAYER_TERMS.items() if any(term in text for term in terms)
     ]
     if len(layers_touched) > MAX_LAYERS:
         warnings.append(
@@ -3510,7 +3611,7 @@ def _criteria_to_test_plan(criteria: list[str], milestone_id: str) -> str:
     return "\n".join(lines)
 
 
-def _project_snapshot(relevant_namespaces: "set[str] | None" = None) -> str:
+def _project_snapshot(relevant_namespaces: set[str] | None = None) -> str:
     """
     Return a compact tree of .py files in the project grouped by directory.
 
@@ -3542,18 +3643,16 @@ def _project_snapshot(relevant_namespaces: "set[str] | None" = None) -> str:
             # Keep only files that fall under a relevant namespace or always-include path
             effective = relevant_namespaces | _ALWAYS_INCLUDE
             files = [
-                fp for fp in files
-                if any(
-                    str(fp.relative_to(PROJECT_ROOT)).startswith(ns)
-                    for ns in effective
-                )
+                fp
+                for fp in files
+                if any(str(fp.relative_to(PROJECT_ROOT)).startswith(ns) for ns in effective)
             ]
         if not files:
             continue
 
         lines.append(f"### {root}/")
         for fp in files:
-            rel  = str(fp.relative_to(PROJECT_ROOT))
+            rel = str(fp.relative_to(PROJECT_ROOT))
             size = fp.stat().st_size
             lines.append(f"  {rel}  ({size} bytes)")
         lines.append("")
@@ -3621,7 +3720,7 @@ def _namespaces_from_imports(test_content: str, depth: int = 2) -> set[str]:
     return level1 | level2
 
 
-def _module_to_source_file(module_str: str) -> "str | None":
+def _module_to_source_file(module_str: str) -> str | None:
     """
     Resolve a dotted module path to the relative file path of the first
     matching source file that exists on disk.
@@ -3653,7 +3752,7 @@ def _module_to_source_file(module_str: str) -> "str | None":
     return None
 
 
-def _build_reverse_import_map() -> "dict[str, set[str]]":
+def _build_reverse_import_map() -> dict[str, set[str]]:
     """
     Scan every ``test_*.py`` file under ``tests/`` and build:
 
@@ -3713,9 +3812,9 @@ def _build_reverse_import_map() -> "dict[str, set[str]]":
 
 def _blast_radius_tests(
     test_file: str,
-    passing_tests: "set[str]",
-    reverse_map: "dict[str, set[str]]",
-) -> "list[str]":
+    passing_tests: set[str],
+    reverse_map: dict[str, set[str]],
+) -> list[str]:
     """
     Return passing tests that share at least one direct source-file
     dependency with ``test_file``.
@@ -3757,14 +3856,14 @@ def _blast_radius_tests(
         if src and src in reverse_map:
             at_risk.update(reverse_map[src] & passing_tests)
 
-    at_risk.discard(test_file)          # never flag the test being fixed
-    return sorted(at_risk)[:12]         # cap: enough signal, not overwhelming
+    at_risk.discard(test_file)  # never flag the test being fixed
+    return sorted(at_risk)[:12]  # cap: enough signal, not overwhelming
 
 
 def _compute_repair_surface(
     test_content: str,
     failure_output: str,
-) -> "list[str]":
+) -> list[str]:
     """
     Derive the minimum set of source files the agent should need to write
     in order to fix a specific failing test.
@@ -3875,7 +3974,7 @@ def _compute_repair_surface(
         if src:
             surface.add(src)
 
-    return sorted(surface)[:15]         # cap: bounded, still comprehensive
+    return sorted(surface)[:15]  # cap: bounded, still comprehensive
 
 
 def _failing_modules_from_cases(
@@ -3916,7 +4015,7 @@ def _failing_modules_from_cases(
 
 
 def _read_existing_implementations_scoped(
-    relevant_module_paths: "set[str]",
+    relevant_module_paths: set[str],
 ) -> dict[str, str]:
     """
     Read existing implementation files scoped to the given module paths.
@@ -3950,7 +4049,7 @@ def _read_existing_implementations_scoped(
         if target.is_dir():
             for child in sorted(target.glob("*.py")):
                 if child.name == "__init__.py":
-                    continue   # already included above
+                    continue  # already included above
                 rel = str(child.relative_to(PROJECT_ROOT))
                 if rel not in found:
                     lines = child.read_text(encoding="utf-8").splitlines()
@@ -3998,6 +4097,7 @@ def _extract_shared_missing_modules(
 
     # Count which missing module names appear most often
     from collections import Counter
+
     counts = Counter(all_missing)
     # A "shared" root cause is one that affects more than one test (appears ≥2 times)
     shared_modules = {mod for mod, cnt in counts.items() if cnt >= 2}
@@ -4103,6 +4203,7 @@ def _build_log_excerpt_for_file(
 # list of missing capabilities.  An empty list means the test is runnable.
 # ---------------------------------------------------------------------------
 
+
 # Capability entries: (scan_pattern, tool_binary, human_label)
 # scan_pattern  — regex searched in the test source
 def _detect_missing_env_caps(test_content: str) -> list[str]:
@@ -4133,14 +4234,14 @@ def _detect_missing_env_caps(test_content: str) -> list[str]:
             print("Cannot run — missing:", caps)
     """
     import shutil as _shutil
+
     missing: list[str] = []
 
     # npm run build / yarn build — requires BOTH the binary AND node_modules.
     # The npm binary may be installed system-wide but npm install hasn't been run,
     # making `npm run build` fail regardless of binary presence.
     # Pattern covers both shell-style "npm run build" and list-style ["npm", "run", ...]
-    if re.search(r"\bnpm\b|\byarn\b|\bvite\b|\bwebpack\b|\bnext\b",
-                 test_content, re.IGNORECASE):
+    if re.search(r"\bnpm\b|\byarn\b|\bvite\b|\bwebpack\b|\bnext\b", test_content, re.IGNORECASE):
         npm_ok = bool(_shutil.which("npm") or _shutil.which("yarn"))
         node_modules_ok = (PROJECT_ROOT / "node_modules").is_dir()
         if not npm_ok:
@@ -4172,10 +4273,10 @@ def _targeted_implement(
     distilled_ctx: str,
     wname: str,
     system_prompt: str,
-    existing_paths: "set[str] | None" = None,
+    existing_paths: set[str] | None = None,
     prior_attempt_context: str = "",
-    at_risk_tests: "list[str] | None" = None,
-    repair_surface: "list[str] | None" = None,
+    at_risk_tests: list[str] | None = None,
+    repair_surface: list[str] | None = None,
 ) -> tuple[list[str], str]:
     """
     Build a lean, targeted RAG prompt and call Claude to fix a specific
@@ -4237,7 +4338,8 @@ def _targeted_implement(
 
     # Extract imports from the test — defines the exact contract
     imports = [
-        line for line in test_content.splitlines()
+        line
+        for line in test_content.splitlines()
         if line.startswith(("import ", "from ")) and ("libs." in line or "services." in line)
     ]
 
@@ -4285,7 +4387,8 @@ def _targeted_implement(
     prior_section = (
         f"\n## What was tried previously (do not repeat these mistakes)\n\n"
         f"{prior_attempt_context[:2000]}\n"
-        if prior_attempt_context else ""
+        if prior_attempt_context
+        else ""
     )
 
     # Section 4: What was already written (correct, don't rewrite from scratch)
@@ -4303,7 +4406,7 @@ def _targeted_implement(
             failure_section += (
                 f"**{case['test']}**\n"
                 f"  Error: {case['error']}\n"
-                + (f"  At: {case['location']}\n" if case['location'] else "")
+                + (f"  At: {case['location']}\n" if case["location"] else "")
                 + "\n"
             )
         failure_section += (
@@ -4311,15 +4414,11 @@ def _targeted_implement(
             f"```\n{failure_output[:2000]}\n```\n</details>\n"
         )
     else:
-        failure_section = (
-            f"\n## Error (collection failure)\n\n"
-            f"```\n{failure_output[:2000]}\n```\n"
-        )
+        failure_section = f"\n## Error (collection failure)\n\n```\n{failure_output[:2000]}\n```\n"
 
     # Section 6: Distilled spec context (condensed milestone intent, capped)
     spec_context = (
-        f"\n## Spec context for {milestone_id}\n\n{distilled_ctx[:1500]}\n"
-        if distilled_ctx else ""
+        f"\n## Spec context for {milestone_id}\n\n{distilled_ctx[:1500]}\n" if distilled_ctx else ""
     )
 
     # Section 7: Blast-radius guard — passing tests that share source dependencies.
@@ -4380,8 +4479,8 @@ def _targeted_implement(
     # Classifying the failure before the LLM call tells Claude what KIND of problem
     # it is solving, so it can apply the right remediation strategy immediately
     # rather than having to re-derive it from the error text.
-    failure_class  = _classify_failure(failure_output)
-    class_hint     = _FAILURE_CLASS_HINTS.get(failure_class, "")
+    failure_class = _classify_failure(failure_output)
+    class_hint = _FAILURE_CLASS_HINTS.get(failure_class, "")
     instructions = (
         f"\n## Instructions\n\n"
         f"**Failure class: `{failure_class}`** — {class_hint}\n\n"
@@ -4394,9 +4493,16 @@ def _targeted_implement(
     )
 
     user_content = (
-        file_inventory + intent + contract + prior_section
-        + impl_section + failure_section + spec_context
-        + repair_surface_section + blast_section + instructions
+        file_inventory
+        + intent
+        + contract
+        + prior_section
+        + impl_section
+        + failure_section
+        + spec_context
+        + repair_surface_section
+        + blast_section
+        + instructions
     )
 
     # Trim prompt if over ~50k tokens — preserve failures + blast section, trim impl
@@ -4406,9 +4512,16 @@ def _targeted_implement(
             lines = c.splitlines()
             slim_impl += f"### {p}\n```python\n{chr(10).join(lines[:50])}\n# ...\n```\n\n"
         user_content = (
-            file_inventory + intent + contract + prior_section
-            + slim_impl + failure_section + spec_context
-            + repair_surface_section + blast_section + instructions
+            file_inventory
+            + intent
+            + contract
+            + prior_section
+            + slim_impl
+            + failure_section
+            + spec_context
+            + repair_surface_section
+            + blast_section
+            + instructions
         )
 
     try:
@@ -4431,7 +4544,7 @@ def _targeted_implement(
             rel_path, content, warn = _validate_and_redirect(rel_path, content)
             if warn:
                 _warn(f"  {warn}")
-            if rel_path is None:        # protected — skip entirely
+            if rel_path is None:  # protected — skip entirely
                 continue
             dest = PROJECT_ROOT / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -4474,13 +4587,13 @@ NEVER write to these paths (they are managed by build.py, not by agent steps):
 
 # Canonical file rules: if Claude writes to an alias path, redirect it.
 _CANONICAL_REDIRECTS: dict[str, str] = {
-    "services/api/app.py":          "services/api/main.py",
-    "services/api/application.py":  "services/api/main.py",
-    "services/app.py":              "services/api/main.py",
-    "app.py":                       "services/api/main.py",
-    "main.py":                      "services/api/main.py",
-    "libs/contracts/models.py":     "libs/contracts/base.py",
-    "libs/contracts/schemas.py":    "libs/contracts/base.py",
+    "services/api/app.py": "services/api/main.py",
+    "services/api/application.py": "services/api/main.py",
+    "services/app.py": "services/api/main.py",
+    "app.py": "services/api/main.py",
+    "main.py": "services/api/main.py",
+    "libs/contracts/models.py": "libs/contracts/base.py",
+    "libs/contracts/schemas.py": "libs/contracts/base.py",
     "libs/contracts/exceptions.py": "libs/contracts/errors.py",
     "libs/contracts/enumerations.py": "libs/contracts/enums.py",
 }
@@ -4495,16 +4608,18 @@ _CONFTEST_MERGE_DIRS = {"tests", "tests/unit", "tests/integration", "tests/accep
 # blocked and a warning is logged.  Add new entries here whenever a file is
 # added to the repo that must remain under human / build.py control.
 # ---------------------------------------------------------------------------
-_PROTECTED_PATHS: frozenset[str] = frozenset({
-    "docs/workplan-tracking/.active_workplan",   # runtime selection state
-    "CLAUDE.md",                                  # prime directive
-    "docker-compose.yml",                         # infrastructure definition
-    "pyproject.toml",                             # dependency manifest
-    "requirements.txt",                           # pinned prod deps
-    "requirements-dev.txt",                       # pinned dev deps
-    ".env",                                       # secrets — never agent-written
-    ".gitignore",
-})
+_PROTECTED_PATHS: frozenset[str] = frozenset(
+    {
+        "docs/workplan-tracking/.active_workplan",  # runtime selection state
+        "CLAUDE.md",  # prime directive
+        "docker-compose.yml",  # infrastructure definition
+        "pyproject.toml",  # dependency manifest
+        "requirements.txt",  # pinned prod deps
+        "requirements-dev.txt",  # pinned dev deps
+        ".env",  # secrets — never agent-written
+        ".gitignore",
+    }
+)
 
 # Accumulator files — shared across milestones.  Multiple agents contribute
 # symbols to these files over the life of the project.  They may NEVER be
@@ -4513,19 +4628,21 @@ _PROTECTED_PATHS: frozenset[str] = frozenset({
 #
 # When an agent writes one of these paths, _validate_and_redirect applies
 # _accumulator_merge() instead of replacing the existing content.
-_ACCUMULATOR_FILES: frozenset[str] = frozenset({
-    "libs/contracts/enums.py",      # all project enums accumulate here
-    "libs/contracts/base.py",       # base models accumulate here
-    "libs/contracts/errors.py",     # typed exceptions accumulate here
-    "services/api/main.py",         # route registrations accumulate here
-})
+_ACCUMULATOR_FILES: frozenset[str] = frozenset(
+    {
+        "libs/contracts/enums.py",  # all project enums accumulate here
+        "libs/contracts/base.py",  # base models accumulate here
+        "libs/contracts/errors.py",  # typed exceptions accumulate here
+        "services/api/main.py",  # route registrations accumulate here
+    }
+)
 
 # Any file whose relative path starts with one of these prefixes is also
 # protected regardless of the exact filename.
 _PROTECTED_PREFIXES: tuple[str, ...] = (
-    "docs/workplan-tracking/",   # all tracking files: .progress, .distilled.md, etc.
-    "infra/",                    # docker/compose/migration config is human-owned
-    ".github/",                  # CI workflows are human-owned
+    "docs/workplan-tracking/",  # all tracking files: .progress, .distilled.md, etc.
+    "infra/",  # docker/compose/migration config is human-owned
+    ".github/",  # CI workflows are human-owned
 )
 
 
@@ -4583,8 +4700,7 @@ def _validate_and_redirect(rel_path: str, content: str) -> tuple[str | None, str
             # Merge: append new content that isn't already present
             existing = dest.read_text(encoding="utf-8")
             # Simple merge: add lines from new content not in existing
-            new_lines = [l for l in content.splitlines()
-                         if l.strip() and l not in existing]
+            new_lines = [l for l in content.splitlines() if l.strip() and l not in existing]
             if new_lines:
                 content = existing.rstrip() + "\n\n# -- merged from " + rel_path + " --\n"
                 content += "\n".join(new_lines) + "\n"
@@ -4614,7 +4730,7 @@ def _validate_and_redirect(rel_path: str, content: str) -> tuple[str | None, str
                 merged = _merge_conftest(dest.read_text(encoding="utf-8"), content)
                 if merged:
                     content = merged
-                    warning = (warning or "") + f" conftest merged"
+                    warning = (warning or "") + " conftest merged"
                 else:
                     content = dest.read_text(encoding="utf-8")  # nothing to add
 
@@ -4646,17 +4762,15 @@ def _validate_and_redirect(rel_path: str, content: str) -> tuple[str | None, str
     return rel_path, content, warning
 
 
-
-
-
 def _journal_write(rel_path: str, content: str, wname: str) -> None:
     """Log every file write so [rw] can revert the last run."""
-    import json, hashlib
+    import json
+
     journal = TRACKING_DIR / f"{wname}.write-journal.jsonl"
-    dest    = PROJECT_ROOT / rel_path
-    prev    = dest.read_text(encoding="utf-8") if dest.exists() else ""
-    record  = {
-        "ts":   datetime.now(timezone.utc).isoformat(),
+    dest = PROJECT_ROOT / rel_path
+    prev = dest.read_text(encoding="utf-8") if dest.exists() else ""
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
         "path": rel_path,
         "prev": prev,
     }
@@ -4693,6 +4807,7 @@ def _write_golden_baseline(wname: str, milestone_id: str, full_output: str) -> N
                       the absence of FAILED/ERROR lines, not their presence.
     """
     import json as _json
+
     golden_path = TRACKING_DIR / f"{wname}.golden.json"
     existing: dict[str, list[str]] = {}
     if golden_path.exists():
@@ -4712,10 +4827,7 @@ def _write_golden_baseline(wname: str, milestone_id: str, full_output: str) -> N
 
     existing[milestone_id] = passing_now
     golden_path.write_text(_json.dumps(existing, indent=2), encoding="utf-8")
-    _ok(
-        f"Golden baseline updated: {milestone_id} → "
-        f"{len(passing_now)} passing test(s) recorded"
-    )
+    _ok(f"Golden baseline updated: {milestone_id} → {len(passing_now)} passing test(s) recorded")
 
 
 def _load_golden_baseline(wname: str) -> set[str]:
@@ -4737,6 +4849,7 @@ def _load_golden_baseline(wname: str) -> set[str]:
         Set of test file paths that are part of the cross-session golden baseline.
     """
     import json as _json
+
     golden_path = TRACKING_DIR / f"{wname}.golden.json"
     if not golden_path.exists():
         return set()
@@ -4788,27 +4901,27 @@ def _append_lesson(
                        "3 attempts could not satisfy HealthResponse schema")
     """
     import json as _json
+
     lessons_path = TRACKING_DIR / f"{wname}.lessons.json"
     try:
         data: dict[str, list[dict]] = (
-            _json.loads(lessons_path.read_text(encoding="utf-8"))
-            if lessons_path.exists() else {}
+            _json.loads(lessons_path.read_text(encoding="utf-8")) if lessons_path.exists() else {}
         )
     except Exception:
         data = {}
 
     record = {
-        "ts":            datetime.now(timezone.utc).isoformat(),
-        "test_file":     test_file,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "test_file": test_file,
         "failure_class": failure_class,
-        "outcome":       outcome,
-        "detail":        detail,
+        "outcome": outcome,
+        "detail": detail,
     }
     data.setdefault(milestone_id, []).append(record)
     try:
         lessons_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
-        pass   # lessons are advisory — never block on I/O failure
+        pass  # lessons are advisory — never block on I/O failure
 
 
 def _load_lessons_context(wname: str, milestone_id: str) -> str:
@@ -4833,6 +4946,7 @@ def _load_lessons_context(wname: str, milestone_id: str) -> str:
         # "## Lessons from previous S4 sessions for M1\n\n- test_m1_health.py ..."
     """
     import json as _json
+
     lessons_path = TRACKING_DIR / f"{wname}.lessons.json"
     if not lessons_path.exists():
         return ""
@@ -4846,14 +4960,12 @@ def _load_lessons_context(wname: str, milestone_id: str) -> str:
         return ""
 
     lines = [f"## Lessons from previous S4 sessions for {milestone_id}\n"]
-    lines.append(
-        "These approaches were attempted and FAILED — do not repeat them:\n"
-    )
+    lines.append("These approaches were attempted and FAILED — do not repeat them:\n")
     # Show the most recent 8 records to keep context bounded
     for r in records[-8:]:
         short_file = Path(r.get("test_file", "?")).name
-        fc   = r.get("failure_class", "?")
-        out  = r.get("outcome", "?")
+        fc = r.get("failure_class", "?")
+        out = r.get("outcome", "?")
         note = r.get("detail", "")
         line = f"- `{short_file}` [{fc}] → {out}"
         if note:
@@ -4863,21 +4975,26 @@ def _load_lessons_context(wname: str, milestone_id: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def action_rollback_last_run(all_wt: "list[WorkplanTracking]") -> None:
+def action_rollback_last_run(all_wt: list[WorkplanTracking]) -> None:
     """Revert all files written in the most recent [a] run."""
     _h2("Rollback last run")
     active_wt = resolve_active_workplan(all_wt)
     if not active_wt:
-        _warn("No active workplan."); return
+        _warn("No active workplan.")
+        return
     import json
+
     journal = TRACKING_DIR / f"{active_wt.workplan_name}.write-journal.jsonl"
     if not journal.exists():
-        _warn("No write journal — nothing to roll back."); return
+        _warn("No write journal — nothing to roll back.")
+        return
     records = [json.loads(l) for l in journal.read_text().splitlines() if l.strip()]
     if not records:
-        _warn("Journal is empty."); return
+        _warn("Journal is empty.")
+        return
     from datetime import timedelta
-    cutoff   = (datetime.fromisoformat(records[-1]["ts"]) - timedelta(minutes=5)).isoformat()
+
+    cutoff = (datetime.fromisoformat(records[-1]["ts"]) - timedelta(minutes=5)).isoformat()
     last_run = [r for r in records if r["ts"] >= cutoff]
     print(f"  Reverting {len(last_run)} file(s):")
     for r in reversed(last_run):
@@ -4898,7 +5015,8 @@ def _check_project_structure() -> list[str]:
     problems = []
     for root in ["services", "libs"]:
         rp = PROJECT_ROOT / root
-        if not rp.exists(): continue
+        if not rp.exists():
+            continue
         for d in rp.rglob("*"):
             if d.is_dir() and any(d.glob("*.py")) and not (d / "__init__.py").exists():
                 problems.append(str(d.relative_to(PROJECT_ROOT)))
@@ -4919,13 +5037,13 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         _warn("Run [b] to bootstrap tracking files.")
         return
 
-    wp               = active_wt.progress
-    wname            = active_wt.workplan_name
+    wp = active_wt.progress
+    wname = active_wt.workplan_name
     active_milestone = wp.active_milestone
-    active_step      = wp.resume_detail
-    step_id          = _step_id_from_detail(active_step)
-    step_label       = next((lbl for sid, lbl in STEP_LABELS if sid == step_id), step_id)
-    system_prompt    = _system_for_step(step_id)
+    active_step = wp.resume_detail
+    step_id = _step_id_from_detail(active_step)
+    step_label = next((lbl for sid, lbl in STEP_LABELS if sid == step_id), step_id)
+    system_prompt = _system_for_step(step_id)
 
     # ── Step purpose descriptions ─────────────────────────────────────────────
     STEP_PURPOSE = {
@@ -4947,8 +5065,10 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
     print(f"  {C_BOLD}  BUILD STEP{C_RESET}")
     print(f"  {C_BOLD}{C_CYAN}{'─' * w}{C_RESET}")
     print(f"  Workplan : {wname}")
-    print(f"  Milestone: {C_BOLD}{active_milestone}{C_RESET}  —  "
-          f"{next((lbl for mid, lbl in MILESTONE_LIST if mid == active_milestone), '')}")
+    print(
+        f"  Milestone: {C_BOLD}{active_milestone}{C_RESET}  —  "
+        f"{next((lbl for mid, lbl in MILESTONE_LIST if mid == active_milestone), '')}"
+    )
     print(f"  Step     : {C_BOLD}{C_CYAN}{step_id}{C_RESET}  {step_label}")
     print(f"  Purpose  : {C_DIM}{purpose}{C_RESET}")
     print()
@@ -4965,7 +5085,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                     step_statuses[key] = step_status
 
     print(f"  {'Step':<6}  {'Label':<40}  Status")
-    print(f"  {'─'*6}  {'─'*40}  {'─'*12}")
+    print(f"  {'─' * 6}  {'─' * 40}  {'─' * 12}")
     for sid, slabel in STEP_LABELS:
         status = step_statuses.get(sid, "NOT_STARTED")
         if sid == step_id:
@@ -4977,20 +5097,24 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         else:
             row_col = ""
             marker = ""
-        status_col = (C_GREEN if status == "DONE"
-                      else C_CYAN if status == "IN_PROGRESS"
-                      else C_RED if status == "BLOCKED"
-                      else C_DIM)
-        print(f"  {row_col}{sid:<6}  {slabel:<40}{C_RESET}  "
-              f"{status_col}{status}{C_RESET}{marker}")
+        status_col = (
+            C_GREEN
+            if status == "DONE"
+            else C_CYAN
+            if status == "IN_PROGRESS"
+            else C_RED
+            if status == "BLOCKED"
+            else C_DIM
+        )
+        print(f"  {row_col}{sid:<6}  {slabel:<40}{C_RESET}  {status_col}{status}{C_RESET}{marker}")
 
     print(f"  {C_BOLD}{C_CYAN}{'─' * w}{C_RESET}")
 
     # Always show acceptance criteria so engineer knows what done means
     wp_path_panel = find_workplan_file(wname)
-    criteria_panel = _parse_acceptance_criteria(
-        wp_path_panel, active_milestone
-    ) if wp_path_panel else []
+    criteria_panel = (
+        _parse_acceptance_criteria(wp_path_panel, active_milestone) if wp_path_panel else []
+    )
     if criteria_panel:
         print()
         print(f"  {C_BOLD}Done when:{C_RESET}")
@@ -5001,18 +5125,23 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
     # ── Sync check: header vs actual step statuses ────────────────────────────
     # If Active step says S2 but S1 is NOT_STARTED, the file is out of sync
     # (usually from a manual header edit without updating the step lines).
-    all_sids   = [sid for sid, _ in STEP_LABELS]
+    all_sids = [sid for sid, _ in STEP_LABELS]
     active_idx = all_sids.index(step_id) if step_id in all_sids else 0
-    skipped    = [
-        sid for sid in all_sids[:active_idx]
+    skipped = [
+        sid
+        for sid in all_sids[:active_idx]
         if step_statuses.get(sid, "NOT_STARTED") == "NOT_STARTED"
     ]
     if skipped:
-        _warn(f"Progress file sync issue: {step_id} is set as active but "
-              f"{', '.join(skipped)} {'is' if len(skipped)==1 else 'are'} still NOT_STARTED.")
+        _warn(
+            f"Progress file sync issue: {step_id} is set as active but "
+            f"{', '.join(skipped)} {'is' if len(skipped) == 1 else 'are'} still NOT_STARTED."
+        )
         print()
-        print(f"  Options:")
-        print(f"    {C_BOLD}[b]{C_RESET}ack  — go back and run the skipped step(s) first (recommended)")
+        print("  Options:")
+        print(
+            f"    {C_BOLD}[b]{C_RESET}ack  — go back and run the skipped step(s) first (recommended)"
+        )
         print(f"    {C_BOLD}[s]{C_RESET}kip  — mark skipped steps DONE and continue with {step_id}")
         print(f"    {C_BOLD}[c]{C_RESET}ancel")
         print()
@@ -5037,8 +5166,12 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             first_skipped = skipped[0]
             # Rewind active step header
             pf_text = wp.progress_file.read_text(encoding="utf-8")
-            first_label = next((lbl for sid, lbl in STEP_LABELS if sid == first_skipped), first_skipped)
-            new_active = f"STEP {all_sids.index(first_skipped)+1} -- {first_label} ({active_milestone})"
+            first_label = next(
+                (lbl for sid, lbl in STEP_LABELS if sid == first_skipped), first_skipped
+            )
+            new_active = (
+                f"STEP {all_sids.index(first_skipped) + 1} -- {first_label} ({active_milestone})"
+            )
             pf_text = re.sub(
                 r"^# Active step:.*$", f"# Active step: {new_active}", pf_text, flags=re.MULTILINE
             )
@@ -5052,9 +5185,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         _err(f"Prerequisites not met for {active_milestone}:")
         for b in blocking:
             _err(f"  {b} must be DONE before this milestone can start")
-        answer = input(
-            f"  {C_YELLOW}Override and proceed anyway? [y/N]{C_RESET} "
-        ).strip().lower()
+        answer = input(f"  {C_YELLOW}Override and proceed anyway? [y/N]{C_RESET} ").strip().lower()
         if answer != "y":
             return
 
@@ -5068,7 +5199,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             _warn("Consider [d] → refresh to update distilled context for this milestone.")
 
     # ── Load context ──────────────────────────────────────────────────────────
-    workplan_path    = find_workplan_file(wname)
+    workplan_path = find_workplan_file(wname)
     workplan_section = ""
     if workplan_path and workplan_path.exists():
         full_text = workplan_path.read_text(encoding="utf-8")
@@ -5121,11 +5252,11 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
 
     # ── Confirm before sending ────────────────────────────────────────────────
     ctx_tokens = (len(distilled_ctx) // 4) if distilled_ctx else 0
-    wp_tokens  = len(workplan_section) // 4
+    wp_tokens = len(workplan_section) // 4
     _info(f"Context: ~{ctx_tokens} distilled + ~{wp_tokens} workplan tokens")
-    answer = input(
-        f"  {C_YELLOW}Run {step_id} for {active_milestone}? [Y/n]{C_RESET} "
-    ).strip().lower()
+    answer = (
+        input(f"  {C_YELLOW}Run {step_id} for {active_milestone}? [Y/n]{C_RESET} ").strip().lower()
+    )
     if answer == "n":
         _info("Cancelled.")
         return
@@ -5134,7 +5265,8 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
     if step_id in ("S3", "S4", "S7"):
         pytest_check = subprocess.run(
             [str(VENV_PYTHON), "-m", "pytest", "--version"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if pytest_check.returncode != 0:
             _err("pytest is not installed in the venv.")
@@ -5144,9 +5276,9 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             return
 
     # ── Iteration strategy depends on step ───────────────────────────────────
-    written_paths:    list[str] = []
-    response:         str       = ""
-    _s4_tests_passed: Optional[bool] = None  # set by S4 loop, read by advance block
+    written_paths: list[str] = []
+    response: str = ""
+    _s4_tests_passed: bool | None = None  # set by S4 loop, read by advance block
 
     if step_id == "S3":
         # ── S3 RED: ground tests in workplan acceptance criteria ──────────────
@@ -5180,9 +5312,11 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                     "wasting LLM calls in S4.  Recommended: edit the workplan "
                     "to make them measurable before continuing.{C_RESET}"
                 )
-                choice = input(
-                    f"\n  {C_YELLOW}Continue with S3 anyway? [y/N]:{C_RESET} "
-                ).strip().lower()
+                choice = (
+                    input(f"\n  {C_YELLOW}Continue with S3 anyway? [y/N]:{C_RESET} ")
+                    .strip()
+                    .lower()
+                )
                 if choice != "y":
                     _info("S3 cancelled — edit the workplan and try again.")
                     return
@@ -5256,7 +5390,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 rel_path, content, warn = _validate_and_redirect(rel_path, content)
                 if warn:
                     _warn(f"  {warn}")
-                if rel_path is None:    # protected — skip entirely
+                if rel_path is None:  # protected — skip entirely
                     continue
                 dest = PROJECT_ROOT / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -5301,8 +5435,8 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         #   MAX_FILE_ROUNDS (inner): max distinct failing files per pass.
         #   PER_FILE_RETRIES: extra Claude calls per file if first attempt fails.
 
-        MAX_FILE_ROUNDS  = 10   # max distinct test files per outer round
-        PER_FILE_RETRIES = 1    # per-file retry attempts after first failure
+        MAX_FILE_ROUNDS = 10  # max distinct test files per outer round
+        PER_FILE_RETRIES = 1  # per-file retry attempts after first failure
 
         build_log = TRACKING_DIR / f"{wname}.build-log.md"
         TRACKING_DIR.mkdir(parents=True, exist_ok=True)
@@ -5383,10 +5517,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         # Note: `criteria` is only assigned inside the S3 branch above, so we
         # must re-fetch it here independently for S4.
         _s4_wp_path = find_workplan_file(wname)
-        criteria = (
-            _parse_acceptance_criteria(_s4_wp_path, active_milestone)
-            if _s4_wp_path else []
-        )
+        criteria = _parse_acceptance_criteria(_s4_wp_path, active_milestone) if _s4_wp_path else []
 
         if criteria:
             _s4_test_files = _collect_milestone_test_files(active_milestone)
@@ -5433,9 +5564,9 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         #   - Skipped for further LLM calls in this session.
         #   - Reported in the handoff summary as "manual review required".
         #   - NOT counted as regressions (they were already failing at baseline).
-        MAX_FILE_ATTEMPTS   = 4   # total LLM calls across all rounds before abandoning
+        MAX_FILE_ATTEMPTS = 4  # total LLM calls across all rounds before abandoning
         _file_attempt_counts: dict[str, int] = {}
-        _abandoned_files:     set[str]       = set()
+        _abandoned_files: set[str] = set()
 
         # ── Oscillation tracking ───────────────────────────────────────────────
         # Stores a frozenset fingerprint of failing test files after each round.
@@ -5443,7 +5574,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         # cycling between failure states without making progress.  Continuing would
         # only burn more tokens without converging; we stop and tell the operator.
         _seen_failure_fingerprints: list[frozenset[str]] = []
-        _oscillation_detected: bool = False   # propagated to handoff recommendation
+        _oscillation_detected: bool = False  # propagated to handoff recommendation
 
         # ── Convergence metric ─────────────────────────────────────────────────
         # Tracks the count of actionable failing files at the end of each outer
@@ -5460,7 +5591,6 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
 
         # ── Outer iteration loop ───────────────────────────────────────────────
         for iteration in range(1, MAX_ITERATIONS + 1):
-
             iter_label = f"round {iteration}/{MAX_ITERATIONS}"
             # Timestamp used to identify journal entries from this round only,
             # so we can roll back just this round if regressions are detected.
@@ -5470,16 +5600,14 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             all_pass, full_output = run_tests_capture()
 
             if all_pass:
-                break   # done — exit outer loop
+                break  # done — exit outer loop
 
             failing_files = _collect_failing_test_files(full_output)
-            total_files   = len(failing_files)
+            total_files = len(failing_files)
 
             # ── Oscillation check ──────────────────────────────────────────────
             # Fingerprint = frozenset of currently-failing files (excl. env-skips)
-            current_fingerprint = frozenset(
-                f for f in failing_files if f not in _env_skip_files
-            )
+            current_fingerprint = frozenset(f for f in failing_files if f not in _env_skip_files)
             if current_fingerprint in _seen_failure_fingerprints:
                 _oscillation_detected = True
                 _err(
@@ -5501,7 +5629,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             _seen_failure_fingerprints.append(current_fingerprint)
 
             if not failing_files:
-                break   # collection error — can't proceed; caller handles
+                break  # collection error — can't proceed; caller handles
 
             _info(f"Found {total_files} failing test file(s)")
             log.section(f"S4 {active_milestone} — {iter_label}, {total_files} file(s)")
@@ -5524,17 +5652,17 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 )
                 log.section(f"Root-cause batch fix: {sorted(shared_missing)}")
                 batch_written, _ = _targeted_implement(
-                    test_file      = failing_files[0],  # representative test
-                    test_content   = _load_test_file(failing_files[0]),
-                    failure_output = (
+                    test_file=failing_files[0],  # representative test
+                    test_content=_load_test_file(failing_files[0]),
+                    failure_output=(
                         f"# Multiple tests ({len(shared_missing)}) share this root cause:\n"
                         + full_output[:2000]
                     ),
-                    milestone_id   = active_milestone,
-                    distilled_ctx  = distilled_ctx or "",
-                    wname          = wname,
-                    system_prompt  = system_prompt,
-                    existing_paths = all_written_this_session,
+                    milestone_id=active_milestone,
+                    distilled_ctx=distilled_ctx or "",
+                    wname=wname,
+                    system_prompt=system_prompt,
+                    existing_paths=all_written_this_session,
                 )
                 written_paths.extend(batch_written)
                 all_written_this_session.update(batch_written)
@@ -5543,9 +5671,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 # Re-run to see how many tests the batch fix resolved
                 _, full_output = run_tests_capture()
                 failing_files = _collect_failing_test_files(full_output)
-                _info(
-                    f"  After batch fix: {len(failing_files)} file(s) still failing"
-                )
+                _info(f"  After batch fix: {len(failing_files)} file(s) still failing")
 
             # ── Blast-radius map ───────────────────────────────────────────────
             # Build a reverse import map ONCE per outer round (not per file) so
@@ -5568,11 +5694,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 if (PROJECT_ROOT / "tests").exists()
                 else set()
             )
-            _passing_tests = (
-                _all_test_files
-                - set(failing_files)
-                - _env_skip_files
-            )
+            _passing_tests = _all_test_files - set(failing_files) - _env_skip_files
             _info(
                 f"Blast-radius map: {len(_reverse_map)} source file(s) tracked, "
                 f"{len(_passing_tests)} passing test(s) in protection set"
@@ -5582,9 +5704,9 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             for file_idx, test_file in enumerate(failing_files[:MAX_FILE_ROUNDS], 1):
                 short = Path(test_file).name
                 print(
-                    f"  [{file_idx}/{min(total_files, MAX_FILE_ROUNDS)}] "
-                    f"{short:<52}",
-                    end="", flush=True,
+                    f"  [{file_idx}/{min(total_files, MAX_FILE_ROUNDS)}] {short:<52}",
+                    end="",
+                    flush=True,
                 )
                 log.section(f"File: {test_file}")
 
@@ -5681,16 +5803,16 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 _file_attempt_counts[test_file] = _file_attempt_counts.get(test_file, 0) + 1
                 attempt1_ts = datetime.now(timezone.utc).isoformat()
                 new_paths, file_response = _targeted_implement(
-                    test_file      = test_file,
-                    test_content   = test_content,
-                    failure_output = file_output,
-                    milestone_id   = active_milestone,
-                    distilled_ctx  = distilled_ctx or "",
-                    wname          = wname,
-                    system_prompt  = system_prompt,
-                    existing_paths = all_written_this_session,
-                    at_risk_tests  = at_risk or None,
-                    repair_surface = repair_sfc or None,
+                    test_file=test_file,
+                    test_content=test_content,
+                    failure_output=file_output,
+                    milestone_id=active_milestone,
+                    distilled_ctx=distilled_ctx or "",
+                    wname=wname,
+                    system_prompt=system_prompt,
+                    existing_paths=all_written_this_session,
+                    at_risk_tests=at_risk or None,
+                    repair_surface=repair_sfc or None,
                 )
                 written_paths.extend(new_paths)
                 response = file_response
@@ -5765,24 +5887,24 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                     # Extract the relevant build-log section for this test file
                     # so the retry call knows what was already attempted
                     prior_ctx = _build_log_excerpt_for_file(
-                        build_log_path = build_log,
-                        test_file      = test_file,
-                        max_chars      = 1500,
+                        build_log_path=build_log,
+                        test_file=test_file,
+                        max_chars=1500,
                     )
 
                     retry_ts = datetime.now(timezone.utc).isoformat()
                     retry_paths, _ = _targeted_implement(
-                        test_file             = test_file,
-                        test_content          = test_content,
-                        failure_output        = file_output2,
-                        milestone_id          = active_milestone,
-                        distilled_ctx         = distilled_ctx or "",
-                        wname                 = wname,
-                        system_prompt         = system_prompt,
-                        existing_paths        = all_written_this_session,
-                        prior_attempt_context = prior_ctx,
-                        at_risk_tests         = at_risk or None,
-                        repair_surface        = repair_sfc or None,
+                        test_file=test_file,
+                        test_content=test_content,
+                        failure_output=file_output2,
+                        milestone_id=active_milestone,
+                        distilled_ctx=distilled_ctx or "",
+                        wname=wname,
+                        system_prompt=system_prompt,
+                        existing_paths=all_written_this_session,
+                        prior_attempt_context=prior_ctx,
+                        at_risk_tests=at_risk or None,
+                        repair_surface=repair_sfc or None,
                     )
                     written_paths.extend(retry_paths)
                     all_written_this_session.update(retry_paths)
@@ -5870,12 +5992,10 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             # Actionable failing count: exclude env-skips and abandoned files —
             # these will never be resolved by further LLM calls, so they must
             # not influence the convergence signal.
-            actionable_failing = (
-                current_failing - _env_skip_files - _abandoned_files
-            )
+            actionable_failing = current_failing - _env_skip_files - _abandoned_files
             remaining_count = len(actionable_failing)
             if remaining_count == 0:
-                break   # collection error or all remaining are env-skip / abandoned
+                break  # collection error or all remaining are env-skip / abandoned
 
             _info(
                 f"End of {iter_label}: {remaining_count} actionable failing file(s)"
@@ -5892,7 +6012,9 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             _round_failing_counts.append(remaining_count)
             if (
                 len(_round_failing_counts) >= 3
-                and _round_failing_counts[-1] >= _round_failing_counts[-2] >= _round_failing_counts[-3]
+                and _round_failing_counts[-1]
+                >= _round_failing_counts[-2]
+                >= _round_failing_counts[-3]
             ):
                 _stall_detected = True
                 _err(
@@ -5914,8 +6036,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                     "milestone before retrying."
                 )
                 log.detail(
-                    f"STALL: round counts = {_round_failing_counts}; "
-                    f"stopping at {iter_label}"
+                    f"STALL: round counts = {_round_failing_counts}; stopping at {iter_label}"
                 )
                 break
 
@@ -5932,7 +6053,9 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             # and is now passing, so future sessions know these were fixed this way.
             for tf in sorted(_promoted_to_passing):
                 _append_lesson(
-                    wname, active_milestone, tf,
+                    wname,
+                    active_milestone,
+                    tf,
                     failure_class=_classify_failure(""),
                     outcome="resolved",
                     detail="promoted to passing in this S4 session",
@@ -5940,6 +6063,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             # Reset the [a] press counter for this milestone/step so it starts
             # fresh if the operator returns to this step later.
             import json as _json
+
             _press_file = TRACKING_DIR / f"{wname}.press-counter.json"
             try:
                 _pdata: dict = _json.loads(_press_file.read_text()) if _press_file.exists() else {}
@@ -5958,19 +6082,31 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                     _baseline_output  # best available failure text at session close
                 )
                 _append_lesson(
-                    wname, active_milestone, tf, fc, "abandoned",
+                    wname,
+                    active_milestone,
+                    tf,
+                    fc,
+                    "abandoned",
                     detail=f"Hit {MAX_FILE_ATTEMPTS}-attempt limit without passing",
                 )
             if _oscillation_detected:
                 for tf in sorted(current_fingerprint):
                     _append_lesson(
-                        wname, active_milestone, tf, "logic", "oscillation",
+                        wname,
+                        active_milestone,
+                        tf,
+                        "logic",
+                        "oscillation",
                         detail="Loop detected same failing set in two separate rounds",
                     )
             if _stall_detected:
                 for tf in sorted(actionable_failing):
                     _append_lesson(
-                        wname, active_milestone, tf, "logic", "stalled",
+                        wname,
+                        active_milestone,
+                        tf,
+                        "logic",
+                        "stalled",
                         detail=f"No progress for 3 rounds: {_round_failing_counts}",
                     )
 
@@ -5981,9 +6117,9 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             # This is critical for operator triage — they need to know whether
             # pressing [a] again might help or whether manual intervention is needed.
             remaining_raw = set(_collect_failing_test_files(full_output))
-            pre_existing  = remaining_raw & _baseline_failing - _env_skip_files
-            regressions   = remaining_raw - _baseline_failing - _env_skip_files
-            env_skips     = _env_skip_files  # collected during inner loop
+            pre_existing = remaining_raw & _baseline_failing - _env_skip_files
+            regressions = remaining_raw - _baseline_failing - _env_skip_files
+            env_skips = _env_skip_files  # collected during inner loop
 
             rounds_str = f"{MAX_ITERATIONS} round(s) × {PER_FILE_RETRIES + 1} attempt(s)/file"
             print()
@@ -6045,9 +6181,12 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             # The recommendation is derived from which failure categories are
             # present and how many consecutive [a] presses have been made.
             import json as _json
+
             _press_file = TRACKING_DIR / f"{wname}.press-counter.json"
             try:
-                _press_data: dict = _json.loads(_press_file.read_text()) if _press_file.exists() else {}
+                _press_data: dict = (
+                    _json.loads(_press_file.read_text()) if _press_file.exists() else {}
+                )
             except Exception:
                 _press_data = {}
             _press_key = f"{active_milestone}-S4"
@@ -6150,7 +6289,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 rel_path, content, warn = _validate_and_redirect(rel_path, content)
                 if warn:
                     _warn(f"  {warn}")
-                if rel_path is None:    # protected — skip entirely
+                if rel_path is None:  # protected — skip entirely
                     continue
                 dest = PROJECT_ROOT / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -6173,18 +6312,22 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         # ── S8: gate on acceptance criteria before narrative review ────────
         if step_id == "S8":
             wp_path_s8 = find_workplan_file(wname)
-            criteria_s8 = _parse_acceptance_criteria(
-                wp_path_s8, active_milestone
-            ) if wp_path_s8 else []
+            criteria_s8 = (
+                _parse_acceptance_criteria(wp_path_s8, active_milestone) if wp_path_s8 else []
+            )
             if criteria_s8:
                 print()
                 print(f"  {C_BOLD}Acceptance criteria checklist for {active_milestone}:{C_RESET}")
                 for i, c in enumerate(criteria_s8, 1):
                     print(f"    {i}. {c}")
                 print()
-                answer = input(
-                    f"  {C_YELLOW}Are ALL {len(criteria_s8)} criteria demonstrably met? [y/N]{C_RESET} "
-                ).strip().lower()
+                answer = (
+                    input(
+                        f"  {C_YELLOW}Are ALL {len(criteria_s8)} criteria demonstrably met? [y/N]{C_RESET} "
+                    )
+                    .strip()
+                    .lower()
+                )
                 if answer != "y":
                     _warn("S8 blocked — return to S4/S5/S6 until all criteria are met.")
                     return
@@ -6215,7 +6358,7 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 rel_path, content, warn = _validate_and_redirect(rel_path, content)
                 if warn:
                     _warn(f"  {warn}")
-                if rel_path is None:    # protected — skip entirely
+                if rel_path is None:  # protected — skip entirely
                     continue
                 dest = PROJECT_ROOT / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -6233,11 +6376,11 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
         for p in written_paths:
             print(f"    {C_DIM}+{C_RESET} {p}")
     else:
-        print(f"  Files written  : 0  (non-file step)")
+        print("  Files written  : 0  (non-file step)")
 
     cmds = _extract_next_commands(response)
     if cmds:
-        print(f"  Next commands  :")
+        print("  Next commands  :")
         bin_dir = VENV_PYTHON.parent
         for cmd in cmds:
             venv_note = ""
@@ -6278,14 +6421,20 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
                 _warn("Run [a] again to continue tackling remaining failures")
         else:
             # Non-test steps: explicit prompt
-            answer = input(
-                f"  {C_YELLOW}Mark {C_BOLD}{step_id}{C_YELLOW} ({step_label}) "
-                f"DONE and advance to next step? [Y/n]{C_RESET} "
-            ).strip().lower()
+            answer = (
+                input(
+                    f"  {C_YELLOW}Mark {C_BOLD}{step_id}{C_YELLOW} ({step_label}) "
+                    f"DONE and advance to next step? [Y/n]{C_RESET} "
+                )
+                .strip()
+                .lower()
+            )
             if answer != "n":
                 next_step = advance_progress_step(wp.progress_file, active_milestone, step_id)
                 if next_step:
-                    next_label = next((lbl for sid, lbl in STEP_LABELS if sid == next_step), next_step)
+                    next_label = next(
+                        (lbl for sid, lbl in STEP_LABELS if sid == next_step), next_step
+                    )
                     _ok(f"{step_id} DONE  →  next: {C_BOLD}{next_step}{C_RESET} {next_label}")
                     _info("Run [a] again to execute the next step")
                 else:
@@ -6295,9 +6444,11 @@ def action_agentic_build(all_wt: list[WorkplanTracking]) -> None:
             else:
                 _info(f"{step_id} not marked complete — run [a] again when ready")
 
+
 # ---------------------------------------------------------------------------
 # Other build actions
 # ---------------------------------------------------------------------------
+
 
 def action_repair_progress(all_wt: list[WorkplanTracking]) -> None:
     """
@@ -6327,12 +6478,12 @@ def action_repair_progress(all_wt: list[WorkplanTracking]) -> None:
 
     # Build a lookup: step label text -> (milestone_id, step_id)
     # We need to match orphaned label lines back to their step IDs
-    label_to_sid: dict[str, tuple[str,str]] = {}
+    label_to_sid: dict[str, tuple[str, str]] = {}
     for mid, _ in MILESTONE_LIST:
         for sid, slabel in STEP_LABELS:
             label_to_sid[slabel.lower()] = (mid, sid)
 
-    status_re  = re.compile(r"(DONE|IN_PROGRESS|NOT_STARTED|BLOCKED|SKIPPED)$", re.IGNORECASE)
+    status_re = re.compile(r"(DONE|IN_PROGRESS|NOT_STARTED|BLOCKED|SKIPPED)$", re.IGNORECASE)
     bracket_re = re.compile(r"^\s+\[M\d+", re.IGNORECASE)
 
     prev_mid = "M0"
@@ -6350,7 +6501,7 @@ def action_repair_progress(all_wt: list[WorkplanTracking]) -> None:
         sm = status_re.search(stripped)
         if sm and stripped and not bracket_re.match(line) and len(stripped) > 10:
             status_word = sm.group(1)
-            label_text  = stripped[: stripped.rfind(status_word)].strip()
+            label_text = stripped[: stripped.rfind(status_word)].strip()
             key = label_text.lower()
             # Try to find which step this label belongs to
             if key in label_to_sid:
@@ -6387,14 +6538,22 @@ def action_pip_install() -> None:
 def action_run_tests() -> None:
     _h2("Test suite (pytest + coverage)")
     _run(
-        [str(VENV_PYTHON), "-m", "pytest",
-         "tests/", "--tb=short", "--cov=.", "--cov-report=term-missing", "-q"],
+        [
+            str(VENV_PYTHON),
+            "-m",
+            "pytest",
+            "tests/",
+            "--tb=short",
+            "--cov=.",
+            "--cov-report=term-missing",
+            "-q",
+        ],
         check=False,
     )
 
 
 def action_quality_gate(
-    all_wt: Optional[list[WorkplanTracking]] = None,
+    all_wt: list[WorkplanTracking] | None = None,
     auto_advance: bool = False,
 ) -> bool:
     """
@@ -6408,12 +6567,10 @@ def action_quality_gate(
     _h2("Quality gate: format -> lint -> type-check -> tests")
     bin_dir = VENV_PYTHON.parent
     gates = [
-        ([str(bin_dir / "black"), "--check", "."],          "Format check (black)"),
-        ([str(bin_dir / "ruff"),  "check", "."],             "Lint (ruff)"),
-        ([str(bin_dir / "mypy"),  ".",
-          "--ignore-missing-imports"],                        "Type check (mypy)"),
-        ([str(VENV_PYTHON), "-m", "pytest",
-          "tests/", "-q", "--tb=short"],                     "Tests (pytest)"),
+        ([str(bin_dir / "black"), "--check", "."], "Format check (black)"),
+        ([str(bin_dir / "ruff"), "check", "."], "Lint (ruff)"),
+        ([str(bin_dir / "mypy"), ".", "--ignore-missing-imports"], "Type check (mypy)"),
+        ([str(VENV_PYTHON), "-m", "pytest", "tests/", "-q", "--tb=short"], "Tests (pytest)"),
     ]
     all_ok = True
     for cmd, label in gates:
@@ -6434,12 +6591,10 @@ def action_quality_gate(
     if all_ok and all_wt is not None:
         active_wt = resolve_active_workplan(all_wt)
         if active_wt and active_wt.progress and active_wt.progress.progress_file.exists():
-            wp       = active_wt.progress
-            step_id  = _step_id_from_detail(wp.resume_detail)
+            wp = active_wt.progress
+            step_id = _step_id_from_detail(wp.resume_detail)
             if step_id == "S5":  # quality gate IS step S5
-                next_s = advance_progress_step(
-                    wp.progress_file, wp.active_milestone, "S5"
-                )
+                next_s = advance_progress_step(wp.progress_file, wp.active_milestone, "S5")
                 if next_s:
                     _ok(f"Progress: S5 DONE -> {next_s}")
             step_label = next((lbl for sid, lbl in STEP_LABELS if sid == step_id), step_id)
@@ -6450,8 +6605,10 @@ def action_quality_gate(
 
 def action_docker_up() -> None:
     _h2("Docker Compose up")
-    for p in (PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
-              PROJECT_ROOT / "docker-compose.yml"):
+    for p in (
+        PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
+        PROJECT_ROOT / "docker-compose.yml",
+    ):
         if p.exists():
             _run(["docker", "compose", "-f", str(p), "up", "-d"], check=False)
             return
@@ -6460,8 +6617,10 @@ def action_docker_up() -> None:
 
 def action_docker_down() -> None:
     _h2("Docker Compose down")
-    for p in (PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
-              PROJECT_ROOT / "docker-compose.yml"):
+    for p in (
+        PROJECT_ROOT / "infra" / "compose" / "docker-compose.yml",
+        PROJECT_ROOT / "docker-compose.yml",
+    ):
         if p.exists():
             _run(["docker", "compose", "-f", str(p), "down"], check=False)
             return
@@ -6525,16 +6684,16 @@ def action_show_lessons(all_wt: list[WorkplanTracking]) -> None:
 
 
 MILESTONE_LIST = [
-    ("M0",  "Bootstrap"),
-    ("M1",  "Docker Runtime"),
-    ("M2",  "DB Schema + Migrations + Audit Ledger"),
-    ("M3",  "Auth + RBAC"),
-    ("M4",  "Jobs + Queue Classes + Compute Policy"),
-    ("M5",  "Artifact Registry + Storage Abstraction"),
-    ("M6",  "Feed Registry + Versioned Config + Connectivity Tests"),
-    ("M7",  "Ingest Pipeline"),
-    ("M8",  "Verification + Gaps + Anomalies + Certification"),
-    ("M9",  "Symbol Lineage"),
+    ("M0", "Bootstrap"),
+    ("M1", "Docker Runtime"),
+    ("M2", "DB Schema + Migrations + Audit Ledger"),
+    ("M3", "Auth + RBAC"),
+    ("M4", "Jobs + Queue Classes + Compute Policy"),
+    ("M5", "Artifact Registry + Storage Abstraction"),
+    ("M6", "Feed Registry + Versioned Config + Connectivity Tests"),
+    ("M7", "Ingest Pipeline"),
+    ("M8", "Verification + Gaps + Anomalies + Certification"),
+    ("M9", "Symbol Lineage"),
     ("M10", "Parity Service"),
     ("M11", "Alerting + Observability Hardening"),
     ("M12", "Operator API Docs + Acceptance Pack"),
@@ -6618,14 +6777,14 @@ def action_bootstrap() -> None:
 
     # Discover workplan files from SPEC_DIR (and project root as fallback)
     found = [
-        p.stem for p in SPEC_DIR.rglob("*.md")
+        p.stem
+        for p in SPEC_DIR.rglob("*.md")
         if "workplan-tracking" not in str(p)
-           and ("workplan" in p.stem.lower() or "plan" in p.stem.lower())
+        and ("workplan" in p.stem.lower() or "plan" in p.stem.lower())
     ]
     if not found:
         found = [
-            p.stem for p in PROJECT_ROOT.rglob("*workplan*.md")
-            if "workplan-tracking" not in str(p)
+            p.stem for p in PROJECT_ROOT.rglob("*workplan*.md") if "workplan-tracking" not in str(p)
         ]
     names = found or ["FXLab_Phase_1_workplan_v3"]
 
@@ -6651,11 +6810,12 @@ def action_show_env() -> None:
     _h2("Environment configuration")
     _info(f".env file:         {ENV_FILE}  ({'found' if ENV_FILE.exists() else 'NOT FOUND'})")
     ok, msg = validate_api_key()
-    ((_ok if ok else _err))(f"ANTHROPIC_API_KEY: {msg}")
-    _info(f"ANTHROPIC_MODEL:   {os.environ.get('ANTHROPIC_MODEL', DEFAULT_MODEL)} "
-          f"{'(default)' if 'ANTHROPIC_MODEL' not in os.environ else '(from env)'}")
-    _info(f"VENV_PYTHON:       {VENV_PYTHON}  "
-          f"({'exists' if VENV_PYTHON.exists() else 'missing'})")
+    (_ok if ok else _err)(f"ANTHROPIC_API_KEY: {msg}")
+    _info(
+        f"ANTHROPIC_MODEL:   {os.environ.get('ANTHROPIC_MODEL', DEFAULT_MODEL)} "
+        f"{'(default)' if 'ANTHROPIC_MODEL' not in os.environ else '(from env)'}"
+    )
+    _info(f"VENV_PYTHON:       {VENV_PYTHON}  ({'exists' if VENV_PYTHON.exists() else 'missing'})")
 
 
 def action_open_shell() -> None:
@@ -6669,46 +6829,47 @@ def action_open_shell() -> None:
 # ---------------------------------------------------------------------------
 
 MENU_ITEMS: list[tuple[str, str]] = [
-    ("w",  "Workplan -- browse User Spec/ and select workplan + spec"),
-    ("d",  "Distil -- generate/refresh per-milestone context from spec [AI]"),
+    ("w", "Workplan -- browse User Spec/ and select workplan + spec"),
+    ("d", "Distil -- generate/refresh per-milestone context from spec [AI]"),
     ("dv", "Distil debug -- diagnose why sections show as 0"),
-    ("r",  "Resume -- continue from last saved position"),
-    ("a",  "Agentic build -- drive next milestone step with Claude [AI]"),
-    ("c",  "Claude brief -- AI session summary [AI]"),
-    ("p",  "Show full progress summary"),
-    ("i",  "Show all open issues"),
-    ("l",  "Show all lessons learned"),
-    ("b",  "Bootstrap / refresh tracking files"),
+    ("r", "Resume -- continue from last saved position"),
+    ("a", "Agentic build -- drive next milestone step with Claude [AI]"),
+    ("c", "Claude brief -- AI session summary [AI]"),
+    ("p", "Show full progress summary"),
+    ("i", "Show all open issues"),
+    ("l", "Show all lessons learned"),
+    ("b", "Bootstrap / refresh tracking files"),
     ("pi", "Pip install -- force-reinstall dev tools (runs automatically when missing)"),
     ("fx", "Fix progress -- repair corrupted progress file"),
     ("rw", "Rollback -- revert files from last [a] run"),
-    ("t",  "Run test suite"),
-    ("q",  "Run quality gate (format + lint + type + tests)"),
-    ("h",  "Handoff -- write session summary doc [AI]"),
+    ("t", "Run test suite"),
+    ("q", "Run quality gate (format + lint + type + tests)"),
+    ("h", "Handoff -- write session summary doc [AI]"),
     ("du", "Docker Compose up"),
     ("dd", "Docker Compose down"),
-    ("m",  "Run database migrations (Alembic)"),
-    ("e",  "Show environment / API key status"),
+    ("m", "Run database migrations (Alembic)"),
+    ("e", "Show environment / API key status"),
     ("sh", "Show venv activate command"),
-    ("x",  "Exit"),
+    ("x", "Exit"),
 ]
-
 
 
 # ---------------------------------------------------------------------------
 # Environment readiness  — checks all pre-conditions and drives the menu
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ReadinessCheck:
     """A single environment pre-condition with its fix action."""
-    key:     str            # short ID
-    label:   str            # what is being checked
-    ok:      bool           # is it satisfied?
-    detail:  str            # one-line status
-    fix_key: str            # menu key that fixes this, or ""
-    fix_hint: str           # human instruction if no menu key
-    blocking: bool = True   # if True, [a] is gated on this
+
+    key: str  # short ID
+    label: str  # what is being checked
+    ok: bool  # is it satisfied?
+    detail: str  # one-line status
+    fix_key: str  # menu key that fixes this, or ""
+    fix_hint: str  # human instruction if no menu key
+    blocking: bool = True  # if True, [a] is gated on this
 
 
 def run_readiness_checks(
@@ -6720,36 +6881,56 @@ def run_readiness_checks(
     Checks are ordered: fix them top-to-bottom.
     """
     checks: list[ReadinessCheck] = []
-    sel    = load_active_selection()
+    sel = load_active_selection()
     active = resolve_active_workplan(all_wt)
 
     # ── 1. Workplan selected ─────────────────────────────────────────────────
     if sel and sel.workplan_path and sel.workplan_path.exists():
-        checks.append(ReadinessCheck(
-            key="workplan", label="Workplan selected",
-            ok=True, detail=sel.workplan_path.name,
-            fix_key="", fix_hint="",
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="workplan",
+                label="Workplan selected",
+                ok=True,
+                detail=sel.workplan_path.name,
+                fix_key="",
+                fix_hint="",
+            )
+        )
     else:
-        checks.append(ReadinessCheck(
-            key="workplan", label="Workplan selected",
-            ok=False, detail="No workplan file chosen",
-            fix_key="w", fix_hint='Press [w] to browse User Spec/ and select a workplan',
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="workplan",
+                label="Workplan selected",
+                ok=False,
+                detail="No workplan file chosen",
+                fix_key="w",
+                fix_hint="Press [w] to browse User Spec/ and select a workplan",
+            )
+        )
 
     # ── 2. Tracking files exist ──────────────────────────────────────────────
     if active and active.progress:
-        checks.append(ReadinessCheck(
-            key="tracking", label="Tracking files exist",
-            ok=True, detail=f"{active.workplan_name}.progress found",
-            fix_key="", fix_hint="",
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="tracking",
+                label="Tracking files exist",
+                ok=True,
+                detail=f"{active.workplan_name}.progress found",
+                fix_key="",
+                fix_hint="",
+            )
+        )
     else:
-        checks.append(ReadinessCheck(
-            key="tracking", label="Tracking files exist",
-            ok=False, detail="No .progress file — run [b] to bootstrap",
-            fix_key="b", fix_hint='Press [b] to create tracking files',
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="tracking",
+                label="Tracking files exist",
+                ok=False,
+                detail="No .progress file — run [b] to bootstrap",
+                fix_key="b",
+                fix_hint="Press [b] to create tracking files",
+            )
+        )
 
     # ── 3. Context distilled ─────────────────────────────────────────────────
     if active:
@@ -6758,34 +6939,55 @@ def run_readiness_checks(
             sections = list(_DISTIL_SECTION_RE.finditer(dp.read_text()))
             n = len(sections)
             ok = n >= 13
-            checks.append(ReadinessCheck(
-                key="distil", label="Context distilled",
-                ok=ok,
-                detail=f"{n}/13 milestones distilled" if not ok else f"All 13 milestones distilled",
-                fix_key="d", fix_hint='Press [d] to generate per-milestone context',
-                blocking=False,  # can still run [a] without distil, just less context
-            ))
+            checks.append(
+                ReadinessCheck(
+                    key="distil",
+                    label="Context distilled",
+                    ok=ok,
+                    detail=f"{n}/13 milestones distilled"
+                    if not ok
+                    else "All 13 milestones distilled",
+                    fix_key="d",
+                    fix_hint="Press [d] to generate per-milestone context",
+                    blocking=False,  # can still run [a] without distil, just less context
+                )
+            )
         else:
-            checks.append(ReadinessCheck(
-                key="distil", label="Context distilled",
-                ok=False, detail="No distilled file — run [d] for token-efficient builds",
-                fix_key="d", fix_hint='Press [d] to distil spec into per-milestone context',
-                blocking=False,
-            ))
-    
+            checks.append(
+                ReadinessCheck(
+                    key="distil",
+                    label="Context distilled",
+                    ok=False,
+                    detail="No distilled file — run [d] for token-efficient builds",
+                    fix_key="d",
+                    fix_hint="Press [d] to distil spec into per-milestone context",
+                    blocking=False,
+                )
+            )
+
     # ── 4. API key ───────────────────────────────────────────────────────────
     if api_ok:
-        checks.append(ReadinessCheck(
-            key="api", label="Anthropic API key",
-            ok=True, detail="Key present and valid format",
-            fix_key="", fix_hint="",
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="api",
+                label="Anthropic API key",
+                ok=True,
+                detail="Key present and valid format",
+                fix_key="",
+                fix_hint="",
+            )
+        )
     else:
-        checks.append(ReadinessCheck(
-            key="api", label="Anthropic API key",
-            ok=False, detail="Missing or malformed — AI features disabled",
-            fix_key="e", fix_hint='Add ANTHROPIC_API_KEY=sk-ant-... to .env',
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="api",
+                label="Anthropic API key",
+                ok=False,
+                detail="Missing or malformed — AI features disabled",
+                fix_key="e",
+                fix_hint="Add ANTHROPIC_API_KEY=sk-ant-... to .env",
+            )
+        )
 
     # ── 5. Python dev tools — auto-install if missing ───────────────────────
     bin_dir = VENV_PYTHON.parent
@@ -6812,59 +7014,86 @@ def run_readiness_checks(
             pytest_ok = r.returncode == 0
 
     if not missing_bins and pytest_ok:
-        checks.append(ReadinessCheck(
-            key="tools", label="Dev tools installed",
-            ok=True, detail="pytest, black, ruff, mypy present",
-            fix_key="", fix_hint="",
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="tools",
+                label="Dev tools installed",
+                ok=True,
+                detail="pytest, black, ruff, mypy present",
+                fix_key="",
+                fix_hint="",
+            )
+        )
     else:
         # Install failed — surface for manual intervention
         still_missing = missing_bins or (["pytest"] if not pytest_ok else [])
-        checks.append(ReadinessCheck(
-            key="tools", label="Dev tools installed",
-            ok=False,
-            detail=f"Auto-install failed. Missing: {', '.join(still_missing)}",
-            fix_key="pi", fix_hint="Check network access and venv integrity",
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="tools",
+                label="Dev tools installed",
+                ok=False,
+                detail=f"Auto-install failed. Missing: {', '.join(still_missing)}",
+                fix_key="pi",
+                fix_hint="Check network access and venv integrity",
+            )
+        )
 
     # ── 6. Git initialised ───────────────────────────────────────────────────
     git_dir = PROJECT_ROOT / ".git"
     if git_dir.exists():
-        checks.append(ReadinessCheck(
-            key="git", label="Git repository",
-            ok=True, detail=".git directory found",
-            fix_key="", fix_hint="",
-            blocking=False,
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="git",
+                label="Git repository",
+                ok=True,
+                detail=".git directory found",
+                fix_key="",
+                fix_hint="",
+                blocking=False,
+            )
+        )
     else:
-        checks.append(ReadinessCheck(
-            key="git", label="Git repository",
-            ok=False, detail="Not a git repo — commits and diffs won't work",
-            fix_key="", fix_hint="Run: git init && git add -A && git commit -m 'chore: initial commit'",
-            blocking=False,
-        ))
+        checks.append(
+            ReadinessCheck(
+                key="git",
+                label="Git repository",
+                ok=False,
+                detail="Not a git repo — commits and diffs won't work",
+                fix_key="",
+                fix_hint="Run: git init && git add -A && git commit -m 'chore: initial commit'",
+                blocking=False,
+            )
+        )
 
     # ── 7. Open blocking issues ──────────────────────────────────────────────
     if active:
         blocking_issues = [
-            i for i in active.issues
-            if i.status.upper() in ("IDENTIFIED", "WORKING")
+            i for i in active.issues if i.status.upper() in ("IDENTIFIED", "WORKING")
         ]
         if blocking_issues:
-            checks.append(ReadinessCheck(
-                key="issues", label="Open issues",
-                ok=False,
-                detail=f"{len(blocking_issues)} open issue(s) — review before building",
-                fix_key="i", fix_hint="Press [i] to review open issues",
-                blocking=False,
-            ))
+            checks.append(
+                ReadinessCheck(
+                    key="issues",
+                    label="Open issues",
+                    ok=False,
+                    detail=f"{len(blocking_issues)} open issue(s) — review before building",
+                    fix_key="i",
+                    fix_hint="Press [i] to review open issues",
+                    blocking=False,
+                )
+            )
         else:
-            checks.append(ReadinessCheck(
-                key="issues", label="Open issues",
-                ok=True, detail="No open issues",
-                fix_key="", fix_hint="",
-                blocking=False,
-            ))
+            checks.append(
+                ReadinessCheck(
+                    key="issues",
+                    label="Open issues",
+                    ok=True,
+                    detail="No open issues",
+                    fix_key="",
+                    fix_hint="",
+                    blocking=False,
+                )
+            )
 
     return checks
 
@@ -6872,10 +7101,10 @@ def run_readiness_checks(
 def print_readiness_panel(checks: list[ReadinessCheck]) -> tuple[bool, bool]:
     """Show only failures. Passing state is a single quiet line."""
     blocking_ok = all(c.ok for c in checks if c.blocking)
-    any_warn    = any(not c.ok for c in checks if not c.blocking)
-    failures    = [c for c in checks if not c.ok and c.blocking]
-    warnings    = [c for c in checks if not c.ok and not c.blocking]
-    n_pass      = sum(1 for c in checks if c.ok)
+    any_warn = any(not c.ok for c in checks if not c.blocking)
+    failures = [c for c in checks if not c.ok and c.blocking]
+    warnings = [c for c in checks if not c.ok and not c.blocking]
+    n_pass = sum(1 for c in checks if c.ok)
 
     if failures:
         for ch in failures:
@@ -6896,7 +7125,7 @@ def print_readiness_panel(checks: list[ReadinessCheck]) -> tuple[bool, bool]:
 
 
 def print_menu(
-    resume: Optional[tuple[str, str, str]],
+    resume: tuple[str, str, str] | None,
     api_ok: bool,
     all_wt: list[WorkplanTracking],
 ) -> tuple[bool, list[ReadinessCheck]]:
@@ -6907,7 +7136,7 @@ def print_menu(
     _h1("FXLab Build Menu")
 
     # ── Readiness panel ───────────────────────────────────────────────────────
-    checks    = run_readiness_checks(api_ok, all_wt)
+    checks = run_readiness_checks(api_ok, all_wt)
     build_ok, _ = print_readiness_panel(checks)
 
     # ── Menu items ────────────────────────────────────────────────────────────
@@ -6925,12 +7154,16 @@ def print_menu(
             else:
                 # Dim and note which check to fix first
                 first_fail = next((c for c in checks if not c.ok and c.blocking), None)
-                block_note = f"  {C_RED}← fix [{first_fail.fix_key}] first{C_RESET}" if first_fail and first_fail.fix_key else ""
+                block_note = (
+                    f"  {C_RED}← fix [{first_fail.fix_key}] first{C_RESET}"
+                    if first_fail and first_fail.fix_key
+                    else ""
+                )
                 print(f"{prefix}  {C_DIM}{label}{C_RESET}{block_note}")
 
         elif key == "w":
             if sel:
-                wp_short   = sel.workplan_path.name if sel.workplan_path else sel.workplan_stem
+                wp_short = sel.workplan_path.name if sel.workplan_path else sel.workplan_stem
                 spec_short = sel.spec_path.name if sel.spec_path else "no spec"
                 hint = f"{wp_short} / {spec_short}"
             else:
@@ -6946,8 +7179,10 @@ def print_menu(
                 print(f"{prefix}  {label}  {C_DIM}(nothing in progress){C_RESET}")
 
         elif "[AI]" in label:
-            api_tag = f" {C_GREEN}[API OK]{C_RESET}" if api_ok else f" {C_RED}[API MISSING]{C_RESET}"
-            clean   = label.replace("[AI]", "").rstrip()
+            api_tag = (
+                f" {C_GREEN}[API OK]{C_RESET}" if api_ok else f" {C_RED}[API MISSING]{C_RESET}"
+            )
+            clean = label.replace("[AI]", "").rstrip()
             print(f"{prefix}  {clean}{api_tag}")
 
         else:
@@ -6959,7 +7194,7 @@ def print_menu(
 
 def handle_choice(
     choice: str,
-    resume: Optional[tuple[str, str, str]],
+    resume: tuple[str, str, str] | None,
     all_wt: list[WorkplanTracking],
     api_ok: bool,
     build_ok: bool = True,
@@ -7003,22 +7238,36 @@ def handle_choice(
     elif c == "c":
         if _need_api():
             action_ai_brief(all_wt)
-    elif c == "p":   action_show_progress(all_wt)
-    elif c == "i":   action_show_issues(all_wt)
-    elif c == "l":   action_show_lessons(all_wt)
-    elif c == "b":   action_bootstrap()
-    elif c == "pi":  action_pip_install()
-    elif c == "fx":  action_repair_progress(all_wt)
-    elif c == "rw":  action_rollback_last_run(all_wt)
-    elif c == "t":   action_run_tests()
-    elif c == "q":   action_quality_gate(all_wt=all_wt)
+    elif c == "p":
+        action_show_progress(all_wt)
+    elif c == "i":
+        action_show_issues(all_wt)
+    elif c == "l":
+        action_show_lessons(all_wt)
+    elif c == "b":
+        action_bootstrap()
+    elif c == "pi":
+        action_pip_install()
+    elif c == "fx":
+        action_repair_progress(all_wt)
+    elif c == "rw":
+        action_rollback_last_run(all_wt)
+    elif c == "t":
+        action_run_tests()
+    elif c == "q":
+        action_quality_gate(all_wt=all_wt)
     elif c == "h":
         action_handoff(all_wt, api_ok)
-    elif c == "du":  action_docker_up()
-    elif c == "dd":  action_docker_down()
-    elif c == "m":   action_run_migrations()
-    elif c == "e":   action_show_env()
-    elif c == "sh":  action_open_shell()
+    elif c == "du":
+        action_docker_up()
+    elif c == "dd":
+        action_docker_down()
+    elif c == "m":
+        action_run_migrations()
+    elif c == "e":
+        action_show_env()
+    elif c == "sh":
+        action_open_shell()
     elif c == "x":
         print(f"\n{C_DIM}Goodbye.{C_RESET}\n")
         return False
@@ -7041,25 +7290,28 @@ def _self_check() -> None:
     import ast as _ast
     from collections import Counter as _Counter
 
-    src  = Path(__file__).read_text(encoding="utf-8")
+    src = Path(__file__).read_text(encoding="utf-8")
     tree = _ast.parse(src)
 
     REQUIRED = {
-        "_targeted_implement":         (True,  15),
-        "_merge_conftest":             (True,   5),
-        "_validate_and_redirect":      (True,   5),
-        "_collect_failing_test_files": (True,   3),
-        "_extract_files":              (True,   3),
-        "advance_progress_step":       (True,   8),
-        "run_tests_capture":           (True,   5),
-        "_ensure_dev_tools":           (True,   5),
-        "_ensure_package_inits":       (False,  3),
-        "action_agentic_build":        (False, 20),
+        "_targeted_implement": (True, 15),
+        "_merge_conftest": (True, 5),
+        "_validate_and_redirect": (True, 5),
+        "_collect_failing_test_files": (True, 3),
+        "_extract_files": (True, 3),
+        "advance_progress_step": (True, 8),
+        "run_tests_capture": (True, 5),
+        "_ensure_dev_tools": (True, 5),
+        "_ensure_package_inits": (False, 3),
+        "action_agentic_build": (False, 20),
     }
     REQUIRED_CONSTS = [
-        "_CANONICAL_REDIRECTS", "_CANONICAL_PATHS",
-        "_CONFTEST_MERGE_DIRS", "DEV_PACKAGES",
-        "MILESTONE_LIST", "STEP_LABELS",
+        "_CANONICAL_REDIRECTS",
+        "_CANONICAL_PATHS",
+        "_CONFTEST_MERGE_DIRS",
+        "DEV_PACKAGES",
+        "MILESTONE_LIST",
+        "STEP_LABELS",
     ]
 
     errors = []
@@ -7067,7 +7319,8 @@ def _self_check() -> None:
 
     for fn, (must_return, min_s) in REQUIRED.items():
         if fn not in fn_nodes:
-            errors.append(f"{fn}() missing"); continue
+            errors.append(f"{fn}() missing")
+            continue
         node = fn_nodes[fn]
         if len(node.body) < min_s:
             errors.append(f"{fn}() too short ({len(node.body)} < {min_s})")
@@ -7075,7 +7328,10 @@ def _self_check() -> None:
             last = node.body[-1]
             ok = isinstance(last, _ast.Return)
             if not ok and isinstance(last, _ast.If):
-                def er(s): return bool(s) and isinstance(s[-1], _ast.Return)
+
+                def er(s):
+                    return bool(s) and isinstance(s[-1], _ast.Return)
+
                 ok = er(last.body) and er(last.orelse)
             if not ok:
                 errors.append(f"{fn}() missing return (ends {type(last).__name__} L{last.lineno})")
@@ -7100,10 +7356,13 @@ def _self_check() -> None:
         if c not in top_consts:
             errors.append(f"module constant {c} missing")
 
-    dupes = [k for k, v in _Counter(
-        n.name for n in _ast.walk(tree)
-        if isinstance(n, _ast.FunctionDef) and n.col_offset == 0
-    ).items() if v > 1]
+    dupes = [
+        k
+        for k, v in _Counter(
+            n.name for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef) and n.col_offset == 0
+        ).items()
+        if v > 1
+    ]
     if dupes:
         errors.append(f"duplicate functions: {dupes}")
 
@@ -7120,10 +7379,12 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--no-brief", action="store_true",
-                        help="Skip the AI session brief at startup.")
-    parser.add_argument("--run", metavar="CHOICE",
-                        help="Run one menu action non-interactively (e.g. --run t).")
+    parser.add_argument(
+        "--no-brief", action="store_true", help="Skip the AI session brief at startup."
+    )
+    parser.add_argument(
+        "--run", metavar="CHOICE", help="Run one menu action non-interactively (e.g. --run t)."
+    )
     args = parser.parse_args()
 
     # Verify own structural integrity before doing anything

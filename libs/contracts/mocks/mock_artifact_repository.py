@@ -27,6 +27,8 @@ Example:
 
 from __future__ import annotations
 
+import builtins
+
 from libs.contracts.artifact import Artifact, ArtifactQuery, ArtifactQueryResponse
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.artifact_repository import ArtifactRepositoryInterface
@@ -141,7 +143,7 @@ class MockArtifactRepository(ArtifactRepositoryInterface):
     # Introspection helpers (test-only, not part of the interface)
     # ------------------------------------------------------------------
 
-    def all(self) -> list[Artifact]:
+    def all(self) -> builtins.list[Artifact]:
         """
         Return all artifacts in the store.
 

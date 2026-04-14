@@ -42,12 +42,16 @@ from datetime import datetime, timezone
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
-from libs.contracts.audit_explorer import AuditEventRecord, AuditExplorerResponse
+from libs.contracts.audit_explorer import AuditEventRecord
+from libs.contracts.compact import ViewMode
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.audit_explorer_repository import (
     AuditExplorerRepositoryInterface,
 )
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
 
 logger = structlog.get_logger(__name__)
 
@@ -59,29 +63,23 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-def get_audit_explorer_repository() -> AuditExplorerRepositoryInterface:
+def get_audit_explorer_repository(
+    db: Session = Depends(get_db),
+) -> AuditExplorerRepositoryInterface:
     """
     DI factory for AuditExplorerRepositoryInterface.
 
-    Returns a MockAuditExplorerRepository bootstrap stub.  The real SQL-backed
-    implementation will be wired in the lifespan DI container (ISS-021).
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
 
     Returns:
-        AuditExplorerRepositoryInterface implementation.
+        AuditExplorerRepositoryInterface implementation (SQL-backed).
     """
-    import os
+    from services.api.repositories.sql_audit_explorer_repository import SqlAuditExplorerRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_audit_explorer_repository import SqlAuditExplorerRepository
-
-        db = next(get_db())
-        return SqlAuditExplorerRepository(db=db)
-
-    from libs.contracts.mocks.mock_audit_explorer_repository import (  # pragma: no cover
-        MockAuditExplorerRepository,  # pragma: no cover
-    )
-    return MockAuditExplorerRepository()  # pragma: no cover
+    return SqlAuditExplorerRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -116,9 +114,37 @@ def _serialize_audit_record(record: AuditEventRecord) -> dict:
     }
 
 
+def _serialize_audit_record_compact(record: AuditEventRecord) -> dict:
+    """
+    Serialize a single AuditEventRecord to compact form (mobile-optimized).
+
+    Omits correlation_id and event_metadata to reduce bandwidth.
+
+    Args:
+        record: AuditEventRecord domain object.
+
+    Returns:
+        Compact JSON-serializable dict with essential fields only.
+
+    Example:
+        d = _serialize_audit_record_compact(record)
+        # Smaller payload than full serialization
+    """
+    return {
+        "id": record.id,
+        "actor": record.actor,
+        "operation": record.action,
+        "object_type": record.object_type,
+        "object_id": record.object_id,
+        "outcome": "success",  # Inferred from lack of error_message
+        "created_at": record.created_at.isoformat(),
+    }
+
+
 def _serialize_audit_list(
     records: list[AuditEventRecord],
     generated_at: datetime,
+    view_mode: ViewMode = ViewMode.FULL,
 ) -> dict:
     """
     Serialize an audit event list response to a JSON-safe dict.
@@ -126,18 +152,26 @@ def _serialize_audit_list(
     Args:
         records:      List of AuditEventRecord objects.
         generated_at: Timestamp when the response was assembled.
+        view_mode:    Response detail level (FULL or COMPACT).
 
     Returns:
         JSON-serializable dict matching the AuditExplorerResponse shape:
         {events, next_cursor, total_count, generated_at}.
+        - If view_mode=FULL: includes full event metadata.
+        - If view_mode=COMPACT: omits correlation_id and event_metadata.
 
     Note:
         next_cursor is always "" in this implementation because the mock repository
         does not implement cursor pagination.  The real SQL repository will provide
         meaningful cursors once ISS-021 is resolved.
     """
+    if view_mode == ViewMode.COMPACT:
+        serializer = _serialize_audit_record_compact
+    else:
+        serializer = _serialize_audit_record
+
     return {
-        "events": [_serialize_audit_record(r) for r in records],
+        "events": [serializer(r) for r in records],
         "next_cursor": "",
         "total_count": len(records),
         "generated_at": generated_at.isoformat(),
@@ -152,24 +186,25 @@ def _serialize_audit_list(
 @router.get("")
 def list_audit_events(
     actor: str = Query(default="", description="Filter by actor identity string"),
-    action_type: str = Query(
-        default="", description="Filter by action verb prefix, e.g. 'run'"
-    ),
-    target_type: str = Query(
-        default="", description="Filter by object_type, e.g. 'run'"
-    ),
+    action_type: str = Query(default="", description="Filter by action verb prefix, e.g. 'run'"),
+    target_type: str = Query(default="", description="Filter by object_type, e.g. 'run'"),
     target_id: str = Query(default="", description="Filter by object_id ULID"),
     cursor: str = Query(default="", description="Opaque cursor for next-page retrieval"),
     limit: int = Query(default=50, ge=1, le=500, description="Maximum events to return"),
+    view: ViewMode = Query(ViewMode.FULL, description="Response detail level: 'full' or 'compact'"),
     x_correlation_id: str = Header(default="no-corr"),
     repo: AuditExplorerRepositoryInterface = Depends(get_audit_explorer_repository),
+    user: AuthenticatedUser = Depends(require_scope("audit:read")),
 ) -> JSONResponse:
     """
-    Return a filtered list of audit events.
+    Return a filtered list of audit events with optional compact view.
 
     Supports optional query-parameter filtering on actor, action_type (prefix),
     target_type, and target_id.  Results are capped by limit.  Cursor pagination
     is accepted but not applied in the mock implementation.
+
+    Supports compact view for mobile clients: ?view=compact returns lightweight
+    representations omitting correlation_id and detailed event metadata.
 
     Args:
         actor:            Filter by actor identity string.  Empty = no filter.
@@ -178,14 +213,17 @@ def list_audit_events(
         target_id:        Filter by object_id.  Empty = no filter.
         cursor:           Opaque pagination cursor.  Ignored in mock.
         limit:            Maximum number of events (LL-010: cast to int before use).
+        view:             Response detail level ('full' for complete events, 'compact' for mobile).
         x_correlation_id: Request-scoped tracing ID from HTTP header.
         repo:             Injected AuditExplorerRepositoryInterface.
 
     Returns:
         JSONResponse 200 with shape: {events, next_cursor, total_count, generated_at}.
+        - If view=full: includes full event metadata and correlation_id.
+        - If view=compact: omits correlation_id and event_metadata for smaller payload.
 
     Example:
-        GET /audit?actor=analyst@fxlab.io&limit=10
+        GET /audit?actor=analyst@fxlab.io&limit=10&view=compact
         → {"events": [...], "next_cursor": "", "total_count": 2, "generated_at": "..."}
     """
     corr = x_correlation_id or "no-corr"
@@ -199,6 +237,7 @@ def list_audit_events(
         target_type_filter=target_type,
         target_id_filter=target_id,
         limit=limit,
+        view_mode=view.value,
     )
     records = repo.list(
         actor=actor,
@@ -217,32 +256,41 @@ def list_audit_events(
         component="audit_router",
         result="success",
         event_count=len(records),
+        view_mode=view.value,
     )
-    return JSONResponse(content=_serialize_audit_list(records, generated_at))
+    return JSONResponse(content=_serialize_audit_list(records, generated_at, view_mode=view))
 
 
 @router.get("/{audit_event_id}")
 def get_audit_event(
     audit_event_id: str,
+    view: ViewMode = Query(ViewMode.FULL, description="Response detail level: 'full' or 'compact'"),
     x_correlation_id: str = Header(default="no-corr"),
     repo: AuditExplorerRepositoryInterface = Depends(get_audit_explorer_repository),
+    user: AuthenticatedUser = Depends(require_scope("audit:read")),
 ) -> JSONResponse:
     """
-    Return a single audit event by ULID.
+    Return a single audit event by ULID with optional compact view.
+
+    Supports compact view for mobile clients: ?view=compact returns lightweight
+    representation omitting correlation_id and detailed event metadata.
 
     Args:
         audit_event_id:   ULID of the audit event to retrieve.
+        view:             Response detail level ('full' for complete event, 'compact' for mobile).
         x_correlation_id: Request-scoped tracing ID from HTTP header.
         repo:             Injected AuditExplorerRepositoryInterface.
 
     Returns:
         JSONResponse 200 with a single AuditEventRecord serialized as JSON.
+        - If view=full: includes full event metadata and correlation_id.
+        - If view=compact: omits correlation_id and event_metadata for smaller payload.
 
     Raises:
         HTTPException 404: If no audit event exists with the given ID.
 
     Example:
-        GET /audit/01HQAUDIT0AAAAAAAAAAAAAAAA1
+        GET /audit/01HQAUDIT0AAAAAAAAAAAAAAAA1?view=compact
         → {"id": "01HQAUDIT0AAAAAAAAAAAAAAAA1", "actor": "...", ...}
     """
     corr = x_correlation_id or "no-corr"
@@ -252,10 +300,11 @@ def get_audit_event(
         correlation_id=corr,
         component="audit_router",
         audit_event_id=audit_event_id,
+        view_mode=view.value,
     )
     try:
         record = repo.find_by_id(audit_event_id, correlation_id=corr)
-    except NotFoundError as exc:
+    except NotFoundError:
         logger.info(
             "audit.detail_not_found",
             operation="get_audit_event",
@@ -264,7 +313,7 @@ def get_audit_event(
             audit_event_id=audit_event_id,
             result="not_found",
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Audit event not found.") from None
     logger.info(
         "audit.detail_completed",
         operation="get_audit_event",
@@ -272,5 +321,12 @@ def get_audit_event(
         component="audit_router",
         audit_event_id=audit_event_id,
         result="success",
+        view_mode=view.value,
     )
-    return JSONResponse(content=_serialize_audit_record(record))
+
+    if view == ViewMode.COMPACT:
+        content = _serialize_audit_record_compact(record)
+    else:
+        content = _serialize_audit_record(record)
+
+    return JSONResponse(content=content)

@@ -5,27 +5,27 @@ Pydantic v2 schemas for queue monitoring.
 """
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class QueueSnapshotResponse(BaseModel):
     """
     Response schema for queue depth and contention snapshot.
-    
+
     Phase 1 contract. Phase 3 consumes for queue health charts.
     """
+
     id: str = Field(..., description="ULID")
     queue_name: str
     timestamp: datetime
     depth: int = Field(..., ge=0)
     contention_score: float = Field(..., ge=0.0, le=100.0)
-    metadata: Dict[str, Any]
+    metadata: dict[str, Any]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class QueueContentionResponse(BaseModel):

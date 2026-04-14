@@ -2,8 +2,9 @@
 Optimization domain contracts.
 Defines data models for optimization runs, results, and parameter configurations.
 """
+
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -13,6 +14,7 @@ from libs.contracts.enums import OptimizationStatus
 
 class OptimizationParameters(FXLabBaseModel):
     """Parameters controlling the optimization process."""
+
     population_size: int = Field(ge=1)
     generations: int = Field(ge=1)
     mutation_rate: float = Field(ge=0.0, le=1.0)
@@ -23,6 +25,7 @@ class OptimizationParameters(FXLabBaseModel):
 
 class OptimizationMetrics(FXLabBaseModel):
     """Metrics from an optimization run."""
+
     best_fitness: float
     generation_count: int
     convergence_rate: float | None = None
@@ -32,6 +35,7 @@ class OptimizationMetrics(FXLabBaseModel):
 
 class OptimizationResult(FXLabBaseModel):
     """A single optimization result candidate."""
+
     candidate_id: str
     fitness_score: float
     parameters: dict[str, Any]
@@ -41,6 +45,7 @@ class OptimizationResult(FXLabBaseModel):
 
 class OptimizationRunRequest(FXLabBaseModel):
     """Request to start a new optimization run."""
+
     strategy_id: str
     target_environment: Literal["paper", "live"]
     parameters: OptimizationParameters
@@ -49,6 +54,7 @@ class OptimizationRunRequest(FXLabBaseModel):
 
 class OptimizationRunResponse(FXLabBaseModel):
     """Response after initiating an optimization run."""
+
     run_id: str
     strategy_id: str
     status: OptimizationStatus
@@ -58,6 +64,7 @@ class OptimizationRunResponse(FXLabBaseModel):
 
 class OptimizationResultsResponse(FXLabBaseModel):
     """Complete results from an optimization run."""
+
     run_id: str
     strategy_id: str
     status: OptimizationStatus
@@ -71,6 +78,7 @@ class OptimizationResultsResponse(FXLabBaseModel):
 
 class OptimizationStatusResponse(FXLabBaseModel):
     """Current status of an optimization run."""
+
     run_id: str
     status: OptimizationStatus
     progress_percent: float = Field(ge=0.0, le=100.0)

@@ -42,9 +42,7 @@ class SymbolLineageRepositoryInterface(ABC):
     """
 
     @abstractmethod
-    def find_by_symbol(
-        self, symbol: str, correlation_id: str
-    ) -> SymbolLineageResponse:
+    def find_by_symbol(self, symbol: str, correlation_id: str) -> SymbolLineageResponse:
         """
         Return the lineage record for a given instrument symbol.
 

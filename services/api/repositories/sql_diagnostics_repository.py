@@ -29,7 +29,6 @@ Example:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 
 import structlog
 from sqlalchemy import func, select
@@ -144,9 +143,8 @@ class SqlDiagnosticsRepository(DiagnosticsRepositoryInterface):
             from libs.contracts.models import FeedHealthEvent as FeedHealthEventModel
 
             # Count distinct feeds with status != "healthy"
-            stmt = (
-                select(func.count(func.distinct(FeedHealthEventModel.feed_id)))
-                .where(FeedHealthEventModel.status != "healthy")
+            stmt = select(func.count(func.distinct(FeedHealthEventModel.feed_id))).where(
+                FeedHealthEventModel.status != "healthy"
             )
             count = self.db.execute(stmt).scalar() or 0
             return count

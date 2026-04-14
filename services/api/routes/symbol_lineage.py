@@ -42,12 +42,15 @@ from __future__ import annotations
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.symbol_lineage_repository import (
     SymbolLineageRepositoryInterface,
 )
 from libs.contracts.symbol_lineage import SymbolFeedRef, SymbolLineageResponse, SymbolRunRef
+from services.api.auth import AuthenticatedUser, get_current_user
+from services.api.db import get_db
 
 logger = structlog.get_logger(__name__)
 
@@ -59,29 +62,23 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-def get_symbol_lineage_repository() -> SymbolLineageRepositoryInterface:
+def get_symbol_lineage_repository(
+    db: Session = Depends(get_db),
+) -> SymbolLineageRepositoryInterface:
     """
     DI factory for SymbolLineageRepositoryInterface.
 
-    Returns a MockSymbolLineageRepository bootstrap stub.  The real SQL-backed
-    implementation will be wired in the lifespan DI container (ISS-022).
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
 
     Returns:
-        SymbolLineageRepositoryInterface implementation.
+        SymbolLineageRepositoryInterface implementation (SQL-backed).
     """
-    import os
+    from services.api.repositories.sql_symbol_lineage_repository import SqlSymbolLineageRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_symbol_lineage_repository import SqlSymbolLineageRepository
-
-        db = next(get_db())
-        return SqlSymbolLineageRepository(db=db)
-
-    from libs.contracts.mocks.mock_symbol_lineage_repository import (  # pragma: no cover
-        MockSymbolLineageRepository,  # pragma: no cover
-    )
-    return MockSymbolLineageRepository()  # pragma: no cover
+    return SqlSymbolLineageRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +161,7 @@ def get_symbol_lineage(
     symbol: str,
     x_correlation_id: str = Header(default="no-corr"),
     repo: SymbolLineageRepositoryInterface = Depends(get_symbol_lineage_repository),
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> JSONResponse:
     """
     Return the data provenance record for the given instrument symbol.
@@ -195,7 +193,7 @@ def get_symbol_lineage(
     )
     try:
         lineage = repo.find_by_symbol(symbol, correlation_id=corr)
-    except NotFoundError as exc:
+    except NotFoundError:
         logger.info(
             "symbol_lineage.not_found",
             operation="get_symbol_lineage",
@@ -204,7 +202,7 @@ def get_symbol_lineage(
             symbol=symbol,
             result="not_found",
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Symbol lineage not found.") from None
     logger.info(
         "symbol_lineage.completed",
         operation="get_symbol_lineage",

@@ -22,39 +22,67 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Literal
+from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, Path
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
+from services.api import metrics as metrics_module
 from services.api.middleware.body_size import BodySizeLimitMiddleware
+from services.api.middleware.client_source import ClientSourceMiddleware
 from services.api.middleware.correlation import CorrelationIDMiddleware
+from services.api.middleware.drain import DrainMiddleware
+from services.api.middleware.idempotency import IdempotencyMiddleware
 from services.api.middleware.rate_limit import RateLimitMiddleware
-
-from libs.contracts.base import APIResponse
+from services.api.middleware.security_headers import SecurityHeadersMiddleware
 from services.api.routes import (
+    admin,
     approvals,
     artifacts,
     audit,
+    audit_export,
+    auth,
     charts,
+    compliance,
     data_certification,
+    data_quality,
+    deployments,
+    drills,
+    execution_analysis,
+    execution_loop,
     exports,
     feed_health,
     feeds,
     governance,
     health,
+    indicators,
+    kill_switch,
+    live,
+    market_data,
+    mobile_dashboard,
     observability,
     overrides,
+    paper,
     parity,
+    pnl,
+    position_sizing,
     promotions,
     queues,
     readiness,
+    reconciliation,
     research,
+    risk,
+    risk_alert,
+    risk_analytics,
     runs,
+    shadow,
     strategies,
+    strategy_comparison,
+    stress_test,
     symbol_lineage,
+    ws_market_data,
+    ws_positions,
 )
 
 logger = structlog.get_logger(__name__)
@@ -113,18 +141,335 @@ def _check_pydantic_core() -> None:
         )
 
 
+#: Sentinel file path baked into production Docker images.
+#: When this file exists and ENVIRONMENT=test, startup is blocked to prevent
+#: accidental TEST_TOKEN bypass in production deployments.
+_PRODUCTION_SENTINEL = "/app/.production-build"
+
+
+def _validate_startup_secrets() -> None:
+    """
+    Validate that all required secrets are configured at startup.
+
+    Performs eager validation so misconfiguration is caught immediately
+    rather than surfacing as a 500/502 on the first request.  In test
+    environments, most checks are skipped (mocks provide secrets), but the
+    production sentinel guard always runs.
+
+    Raises:
+        RuntimeError: If a required secret is missing or invalid in
+            non-test environments, OR if ENVIRONMENT=test is set in a
+            production build (sentinel file exists).
+    """
+    env = os.environ.get("ENVIRONMENT", "")
+
+    # --- Production sentinel guard (AUTH-2) -----------------------------------
+    # Block ENVIRONMENT=test in production Docker images to prevent accidental
+    # TEST_TOKEN bypass and deterministic secret fallback.
+    if env == "test":
+        if os.path.exists(_PRODUCTION_SENTINEL):
+            raise RuntimeError(
+                "CRITICAL: ENVIRONMENT=test is not permitted in production builds. "
+                "This Docker image was built for production use. The TEST_TOKEN "
+                "bypass and deterministic JWT secret are disabled in production. "
+                "Remove ENVIRONMENT=test from your environment configuration."
+            )
+        logger.warning(
+            "startup.test_mode_active",
+            warning="TEST_TOKEN bypass and deterministic JWT secret are active. "
+            "This is NOT safe for production use.",
+            component="startup",
+        )
+        return  # Tests inject their own secrets via mocks
+
+    # --- SSL mode enforcement for PostgreSQL (INFRA-2 / H1.7) ----------------
+    database_url = os.environ.get("DATABASE_URL", "")
+    if database_url.startswith("postgresql") and "sslmode=" not in database_url:
+        if env == "production":
+            raise RuntimeError(
+                "DATABASE_URL does not include sslmode parameter. "
+                "Production PostgreSQL connections MUST use sslmode=require or "
+                "sslmode=verify-full for encrypted connections. "
+                "Without SSL, credentials and trading data travel in plaintext. "
+                "Add ?sslmode=require to your DATABASE_URL."
+            )
+        logger.warning(
+            "startup.db_ssl_not_configured",
+            warning="DATABASE_URL does not include sslmode parameter. "
+            "Production deployments should use sslmode=require or "
+            "sslmode=verify-full for encrypted connections.",
+            component="startup",
+        )
+
+    from services.api.infrastructure.secret_provider_factory import get_provider
+
+    provider = get_provider()
+
+    # -- JWT_SECRET_KEY: must be present and >= 32 bytes -----------------------
+    try:
+        jwt_key = provider.get_secret("JWT_SECRET_KEY")
+        if len(jwt_key.encode("utf-8")) < 32:
+            raise RuntimeError(
+                f"JWT_SECRET_KEY must be at least 32 bytes for HS256 security. "
+                f"Current length: {len(jwt_key.encode('utf-8'))} bytes. "
+                'Generate one with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        logger.info(
+            "startup.secret_validated",
+            key="JWT_SECRET_KEY",
+            key_length=len(jwt_key.encode("utf-8")),
+            component="startup",
+        )
+    except KeyError as exc:
+        raise RuntimeError(
+            "JWT_SECRET_KEY is not set. This is required in non-test environments. "
+            'Generate one with: python3 -c "import secrets; print(secrets.token_urlsafe(48))"'
+        ) from exc
+
+    # -- DATABASE_URL: must be present -----------------------------------------
+    try:
+        db_url = provider.get_secret("DATABASE_URL")
+        if not db_url:
+            raise RuntimeError("DATABASE_URL is empty.")
+        logger.info(
+            "startup.secret_validated",
+            key="DATABASE_URL",
+            # Log URL prefix only — never log credentials
+            url_prefix=db_url.split("://")[0] + "://..." if "://" in db_url else "unknown",
+            component="startup",
+        )
+    except KeyError:
+        logger.warning(
+            "startup.secret_missing",
+            key="DATABASE_URL",
+            detail="Not set — falling back to SQLite",
+            component="startup",
+        )
+
+    # -- KEYCLOAK_ADMIN_CLIENT_SECRET: required only when Keycloak is enabled --
+    keycloak_url = os.environ.get("KEYCLOAK_URL", "")
+    if keycloak_url:
+        try:
+            provider.get_secret("KEYCLOAK_ADMIN_CLIENT_SECRET")
+            logger.info(
+                "startup.secret_validated",
+                key="KEYCLOAK_ADMIN_CLIENT_SECRET",
+                component="startup",
+            )
+        except KeyError as exc:
+            raise RuntimeError(
+                "KEYCLOAK_ADMIN_CLIENT_SECRET is required when KEYCLOAK_URL is set. "
+                "Retrieve it from the Keycloak admin console under the fxlab-api client."
+            ) from exc
+
+
+# Module-level drain middleware instance — shared between lifespan and
+# middleware stack so the shutdown sequence can signal the middleware to
+# reject new requests while in-flight ones complete.
+_drain_middleware = DrainMiddleware()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Application lifespan manager.
+    Application lifespan manager with graceful shutdown (M11).
 
-    Logs startup and shutdown events so infrastructure can monitor the API
-    process lifecycle. Also runs critical dependency checks on startup.
+    Startup sequence:
+    1. Check pydantic-core compiled extension availability.
+    2. Validate startup secrets (JWT, DB, Keycloak).
+    3. Verify Redis health (in production with redis rate limiter).
+    4. Auto-create SQLite tables for dev/test (Alembic handles production).
+    5. Initialize artifact storage backend (MinIO or local filesystem).
+    6. Run startup reconciliation for registered broker adapters (if any).
+    7. Log startup event.
+
+    Shutdown sequence (via GracefulLifecycleManager):
+    1. Stop accepting new requests (drain middleware → 503).
+    2. Wait for in-flight requests to drain (configurable timeout).
+    3. Reconcile each active deployment against broker state.
+    4. Deregister all broker adapters (disconnect from brokers).
+    5. Dispose database connection pool.
+    6. Log shutdown summary with timing and counts.
+
+    On shutdown, disposes all pooled database connections to ensure
+    a clean closure of the connection pool. SQLite in-memory databases
+    are NOT disposed to preserve test data across TestClient instances.
     """
+    from services.api.db import Base, engine
+    from services.api.infrastructure.broker_registry import BrokerAdapterRegistry
+    from services.api.infrastructure.lifecycle_manager import GracefulLifecycleManager
+    from services.api.infrastructure.redis_health import verify_redis_connection
+
     _check_pydantic_core()
+    _validate_startup_secrets()
+
+    # Verify Redis health in production if rate limiting is Redis-backed.
+    # This ensures the application fails fast if critical infrastructure
+    # is unavailable, rather than degrading silently to in-memory fallback.
+    environment = os.environ.get("ENVIRONMENT", "").lower()
+    rate_limit_backend = os.environ.get("RATE_LIMIT_BACKEND", "memory").lower()
+
+    if environment == "production" and rate_limit_backend == "redis":
+        redis_url = os.environ.get("REDIS_URL", "")
+        if not redis_url:
+            raise RuntimeError(
+                "REDIS_URL is required in production when RATE_LIMIT_BACKEND=redis. "
+                "Set REDIS_URL to your Redis cluster endpoint "
+                "(e.g. redis://redis:6379/0)."
+            )
+        try:
+            verify_redis_connection(redis_url, timeout_seconds=5.0)
+            logger.info(
+                "redis.health_check_passed",
+                component="startup",
+            )
+        except Exception as exc:
+            logger.critical(
+                "redis.health_check_failed",
+                error=str(exc),
+                component="startup",
+                detail="Redis is required in production for rate limiting. "
+                "Startup is blocked. Ensure Redis is available and configured.",
+            )
+            raise
+    elif rate_limit_backend == "redis":
+        # Non-production: log warning if Redis health check fails, but allow startup
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        try:
+            verify_redis_connection(redis_url, timeout_seconds=5.0)
+            logger.info(
+                "redis.health_check_passed",
+                component="startup",
+            )
+        except Exception as exc:
+            logger.warning(
+                "redis.health_check_failed",
+                error=str(exc),
+                component="startup",
+                detail="Redis is unavailable. Rate limiting will fall back to in-memory. "
+                "This is acceptable for development but not for production.",
+            )
+
+    # Auto-create tables when backed by SQLite (dev / test).
+    # Production uses Alembic migrations against PostgreSQL.
+    db_url = str(engine.url)
+    if db_url.startswith("sqlite"):
+        Base.metadata.create_all(engine)
+        logger.info(
+            "db.tables_created",
+            component="startup",
+            detail="SQLite backend — auto-created tables from ORM metadata.",
+        )
+
+    # Initialize artifact storage backend (MinIO or local filesystem).
+    # In production with ARTIFACT_STORAGE_BACKEND=minio, this creates the
+    # required S3 buckets.  In dev/test with local backend, this creates the
+    # root directory.  Failures here are non-fatal: the application starts
+    # but artifact upload/download routes will return 503 until storage is
+    # available.  This is intentional — the API should serve non-artifact
+    # requests even when the storage backend is temporarily unreachable.
+    try:
+        from services.api.routes.artifacts import get_artifact_storage
+
+        artifact_storage = get_artifact_storage()
+        artifact_storage.initialize(correlation_id="startup")
+        app.state.artifact_storage = artifact_storage
+        logger.info(
+            "artifact_storage.initialized",
+            backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
+            component="startup",
+        )
+    except Exception as exc:
+        logger.warning(
+            "artifact_storage.initialization_failed",
+            error=str(exc),
+            backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
+            component="startup",
+            detail="Artifact storage unavailable — upload/download routes may fail.",
+        )
+        app.state.artifact_storage = None
+
+    # Build the lifecycle manager for coordinated shutdown.
+    # The broker registry is instantiated here — in production, adapters
+    # are registered by the deployment service during normal operation.
+    # The drain timeout is configurable via DRAIN_TIMEOUT_S env var.
+    broker_registry = BrokerAdapterRegistry()
+    drain_timeout_s = float(os.environ.get("DRAIN_TIMEOUT_S", "30"))
+
+    lifecycle_manager = GracefulLifecycleManager(
+        drain=_drain_middleware,
+        broker_registry=broker_registry,
+        engine=engine,
+        drain_timeout_s=drain_timeout_s,
+    )
+
+    # Store references on app.state so route handlers and tests
+    # can access the registry and lifecycle manager if needed.
+    app.state.broker_registry = broker_registry
+    app.state.lifecycle_manager = lifecycle_manager
+    app.state.drain = _drain_middleware
+
+    # Run startup reconciliation for any pre-registered adapters.
+    lifecycle_manager.startup_reconciliation()
+
+    # Run orphaned order recovery for all active live deployments.
+    # This detects orders that were submitted to brokers but not recorded
+    # internally due to crashes after submission but before acknowledgment.
+    try:
+        from services.api.db import SessionLocal
+        from services.api.services.orphaned_order_recovery_service import (
+            OrphanedOrderRecoveryService,
+        )
+
+        # Instantiate repositories for orphan recovery
+        db_session = SessionLocal()
+        try:
+            from services.api.infrastructure.sql_repositories import (
+                SqlDeploymentRepository,
+                SqlExecutionEventRepository,
+                SqlOrderRepository,
+            )
+
+            deployment_repo = SqlDeploymentRepository(db_session)
+            order_repo = SqlOrderRepository(db_session)
+            event_repo = SqlExecutionEventRepository(db_session)
+
+            recovery_service = OrphanedOrderRecoveryService(
+                deployment_repo=deployment_repo,
+                order_repo=order_repo,
+                execution_event_repo=event_repo,
+                broker_registry=broker_registry,
+            )
+
+            # Run recovery for all active live deployments
+            reports = recovery_service.recover_all_deployments(
+                correlation_id="startup-orphan-recovery"
+            )
+
+            logger.info(
+                "orphan_recovery.startup_completed",
+                deployments_recovered=len(reports),
+                total_recovered=sum(r.recovered_count for r in reports),
+                total_failed=sum(r.failed_count for r in reports),
+                component="startup",
+            )
+        finally:
+            db_session.close()
+    except Exception as exc:
+        logger.warning(
+            "orphan_recovery.startup_failed",
+            error=str(exc),
+            component="startup",
+            exc_info=True,
+            detail="Orphaned order recovery failed at startup. Continuing without recovery.",
+        )
+
     logger.info("api.startup", version="0.1.0")
     yield
-    logger.info("api.shutdown")
+
+    # Graceful shutdown: drain → reconcile → deregister → dispose.
+    lifecycle_manager.shutdown()
+    logger.info("api.shutdown", component="shutdown")
 
 
 # ---------------------------------------------------------------------------
@@ -142,25 +487,81 @@ app = FastAPI(
 # Register routers
 # ---------------------------------------------------------------------------
 
+app.include_router(health.router)  # Health probe — unauthenticated, must be first
+app.include_router(mobile_dashboard.router)  # BE-01: Mobile Dashboard Summary Endpoint
+app.include_router(auth.router)  # M14-T8: OIDC auth (discovery, token, revoke, JWKS)
 app.include_router(runs.router)
 app.include_router(readiness.router)
-app.include_router(exports.router)          # M13-T4: Export stubs (zip bundles in M31)
-app.include_router(research.router)         # M13-T4: Research stubs (M25/M26 will implement)
-app.include_router(governance.router, prefix="/governance", tags=["governance"])  # M13-T4: Governance misc
-app.include_router(charts.router)           # M7: Chart + LTTB + Queue Backend APIs
+app.include_router(exports.router)  # M13-T4: Export stubs (zip bundles in M31)
+app.include_router(research.router)  # M13-T4: Research stubs (M25/M26 will implement)
+app.include_router(
+    governance.router, prefix="/governance", tags=["governance"]
+)  # M13-T4: Governance misc
+app.include_router(charts.router)  # M7: Chart + LTTB + Queue Backend APIs
 app.include_router(data_certification.router)  # M8: Certification Viewer
-app.include_router(parity.router)           # M8: Parity Dashboard
+app.include_router(parity.router)  # M8: Parity Dashboard
+app.include_router(pnl.router)  # M9: P&L Attribution & Performance Tracking
 app.include_router(promotions.router)
 app.include_router(approvals.router, prefix="/approvals", tags=["approvals"])
-app.include_router(overrides.router, prefix="/overrides", tags=["overrides"])  # M23: Override request/get
-app.include_router(strategies.router, prefix="/strategies", tags=["strategies"])  # M23: Draft autosave
+app.include_router(
+    overrides.router, prefix="/overrides", tags=["overrides"]
+)  # M23: Override request/get
+app.include_router(
+    strategies.router, prefix="/strategies", tags=["strategies"]
+)  # M23: Draft autosave
+app.include_router(
+    audit_export.router, prefix="/audit", tags=["audit_export"]
+)  # M12 (before audit explorer to avoid /{id} catch-all)
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(symbol_lineage.router, prefix="/symbols", tags=["symbol_lineage"])  # M9
 app.include_router(observability.router)  # M11: Alerting + Observability Hardening
 app.include_router(queues.router, prefix="/queues", tags=["queues"])
+app.include_router(data_quality.router)  # Phase 8 M2: Data Quality API
+app.include_router(execution_loop.router)  # Phase 8 M8: Execution Loop API
 app.include_router(feed_health.router)
-app.include_router(feeds.router)      # M6: Feed Registry + Versioned Config
+app.include_router(feeds.router)  # M6: Feed Registry + Versioned Config
 app.include_router(artifacts.router)  # M5: Artifact Registry + Storage Abstraction
+app.include_router(admin.router)  # M14-T8b: Admin panel (secrets + Keycloak user mgmt)
+app.include_router(
+    deployments.router, prefix="/deployments", tags=["deployments"]
+)  # Phase 4 M2: Deployment State Machine
+app.include_router(
+    shadow.router, prefix="/shadow", tags=["shadow"]
+)  # Phase 4 M3: Shadow Mode Pipeline
+app.include_router(
+    paper.router, prefix="/paper", tags=["paper"]
+)  # Phase 4 M4: Paper Deployment Pipeline
+app.include_router(live.router)  # Phase 6 M3: Live Execution Service
+app.include_router(
+    risk.router, prefix="/risk", tags=["risk"]
+)  # Phase 4 M5: Risk Gate & Pre-Trade Checks
+app.include_router(
+    reconciliation.router, prefix="/reconciliation", tags=["reconciliation"]
+)  # Phase 4 M6: Reconciliation Service
+app.include_router(
+    kill_switch.router, prefix="/kill-switch", tags=["kill-switch"]
+)  # Phase 4 M7: Kill Switches & Emergency Posture
+app.include_router(
+    execution_analysis.router, prefix="/execution-analysis", tags=["execution-analysis"]
+)  # Phase 4 M8: Execution Drift Analysis & Replay
+app.include_router(
+    compliance.router, prefix="/compliance", tags=["compliance"]
+)  # Phase 4 M11: Trade Execution Reports for Regulatory Compliance
+app.include_router(
+    drills.router, prefix="/drills", tags=["drills"]
+)  # Phase 4 M9: Runbooks, Drills & Production Hardening
+app.include_router(
+    ws_positions.router, tags=["websocket"]
+)  # Phase 6 M7: Real-Time Position Dashboard (WebSocket)
+app.include_router(market_data.router)  # Phase 7 M2: Market Data API Endpoints
+app.include_router(indicators.router)  # Phase 7 M7: Indicator API Endpoints
+app.include_router(risk_analytics.router)  # Phase 7 M8: Portfolio Risk Analytics
+app.include_router(stress_test.router)  # Phase 7 M9: Stress Testing & Scenario Analysis
+app.include_router(position_sizing.router)  # Phase 7 M10: Dynamic Position Sizing
+app.include_router(risk_alert.router)  # Phase 7 M11: Risk Dashboard & Alerting
+app.include_router(strategy_comparison.router)  # Phase 7 M13: Strategy Comparison & Ranking
+app.include_router(ws_market_data.router)  # Phase 7 M3: Real-Time Market Data Streaming (WebSocket)
+app.include_router(metrics_module.router)  # M14-T9: Prometheus metrics scrape endpoint
 
 # ---------------------------------------------------------------------------
 # CORS — read allowed origins from CORS_ALLOWED_ORIGINS env var.
@@ -183,49 +584,148 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-User-ID", "X-Correlation-ID"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Correlation-ID",
+        "X-Client-Source",
+        "Idempotency-Key",
+    ],
 )
 
 # ---------------------------------------------------------------------------
 # M14-T1: Infrastructure hardening middleware stack
 # Order (last-registered = outermost/runs first):
-#   CorrelationIDMiddleware (runs first — must be outermost to set context)
+#   DrainMiddleware (runs first — rejects requests during shutdown)
+#   CorrelationIDMiddleware (sets correlation context for all layers)
+#   ClientSourceMiddleware (extracts X-Client-Source for audit tracking)
 #   BodySizeLimitMiddleware (size check before rate limiting)
 #   RateLimitMiddleware (rate limit enforcement)
+#   IdempotencyMiddleware (dedup before business logic executes)
 #   CORSMiddleware (already registered above)
 # ---------------------------------------------------------------------------
 
+app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(BodySizeLimitMiddleware)
+app.add_middleware(ClientSourceMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CorrelationIDMiddleware)
+app.add_middleware(type(_drain_middleware), drain_state=_drain_middleware)
+
+
+# ---------------------------------------------------------------------------
+# HTTPS enforcement — warn on plaintext requests in production
+# ---------------------------------------------------------------------------
+
+if os.environ.get("ENVIRONMENT") == "production":
+    from starlette.middleware.base import BaseHTTPMiddleware as _BaseHttp
+
+    class _HTTPSEnforcementMiddleware(_BaseHttp):
+        """Log warnings when production requests arrive without TLS."""
+
+        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
+            proto = request.headers.get("x-forwarded-proto", "http")
+            if proto != "https":
+                logger.warning(
+                    "security.plaintext_request",
+                    path=request.url.path,
+                    x_forwarded_proto=proto,
+                    client=request.client.host if request.client else "unknown",
+                    component="https_enforcement",
+                    detail="Production request received without HTTPS. "
+                    "Ensure a TLS-terminating reverse proxy is in front of this service.",
+                )
+            return await call_next(request)
+
+    app.add_middleware(_HTTPSEnforcementMiddleware)
+
+# ---------------------------------------------------------------------------
+# Global exception handlers — map domain & infrastructure exceptions to HTTP.
+# Prevents 500s from leaking stack traces to clients.
+# ---------------------------------------------------------------------------
+
+from fastapi import Request as _Req  # noqa: E402 — exception handlers must follow app creation
+from fastapi.responses import JSONResponse as _JsonResp  # noqa: E402
+from sqlalchemy.exc import IntegrityError, OperationalError  # noqa: E402
+
+from libs.contracts.errors import NotFoundError, SeparationOfDutiesError  # noqa: E402
+from libs.contracts.errors import ValidationError as DomainValidationError  # noqa: E402
+from libs.contracts.rate_limit import RateLimitErrorResponse, RateLimitExceededError  # noqa: E402
+
+
+@app.exception_handler(NotFoundError)
+async def _handle_not_found(request: _Req, exc: NotFoundError) -> _JsonResp:
+    return _JsonResp(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(SeparationOfDutiesError)
+async def _handle_sod(request: _Req, exc: SeparationOfDutiesError) -> _JsonResp:
+    return _JsonResp(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(DomainValidationError)
+async def _handle_validation(request: _Req, exc: DomainValidationError) -> _JsonResp:
+    return _JsonResp(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(IntegrityError)
+async def _handle_integrity(request: _Req, exc: IntegrityError) -> _JsonResp:
+    logger.error(
+        "db.integrity_error",
+        error=str(exc.orig),
+        component="exception_handler",
+        exc_info=True,
+    )
+    return _JsonResp(
+        status_code=409,
+        content={"detail": "Data integrity conflict. The operation could not be completed."},
+    )
+
+
+@app.exception_handler(OperationalError)
+async def _handle_operational(request: _Req, exc: OperationalError) -> _JsonResp:
+    logger.error(
+        "db.operational_error",
+        error=str(exc.orig),
+        component="exception_handler",
+        exc_info=True,
+    )
+    return _JsonResp(
+        status_code=503,
+        content={"detail": "Service temporarily unavailable. Please retry."},
+        headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(RateLimitExceededError)
+async def _handle_rate_limit(request: _Req, exc: RateLimitExceededError) -> _JsonResp:
+    """
+    Handle rate limit exceeded errors (429).
+
+    Returns RateLimitErrorResponse with Retry-After header matching the
+    calculated retry delay from the rate limiter.
+    """
+    response = RateLimitErrorResponse(
+        detail=exc.detail,
+        retry_after=exc.retry_after_seconds,
+    )
+    logger.warning(
+        "rate_limit.exceeded_handled",
+        scope=exc.scope,
+        limit=exc.limit,
+        window_seconds=exc.window_seconds,
+        retry_after=exc.retry_after_seconds,
+        component="exception_handler",
+    )
+    return _JsonResp(
+        status_code=429,
+        content=response.model_dump(),
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+    )
+
 
 logger.info("fastapi_app_initialized")
-
-
-# ---------------------------------------------------------------------------
-# Response models
-# ---------------------------------------------------------------------------
-
-# Health status constants
-HEALTH_STATUS_OK = "ok"
-HEALTH_SERVICE_NAME = "fxlab-api"
-
-
-class HealthCheckResponse(BaseModel):
-    """
-    Response model for all health check endpoints.
-
-    Attributes:
-        success: True if service is healthy.
-        status: Canonical status string — always "ok" when healthy.
-        version: API version string for diagnostics.
-        service: Service identifier for multi-service deployments.
-    """
-
-    success: bool
-    status: str
-    version: str
-    service: str
 
 
 # ---------------------------------------------------------------------------
@@ -242,63 +742,6 @@ async def root() -> dict[str, str]:
         API title and version.
     """
     return {"title": "FXLab Phase 3 Web UX API", "version": API_VERSION}
-
-
-@app.get("/health", tags=["health"])
-async def health_check() -> HealthCheckResponse | dict:
-    """
-    Container orchestration health check endpoint with database probe.
-
-    Returns a 200 OK response when the service is ready to accept traffic.
-    Probes the database to verify connectivity; returns 503 if the database
-    is unreachable.
-
-    Used by Docker health checks, Kubernetes liveness/readiness probes,
-    and load balancers.
-
-    Returns:
-        - 200 OK with HealthCheckResponse when database is reachable.
-        - 503 Service Unavailable with degraded status when database is unreachable.
-    """
-    from services.api.db import check_db_connection
-    from fastapi.responses import Response
-    import json
-
-    try:
-        db_ok = check_db_connection()
-        if db_ok:
-            logger.info("health_check.success")
-            return HealthCheckResponse(
-                success=True,
-                status=HEALTH_STATUS_OK,
-                version=API_VERSION,
-                service=HEALTH_SERVICE_NAME,
-            )
-        else:
-            logger.warning("health_check.db_unreachable")
-            return Response(
-                content=json.dumps({
-                    "success": False,
-                    "status": "degraded",
-                    "version": API_VERSION,
-                    "service": HEALTH_SERVICE_NAME,
-                }),
-                status_code=503,
-                media_type="application/json",
-            )
-    except Exception as exc:
-        logger.warning("health_check.db_check_failed", error=str(exc), exc_info=True)
-        return Response(
-            content=json.dumps({
-                "success": False,
-                "status": "degraded",
-                "version": API_VERSION,
-                "service": HEALTH_SERVICE_NAME,
-            }),
-            status_code=503,
-            media_type="application/json",
-        )
-
 
 
 # ---------------------------------------------------------------------------
@@ -355,71 +798,257 @@ def check_permission(
     return True
 
 
-def get_run_results(run_id: str) -> dict[str, Any] | None:
+def get_run_results(run_id: str, db: Any = None) -> dict[str, Any] | None:
     """
     Retrieve results for a completed run.
 
+    Queries the Run table by primary key and gathers associated artifacts
+    and trial metrics. Returns None if the run does not exist.
+
     Args:
         run_id: ULID of the run.
+        db: SQLAlchemy session. If None, creates a request-scoped session
+            from SessionLocal (backward compat for tests that mock this).
 
     Returns:
-        Dict of run results with basic structure, or None if the run does not
-        exist.  Returns a default stub result so that the route can return 200
-        in bootstrap tests that verify the route is registered.  Tests that
-        need 404 behaviour mock this via
-        ``patch("services.api.main.get_run_results")``.
+        Dict with run_id, status, metrics (from trials), and artifacts list.
+        None if the run is not found in the database.
+
+    Example:
+        results = get_run_results("01HABCDEF00000000000000000", db=session)
+        # results["run_id"] == "01HABCDEF00000000000000000"
     """
-    logger.info("get_run_results.stub_called", run_id=run_id)
-    # Return a default result so the endpoint returns 200 (not 404) for any
-    # ULID in the bootstrap test.  The real implementation will query a DB.
-    return {
-        "run_id": run_id,
-        "metrics": {},
-        "artifacts": [],
-    }
+    from libs.contracts.models import Artifact, Run, Trial
+    from services.api.db import SessionLocal
+
+    close_session = False
+    if db is None:
+        db = SessionLocal()
+        close_session = True
+
+    try:
+        run = db.get(Run, run_id)
+        if run is None:
+            logger.debug(
+                "get_run_results.not_found",
+                run_id=run_id,
+                component="main",
+            )
+            return None
+
+        # Gather trial metrics
+        trials = db.query(Trial).filter(Trial.run_id == run_id).all()
+        trial_metrics = [
+            {
+                "trial_index": t.trial_index,
+                "status": t.status,
+                "metrics": t.metrics or {},
+            }
+            for t in trials
+        ]
+
+        # Gather artifacts
+        artifacts = db.query(Artifact).filter(Artifact.run_id == run_id).all()
+        artifact_list = [
+            {
+                "artifact_id": a.id,
+                "artifact_type": a.artifact_type,
+                "uri": a.uri,
+                "size_bytes": a.size_bytes,
+                "checksum": a.checksum,
+            }
+            for a in artifacts
+        ]
+
+        logger.info(
+            "get_run_results.retrieved",
+            run_id=run_id,
+            trial_count=len(trial_metrics),
+            artifact_count=len(artifact_list),
+            component="main",
+        )
+
+        return {
+            "run_id": run.id,
+            "status": run.status,
+            "run_type": run.run_type,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "metrics": trial_metrics,
+            "artifacts": artifact_list,
+        }
+    finally:
+        if close_session:
+            db.close()
 
 
-def get_readiness_report(run_id: str) -> dict[str, Any] | None:
+def get_readiness_report(run_id: str, db: Any = None) -> dict[str, Any] | None:
     """
     Retrieve the readiness report for a run.
 
+    Queries the Run table and evaluates readiness based on run status,
+    trial outcomes, and certification events. Returns None if the run
+    does not exist.
+
     Args:
         run_id: ULID of the run.
+        db: SQLAlchemy session. If None, creates a request-scoped session.
 
     Returns:
-        Dict representing the readiness report with default structure, or None
-        if not found.  Returns a default stub result so the route returns 200
-        in bootstrap tests.  Tests that need 404 behaviour mock this via
-        ``patch("services.api.main.get_readiness_report")``.
+        Dict with run_id, readiness_grade, blockers list, and scoring evidence.
+        None if the run is not found.
+
+    Example:
+        report = get_readiness_report("01HABCDEF00000000000000000", db=session)
+        # report["readiness_grade"] in ("GREEN", "YELLOW", "RED", "UNKNOWN")
     """
-    logger.info("get_readiness_report.stub_called", run_id=run_id)
-    return {
-        "run_id": run_id,
-        "readiness_grade": "UNKNOWN",
-        "blockers": [],
-        "scoring_evidence": {},
-    }
+    from libs.contracts.models import CertificationEvent, Run, Trial
+    from services.api.db import SessionLocal
+
+    close_session = False
+    if db is None:
+        db = SessionLocal()
+        close_session = True
+
+    try:
+        run = db.get(Run, run_id)
+        if run is None:
+            logger.debug(
+                "get_readiness_report.not_found",
+                run_id=run_id,
+                component="main",
+            )
+            return None
+
+        blockers: list[str] = []
+        evidence: dict[str, Any] = {}
+
+        # Check run completion status
+        if run.status != "completed":
+            blockers.append(f"Run status is '{run.status}', expected 'completed'.")
+            evidence["run_status"] = run.status
+
+        # Check trial outcomes
+        trials = db.query(Trial).filter(Trial.run_id == run_id).all()
+        failed_trials = [t for t in trials if t.status == "failed"]
+        evidence["total_trials"] = len(trials)
+        evidence["failed_trials"] = len(failed_trials)
+
+        if failed_trials:
+            blockers.append(f"{len(failed_trials)} of {len(trials)} trials failed.")
+
+        if len(trials) == 0:
+            blockers.append("No trials found for this run.")
+
+        # Check certification events
+        certs = db.query(CertificationEvent).filter(CertificationEvent.run_id == run_id).all()
+        evidence["certifications"] = len(certs)
+
+        # Compute readiness grade
+        if blockers:
+            grade = "RED" if len(blockers) >= 2 else "YELLOW"
+        elif len(certs) > 0:
+            grade = "GREEN"
+        else:
+            grade = "YELLOW"  # No blockers but no certifications yet
+
+        logger.info(
+            "get_readiness_report.computed",
+            run_id=run_id,
+            grade=grade,
+            blocker_count=len(blockers),
+            component="main",
+        )
+
+        return {
+            "run_id": run.id,
+            "readiness_grade": grade,
+            "blockers": blockers,
+            "scoring_evidence": evidence,
+        }
+    finally:
+        if close_session:
+            db.close()
 
 
-def submit_promotion_request(payload: Any) -> dict[str, str]:
+def submit_promotion_request(payload: Any, db: Any = None) -> dict[str, str]:
     """
-    Enqueue a promotion request for async processing.
+    Create a promotion request record in the database.
+
+    Persists a PromotionRequest with status='pending' and returns
+    the generated ULID as the job_id.
 
     Args:
-        payload: Validated PromotionRequest (or compatible dict).
+        payload: Validated PromotionRequest contract (or compatible object
+                 with candidate_id, requester_id, target_environment, etc.).
+        db: SQLAlchemy session. If None, creates a request-scoped session.
 
     Returns:
         Dict with ``job_id`` (ULID string) and ``status`` ("pending").
 
-    Note:
-        Stub — real implementation enqueues a background job.
-        Tests mock this via ``patch("services.api.main.submit_promotion_request")``.
+    Example:
+        result = submit_promotion_request(payload, db=session)
+        # result["job_id"] == "01H..."
+        # result["status"] == "pending"
     """
-    logger.info("submit_promotion_request.stub_called")
-    return {
-        "job_id": "01HQ7X9Z8K3M4N5P6Q7R8S9T0X",
-        "status": "pending",
-    }
+    import ulid as _ulid_mod
+
+    from libs.contracts.models import PromotionRequest
+    from services.api.db import SessionLocal
+
+    close_session = False
+    if db is None:
+        db = SessionLocal()
+        close_session = True
+
+    try:
+        promo_id = str(_ulid_mod.ULID())
+
+        # Extract fields from payload — supports both Pydantic models and dicts
+        candidate_id = getattr(payload, "candidate_id", None) or (
+            payload.get("candidate_id") if isinstance(payload, dict) else None
+        )
+        requester_id = getattr(payload, "requester_id", None) or (
+            payload.get("requester_id") if isinstance(payload, dict) else None
+        )
+        target_env = getattr(payload, "target_environment", None) or (
+            payload.get("target_environment") if isinstance(payload, dict) else None
+        )
+        if hasattr(target_env, "value"):
+            target_env = target_env.value
+        rationale = getattr(payload, "rationale", None) or (
+            payload.get("rationale") if isinstance(payload, dict) else None
+        )
+        evidence_link = getattr(payload, "evidence_link", None) or (
+            payload.get("evidence_link") if isinstance(payload, dict) else None
+        )
+
+        record = PromotionRequest(
+            id=promo_id,
+            candidate_id=candidate_id,
+            requester_id=requester_id,
+            target_environment=target_env or "paper",
+            status="pending",
+            rationale=rationale,
+            evidence_link=evidence_link,
+        )
+        db.add(record)
+        db.flush()
+
+        logger.info(
+            "submit_promotion_request.created",
+            job_id=promo_id,
+            candidate_id=candidate_id,
+            component="main",
+        )
+
+        return {
+            "job_id": promo_id,
+            "status": "pending",
+        }
+    finally:
+        if close_session:
+            db.close()
 
 
 # Singleton audit service stub — replaced in tests via patch.

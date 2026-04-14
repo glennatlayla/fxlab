@@ -2,12 +2,12 @@
 Health service — minimal HTTP server for container health checks.
 Demonstrates working FastAPI + logging + graceful shutdown.
 """
+
 import logging
 import signal
-import sys
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -27,7 +27,9 @@ shutdown_requested = False
 def handle_sigterm(signum, frame):
     """Handle SIGTERM for graceful shutdown."""
     global shutdown_requested
-    logger.info("SIGTERM received, initiating graceful shutdown", extra={"correlation_id": "system"})
+    logger.info(
+        "SIGTERM received, initiating graceful shutdown", extra={"correlation_id": "system"}
+    )
     shutdown_requested = True
 
 
@@ -49,22 +51,18 @@ app = FastAPI(title="FXLab Health Service", version="0.1.0", lifespan=lifespan)
 async def correlation_id_middleware(request: Request, call_next):
     """Extract or generate correlation ID for every request."""
     correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
-    
+
     # Log request
     logger.info(
-        f"Request: {request.method} {request.url.path}",
-        extra={"correlation_id": correlation_id}
+        f"Request: {request.method} {request.url.path}", extra={"correlation_id": correlation_id}
     )
-    
+
     response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
-    
+
     # Log response
-    logger.info(
-        f"Response: {response.status_code}",
-        extra={"correlation_id": correlation_id}
-    )
-    
+    logger.info(f"Response: {response.status_code}", extra={"correlation_id": correlation_id})
+
     return response
 
 
@@ -72,7 +70,7 @@ async def correlation_id_middleware(request: Request, call_next):
 async def health_check():
     """
     Basic health check — always returns 200 if service is running.
-    
+
     This endpoint is used by container orchestrators to determine if
     the service should receive traffic.
     """
@@ -90,7 +88,7 @@ async def health_check():
 async def readiness_check():
     """
     Readiness check — returns 503 if shutdown requested.
-    
+
     This endpoint signals when the service should be removed from
     load balancer rotation during graceful shutdown.
     """
@@ -115,7 +113,7 @@ async def readiness_check():
 async def liveness_check():
     """
     Liveness check — returns 200 if process is alive.
-    
+
     This endpoint is used by container orchestrators to determine if
     the container should be restarted.
     """

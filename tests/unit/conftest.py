@@ -5,9 +5,9 @@ Provides shared fixtures for unit tests.
 All fixtures must be fast and use mocks/stubs for external dependencies.
 """
 
+from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
-from typing import Generator
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
@@ -127,7 +127,7 @@ def mock_auth_context() -> Mock:
     """Mock authentication context."""
     context = Mock()
     context.user_id = "01HQ7X9Z8K3M4N5P6Q7R8S9T0V"
-    context.role = "researcher"
+    context.role = "operator"
     context.permissions = {"read:runs", "write:promotions"}
     return context
 

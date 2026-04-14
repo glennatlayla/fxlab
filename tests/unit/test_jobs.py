@@ -20,13 +20,14 @@ RED markers (tests that FAIL until GREEN implementation):
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch
 
+from libs.contracts.errors import NotFoundError
 from libs.jobs.interfaces.job import ComputePolicy, Job, JobStatus, JobType
 from libs.jobs.interfaces.queue import ContentionReport, QueueDepthSnapshot
 from libs.jobs.mocks.mock_job_repository import MockJobRepository
 from libs.jobs.mocks.mock_queue_service import MockQueueService
-from libs.contracts.errors import NotFoundError
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Job value object tests
@@ -320,7 +321,6 @@ class TestQueueValueObjects:
 
     def test_snapshot_contention_score_has_lower_bound_declared(self) -> None:
         """contention_score field declares ge=0.0 constraint."""
-        from pydantic.fields import FieldInfo
 
         field = QueueDepthSnapshot.model_fields["contention_score"]
         ge_constraints = [m for m in field.metadata if hasattr(m, "ge")]
@@ -440,7 +440,7 @@ class TestQueuesContentionEndpoint:
 
         client = TestClient(app, raise_server_exceptions=False)
         # 'contention' is not a registered queue class → 404
-        response = client.get("/queues/contention/contention")
+        response = client.get("/queues/contention/contention", headers=AUTH_HEADERS)
         assert response.status_code == 404
 
     def test_queues_list_endpoint_returns_200_with_queues_key(self) -> None:
@@ -453,7 +453,7 @@ class TestQueuesContentionEndpoint:
         from services.api.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/queues/")
+        response = client.get("/queues/", headers=AUTH_HEADERS)
         assert response.status_code == 200
         body = response.json()
         assert "queues" in body, f"Response must include 'queues' list key: {body}"
@@ -477,7 +477,7 @@ class TestFeedHealthEndpoint:
         from services.api.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/feed-health")
+        response = client.get("/feed-health", headers=AUTH_HEADERS)
         assert response.status_code == 200
 
     def test_feed_health_response_has_feeds_key(self) -> None:
@@ -485,7 +485,7 @@ class TestFeedHealthEndpoint:
         from services.api.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
-        response = client.get("/feed-health")
+        response = client.get("/feed-health", headers=AUTH_HEADERS)
         assert response.status_code == 200
         body = response.json()
         assert "feeds" in body, "Response must include 'feeds' list field."

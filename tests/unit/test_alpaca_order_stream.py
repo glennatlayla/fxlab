@@ -182,7 +182,9 @@ def test_start_creates_daemon_thread(
         timeout_config=timeout_config,
     )
 
-    with patch("services.api.adapters.alpaca_order_stream.websocket.create_connection") as mock_create:
+    with patch(
+        "services.api.adapters.alpaca_order_stream.websocket.create_connection"
+    ) as mock_create:
         mock_ws = MagicMock()
         mock_ws.connected = True
         mock_create.return_value = mock_ws
@@ -213,7 +215,9 @@ def test_stop_graceful_shutdown(timeout_config: BrokerTimeoutConfig) -> None:
         timeout_config=timeout_config,
     )
 
-    with patch("services.api.adapters.alpaca_order_stream.websocket.create_connection") as mock_create:
+    with patch(
+        "services.api.adapters.alpaca_order_stream.websocket.create_connection"
+    ) as mock_create:
         mock_ws = MagicMock()
         mock_ws.connected = True
         mock_create.return_value = mock_ws
@@ -343,7 +347,9 @@ def test_is_connected_true_after_auth(timeout_config: BrokerTimeoutConfig) -> No
         timeout_config=timeout_config,
     )
 
-    with patch("services.api.adapters.alpaca_order_stream.websocket.create_connection") as mock_create:
+    with patch(
+        "services.api.adapters.alpaca_order_stream.websocket.create_connection"
+    ) as mock_create:
         mock_ws = MagicMock()
         mock_ws.connected = True
         mock_create.return_value = mock_ws

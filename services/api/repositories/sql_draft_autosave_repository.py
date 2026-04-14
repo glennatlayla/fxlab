@@ -5,11 +5,11 @@ Responsibilities:
 - Persist draft autosave records to the draft_autosaves table.
 - Retrieve the latest autosave for a given user.
 - Delete autosave records when the user discards their draft.
+- Purge stale autosaves older than a specified age.
 
 Does NOT:
 - Validate draft content (partial drafts may be incomplete).
 - Contain business logic or session management.
-- Purge stale autosaves (background cleanup job responsibility).
 
 Dependencies:
 - SQLAlchemy Session (injected via get_db).
@@ -35,8 +35,7 @@ Example:
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
@@ -46,20 +45,21 @@ from libs.contracts.models import DraftAutosave
 
 logger = structlog.get_logger(__name__)
 
-_counter: int = 0
-
 
 def _generate_ulid() -> str:
     """
-    Generate a time-ordered ULID-shaped ID for new autosave records.
+    Generate a cryptographically random, time-ordered ULID for new records.
+
+    Uses python-ulid which is thread-safe and produces spec-compliant
+    26-character Crockford base32 ULIDs with millisecond-precision
+    timestamps and 80 bits of cryptographic randomness.
 
     Returns:
-        26-character string prefixed with timestamp milliseconds.
+        26-character ULID string (Crockford base32).
     """
-    global _counter
-    _counter += 1
-    ts_ms = int(time.time() * 1000)
-    return f"{ts_ms:013d}{_counter:013d}"[:26]
+    import ulid as _ulid
+
+    return str(_ulid.ULID())
 
 
 class SqlDraftAutosaveRepository:
@@ -70,6 +70,7 @@ class SqlDraftAutosaveRepository:
     - Insert autosave rows on create().
     - Query the most recent autosave by user_id on get_latest().
     - Delete autosave rows by primary key on delete().
+    - Batch-delete autosaves older than a specified age on purge_expired().
 
     Does NOT:
     - Validate draft content.
@@ -140,7 +141,7 @@ class SqlDraftAutosaveRepository:
         )
 
         self._db.add(row)
-        self._db.commit()
+        self._db.flush()  # Emit SQL but keep transaction open for atomicity.
         self._db.refresh(row)
 
         logger.debug(
@@ -208,7 +209,51 @@ class SqlDraftAutosaveRepository:
             return False
 
         self._db.delete(row)
-        self._db.commit()
+        self._db.flush()  # Emit SQL but keep transaction open for atomicity.
 
         logger.debug("draft.autosave.sql.deleted", autosave_id=autosave_id)
         return True
+
+    def purge_expired(self, max_age_days: int = 30) -> int:
+        """
+        Delete all autosave records older than max_age_days.
+
+        This method is intended for background cleanup jobs that run
+        periodically (e.g. daily via Celery) to reclaim storage space.
+        Records are identified by comparing created_at to the current
+        UTC time minus max_age_days.
+
+        Args:
+            max_age_days: Number of days; autosaves older than this are deleted.
+                         Defaults to 30 days. Computed relative to the current UTC time.
+
+        Returns:
+            Count of records deleted (0 if none).
+
+        Example:
+            deleted_count = repo.purge_expired(max_age_days=30)
+            logger.info(f"Purged {deleted_count} expired autosaves")
+        """
+        cutoff_time = datetime.now(tz=timezone.utc) - timedelta(days=max_age_days)
+
+        # Query all autosaves older than the cutoff time.
+        rows_to_delete = (
+            self._db.query(DraftAutosave).filter(DraftAutosave.created_at < cutoff_time).all()
+        )
+
+        deleted_count = len(rows_to_delete)
+
+        # Delete them in a single batch operation.
+        for row in rows_to_delete:
+            self._db.delete(row)
+
+        self._db.flush()  # Emit SQL but keep transaction open for atomicity.
+
+        logger.debug(
+            "draft.autosave.sql.purged_expired",
+            deleted_count=deleted_count,
+            max_age_days=max_age_days,
+            cutoff_time=cutoff_time.isoformat(),
+        )
+
+        return deleted_count

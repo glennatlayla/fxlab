@@ -49,10 +49,13 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.parity_repository import ParityRepositoryInterface
 from libs.contracts.parity import ParityEvent, ParityInstrumentSummary
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
 
 logger = structlog.get_logger(__name__)
 
@@ -64,29 +67,21 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-def get_parity_repository() -> ParityRepositoryInterface:
+def get_parity_repository(db: Session = Depends(get_db)) -> ParityRepositoryInterface:
     """
     Provide a ParityRepositoryInterface implementation.
 
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
+
     Returns:
-        MockParityRepository bootstrap stub until SQL wiring is complete.
-
-    Note:
-        ISS-020 — Wire SqlParityRepository via lifespan DI container.
+        ParityRepositoryInterface implementation (SQL-backed).
     """
-    import os
+    from services.api.repositories.sql_parity_repository import SqlParityRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_parity_repository import SqlParityRepository
-
-        db = next(get_db())
-        return SqlParityRepository(db=db)
-
-    from libs.contracts.mocks.mock_parity_repository import (  # pragma: no cover
-        MockParityRepository,  # pragma: no cover
-    )
-    return MockParityRepository()  # pragma: no cover
+    return SqlParityRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -206,15 +201,14 @@ def get_parity_events(
     severity: str = Query(
         default="", description="Filter by exact severity: CRITICAL, WARNING, or INFO"
     ),
-    instrument: str = Query(
-        default="", description="Filter by instrument/ticker symbol"
-    ),
+    instrument: str = Query(default="", description="Filter by instrument/ticker symbol"),
     feed_id: str = Query(
         default="",
         description="Filter by feed ULID (matches either official or shadow feed)",
     ),
     x_correlation_id: str = Header(default="no-corr"),
     repo: ParityRepositoryInterface = Depends(get_parity_repository),
+    user: AuthenticatedUser = Depends(require_scope("feeds:read")),
 ) -> JSONResponse:
     """
     Return cross-feed parity discrepancy events, optionally filtered.
@@ -269,6 +263,7 @@ def get_parity_event(
     parity_event_id: str,
     x_correlation_id: str = Header(default="no-corr"),
     repo: ParityRepositoryInterface = Depends(get_parity_repository),
+    user: AuthenticatedUser = Depends(require_scope("feeds:read")),
 ) -> JSONResponse:
     """
     Return a single parity event by ULID.
@@ -298,7 +293,7 @@ def get_parity_event(
     )
     try:
         event = repo.find_by_id(parity_event_id, correlation_id=corr)
-    except NotFoundError as exc:
+    except NotFoundError:
         logger.info(
             "parity_event.detail_not_found",
             operation="get_parity_event",
@@ -307,7 +302,7 @@ def get_parity_event(
             parity_event_id=parity_event_id,
             result="not_found",
         )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Parity event not found.") from None
     logger.info(
         "parity_event.detail_completed",
         operation="get_parity_event",
@@ -323,6 +318,7 @@ def get_parity_event(
 def get_parity_summary(
     x_correlation_id: str = Header(default="no-corr"),
     repo: ParityRepositoryInterface = Depends(get_parity_repository),
+    user: AuthenticatedUser = Depends(require_scope("feeds:read")),
 ) -> JSONResponse:
     """
     Return per-instrument parity severity aggregates.

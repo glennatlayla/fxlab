@@ -35,6 +35,7 @@ Example:
 
 from __future__ import annotations
 
+import builtins
 from abc import ABC, abstractmethod
 
 from libs.contracts.parity import ParityEvent, ParityInstrumentSummary
@@ -60,7 +61,7 @@ class ParityRepositoryInterface(ABC):
         instrument: str = "",
         feed_id: str = "",
         correlation_id: str,
-    ) -> list[ParityEvent]:
+    ) -> builtins.list[ParityEvent]:
         """
         Return parity events, optionally filtered.
 
@@ -105,7 +106,7 @@ class ParityRepositoryInterface(ABC):
         ...
 
     @abstractmethod
-    def summarize(self, *, correlation_id: str) -> list[ParityInstrumentSummary]:
+    def summarize(self, *, correlation_id: str) -> builtins.list[ParityInstrumentSummary]:
         """
         Return per-instrument parity severity aggregates.
 

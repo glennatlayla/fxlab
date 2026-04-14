@@ -24,10 +24,10 @@ Example:
 """
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
 
 import ulid as _ulid
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AuditEventSchema(BaseModel):
@@ -40,19 +40,21 @@ class AuditEventSchema(BaseModel):
     id: str = Field(..., description="ULID primary key")
     actor: str = Field(..., description="User email or system identity")
     action: str = Field(..., description="Action verb (e.g., create_draft, approve_promotion)")
-    object_id: Optional[str] = Field(None, description="ULID of affected object")
-    object_type: Optional[str] = Field(None, description="Type of affected object")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Action-specific context")
+    object_id: str | None = Field(None, description="ULID of affected object")
+    object_type: str | None = Field(None, description="Type of affected object")
+    source: str | None = Field(None, description="Source client (web-desktop, web-mobile, api)")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Action-specific context")
     created_at: datetime = Field(default_factory=datetime.utcnow, description="Event timestamp")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "01HQZX3Y7Z8F9G0H1J2K3L4M5N",
                 "actor": "analyst@fxlab.io",
                 "action": "approve_promotion",
                 "object_id": "01HQZX3Y7Z8F9G0H1J2K3L4M5P",
                 "object_type": "promotion_request",
+                "source": "web-desktop",
                 "metadata": {
                     "target_environment": "paper",
                     "decision": "approved",
@@ -61,6 +63,7 @@ class AuditEventSchema(BaseModel):
                 "created_at": "2026-03-19T21:56:00Z",
             }
         }
+    )
 
 
 def write_audit_event(
@@ -69,7 +72,8 @@ def write_audit_event(
     action: str,
     object_id: str,
     object_type: str,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
+    source: str | None = None,
 ) -> str:
     """
     Write an immutable audit event to the ledger via the given SQLAlchemy session.
@@ -82,6 +86,8 @@ def write_audit_event(
         object_id: ULID of the affected entity.
         object_type: Entity type name, e.g. "strategy", "run".
         metadata: Optional dict of action-specific context.
+        source: Optional source client identifier (web-desktop, web-mobile, api).
+                Defaults to None for backwards compatibility.
 
     Returns:
         The ULID string assigned to the new audit event.
@@ -97,6 +103,7 @@ def write_audit_event(
             object_id="01HQ...",
             object_type="run",
             metadata={"trigger": "scheduled"},
+            source="web-desktop",
         )
     """
     from libs.contracts.models import AuditEvent  # lazy import to avoid circular deps
@@ -110,9 +117,10 @@ def write_audit_event(
         object_type=object_type,
         # 'metadata' is reserved by SQLAlchemy; the ORM attribute is event_metadata.
         event_metadata=metadata if metadata is not None else {},
+        source=source,
     )
     session.add(event)
-    session.commit()
+    session.flush()  # Emit SQL but keep transaction open for atomicity.
     return event_id
 
 

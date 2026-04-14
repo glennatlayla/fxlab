@@ -1,10 +1,11 @@
 """
 Unit tests for FastAPI application entry point.
 """
+
 import pytest
 from fastapi.testclient import TestClient
 
-from services.api.main import app, API_VERSION
+from services.api.main import API_VERSION, app
 
 
 @pytest.fixture

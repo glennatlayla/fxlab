@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SymbolFeedRef(BaseModel):
@@ -71,8 +71,7 @@ class SymbolFeedRef(BaseModel):
         ..., description="Timestamp when this feed first supplied data for the symbol"
     )
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SymbolRunRef(BaseModel):
@@ -100,8 +99,7 @@ class SymbolRunRef(BaseModel):
     run_id: str = Field(..., description="ULID of the run that consumed this symbol")
     started_at: datetime = Field(..., description="Timestamp when the run started")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SymbolLineageResponse(BaseModel):

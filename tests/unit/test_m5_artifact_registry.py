@@ -18,19 +18,18 @@ Fixtures used (from tests/conftest.py and tests/unit/conftest.py):
 
 from __future__ import annotations
 
-import io
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from libs.contracts.artifact import Artifact, ArtifactQuery, ArtifactQueryResponse, ArtifactType
+from libs.contracts.artifact import Artifact, ArtifactQuery, ArtifactType
 from libs.contracts.errors import NotFoundError
 from libs.contracts.mocks.mock_artifact_repository import MockArtifactRepository
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Test helpers / shared fixtures
@@ -563,7 +562,7 @@ class TestArtifactsListEndpoint:
 
         FAILS: artifacts.py stub has no implementation.
         """
-        resp = client.get("/artifacts")
+        resp = client.get("/artifacts", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_get_artifacts_returns_list_field(self, client: TestClient) -> None:
@@ -572,7 +571,7 @@ class TestArtifactsListEndpoint:
         WHEN GET /artifacts is requested
         THEN the response body contains an 'artifacts' list with 2 items.
         """
-        resp = client.get("/artifacts")
+        resp = client.get("/artifacts", headers=AUTH_HEADERS)
         body = resp.json()
         assert "artifacts" in body, f"Expected 'artifacts' key in response: {body}"
         assert len(body["artifacts"]) == 2
@@ -583,7 +582,7 @@ class TestArtifactsListEndpoint:
         WHEN GET /artifacts is requested
         THEN the response body contains total_count == 2.
         """
-        resp = client.get("/artifacts")
+        resp = client.get("/artifacts", headers=AUTH_HEADERS)
         body = resp.json()
         assert body.get("total_count") == 2
 
@@ -593,7 +592,7 @@ class TestArtifactsListEndpoint:
         WHEN GET /artifacts?limit=1 is requested
         THEN only 1 artifact is returned but total_count is still 2.
         """
-        resp = client.get("/artifacts?limit=1")
+        resp = client.get("/artifacts?limit=1", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["artifacts"]) == 1
         assert body["total_count"] == 2
@@ -604,7 +603,7 @@ class TestArtifactsListEndpoint:
         WHEN GET /artifacts?offset=1 is requested
         THEN 1 artifact is returned (the second one) and total_count is 2.
         """
-        resp = client.get("/artifacts?offset=1")
+        resp = client.get("/artifacts?offset=1", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["artifacts"]) == 1
 
@@ -614,7 +613,7 @@ class TestArtifactsListEndpoint:
         WHEN GET /artifacts?artifact_type=backtest_result is requested
         THEN only the backtest artifact is returned.
         """
-        resp = client.get("/artifacts?artifact_type=backtest_result")
+        resp = client.get("/artifacts?artifact_type=backtest_result", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["artifacts"]) == 1
         assert body["artifacts"][0]["artifact_type"] == "backtest_result"
@@ -626,7 +625,7 @@ class TestArtifactsListEndpoint:
         THEN each item contains id, artifact_type, subject_id, storage_path,
              size_bytes, created_at, created_by.
         """
-        resp = client.get("/artifacts")
+        resp = client.get("/artifacts", headers=AUTH_HEADERS)
         body = resp.json()
         required_fields = {
             "id",
@@ -647,10 +646,10 @@ class TestArtifactsListEndpoint:
         WHEN GET /artifacts?artifact_type=not_a_real_type is requested
         THEN 422 Unprocessable Entity is returned.
         """
-        resp = client.get("/artifacts?artifact_type=not_a_real_type")
-        assert (
-            resp.status_code == 422
-        ), f"Expected 422 for invalid artifact_type, got {resp.status_code}: {resp.text}"
+        resp = client.get("/artifacts?artifact_type=not_a_real_type", headers=AUTH_HEADERS)
+        assert resp.status_code == 422, (
+            f"Expected 422 for invalid artifact_type, got {resp.status_code}: {resp.text}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +722,7 @@ class TestArtifactDownloadEndpoint:
 
         FAILS: download endpoint not yet implemented.
         """
-        resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
+        resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_download_returns_binary_content(self, client: TestClient) -> None:
@@ -732,7 +731,7 @@ class TestArtifactDownloadEndpoint:
         WHEN the download endpoint is called
         THEN the response body matches the stored bytes.
         """
-        resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
+        resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
         assert resp.content == b'{"sharpe": 1.5, "drawdown": 0.08}'
 
     def test_download_sets_content_disposition_header(self, client: TestClient) -> None:
@@ -741,10 +740,10 @@ class TestArtifactDownloadEndpoint:
         WHEN the download endpoint is called
         THEN Content-Disposition is set (attachment with filename).
         """
-        resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
-        assert (
-            "content-disposition" in resp.headers
-        ), "Download response must include Content-Disposition header"
+        resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
+        assert "content-disposition" in resp.headers, (
+            "Download response must include Content-Disposition header"
+        )
         assert "attachment" in resp.headers["content-disposition"]
 
     def test_download_unknown_artifact_returns_404(self, client: TestClient) -> None:
@@ -754,7 +753,7 @@ class TestArtifactDownloadEndpoint:
         THEN 404 is returned.
         """
         unknown_id = "01HQZZZZZZZZZZZZZZZZZZZZZZ"
-        resp = client.get(f"/artifacts/{unknown_id}/download")
+        resp = client.get(f"/artifacts/{unknown_id}/download", headers=AUTH_HEADERS)
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
     def test_download_calls_storage_get_with_correct_bucket_and_key(
@@ -765,7 +764,7 @@ class TestArtifactDownloadEndpoint:
         WHEN the download endpoint is called
         THEN storage.get is called with bucket='fxlab-artifacts' and key='runs/result.json'.
         """
-        client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
+        client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
         storage.get.assert_called_once()
         call_kwargs = storage.get.call_args
         # Accept either positional or keyword arguments
@@ -794,10 +793,10 @@ class TestArtifactDownloadEndpoint:
         app.dependency_overrides[get_artifact_storage] = lambda: storage
         client = TestClient(app)
         try:
-            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
-            assert (
-                resp.status_code == 404
-            ), f"Expected 404 when storage raises FileNotFoundError, got {resp.status_code}"
+            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
+            assert resp.status_code == 404, (
+                f"Expected 404 when storage raises FileNotFoundError, got {resp.status_code}"
+            )
         finally:
             app.dependency_overrides.clear()
 
@@ -818,10 +817,10 @@ class TestArtifactDownloadEndpoint:
         app.dependency_overrides[get_artifact_storage] = lambda: storage
         client = TestClient(app)
         try:
-            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
-            assert (
-                resp.status_code == 500
-            ), f"Expected 500 for malformed storage_path, got {resp.status_code}"
+            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
+            assert resp.status_code == 500, (
+                f"Expected 500 for malformed storage_path, got {resp.status_code}"
+            )
         finally:
             app.dependency_overrides.clear()
 
@@ -843,7 +842,7 @@ class TestArtifactDownloadEndpoint:
         app.dependency_overrides[get_artifact_storage] = lambda: storage
         client = TestClient(app)
         try:
-            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
+            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
             assert resp.status_code == 200
             assert "application/json" in resp.headers.get("content-type", "")
         finally:
@@ -869,7 +868,7 @@ class TestArtifactDownloadEndpoint:
         app.dependency_overrides[get_artifact_storage] = lambda: storage
         client = TestClient(app)
         try:
-            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
+            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
             assert resp.status_code == 200
             assert "text/csv" in resp.headers.get("content-type", "")
         finally:
@@ -895,7 +894,7 @@ class TestArtifactDownloadEndpoint:
         app.dependency_overrides[get_artifact_storage] = lambda: storage
         client = TestClient(app)
         try:
-            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
+            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
             assert resp.status_code == 200
             assert "vnd.apache.parquet" in resp.headers.get("content-type", "")
         finally:
@@ -919,7 +918,7 @@ class TestArtifactDownloadEndpoint:
         app.dependency_overrides[get_artifact_storage] = lambda: storage
         client = TestClient(app)
         try:
-            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download")
+            resp = client.get(f"/artifacts/{_SAMPLE_ULID_1}/download", headers=AUTH_HEADERS)
             assert resp.status_code == 200
             assert "octet-stream" in resp.headers.get("content-type", "")
         finally:

@@ -27,15 +27,14 @@ Notes:
 from __future__ import annotations
 
 import os
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from libs.contracts.models import Base
-
 
 # ---------------------------------------------------------------------------
 # Database URL helpers
@@ -46,15 +45,19 @@ def _integration_db_url() -> str:
     """
     Return the integration test database URL.
 
-    Reads TEST_DATABASE_URL from the environment, defaulting to the local
-    docker-compose PostgreSQL instance.
+    Resolution order:
+    1. TEST_DATABASE_URL environment variable (explicit override).
+    2. SQLite in-memory fallback — always available, no external services needed.
+
+    In CI with docker-compose, set TEST_DATABASE_URL to the Postgres instance.
+    Locally without docker, tests run against SQLite automatically.
 
     Returns:
         SQLAlchemy-compatible database URL string.
     """
     return os.getenv(
         "TEST_DATABASE_URL",
-        "postgresql://fxlab:fxlab@localhost:5432/fxlab_test",
+        "sqlite:///:memory:",
     )
 
 
@@ -70,12 +73,22 @@ def integration_db_engine():
 
     Creates all tables on startup and drops them on teardown.
     Uses _integration_db_url() which resolves TEST_DATABASE_URL.
+    When backed by SQLite in-memory, uses StaticPool so the same
+    connection is reused across threads (required for in-memory DBs).
 
     Yields:
         SQLAlchemy Engine connected to the integration test database.
     """
     url = _integration_db_url()
-    engine = create_engine(url)
+    kwargs: dict = {}
+    if url.startswith("sqlite"):
+        from sqlalchemy.pool import StaticPool
+
+        kwargs = {
+            "connect_args": {"check_same_thread": False},
+            "poolclass": StaticPool,
+        }
+    engine = create_engine(url, **kwargs)
     Base.metadata.create_all(engine)
     yield engine
     Base.metadata.drop_all(engine)

@@ -42,11 +42,15 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from libs.contracts.certification import CertificationEvent, CertificationStatus
 from libs.contracts.interfaces.certification_repository import (
     CertificationRepositoryInterface,
 )
+from services.api.auth import AuthenticatedUser, get_current_user
+from services.api.db import get_db
+from services.api.middleware.correlation import correlation_id_var
 
 logger = structlog.get_logger(__name__)
 
@@ -58,29 +62,21 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-def get_certification_repository() -> CertificationRepositoryInterface:
+def get_certification_repository(db: Session = Depends(get_db)) -> CertificationRepositoryInterface:
     """
     Provide a CertificationRepositoryInterface implementation.
 
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
+
     Returns:
-        MockCertificationRepository bootstrap stub until SQL wiring is complete.
-
-    Note:
-        ISS-019 — Wire SqlCertificationRepository via lifespan DI container.
+        CertificationRepositoryInterface implementation (SQL-backed).
     """
-    import os
+    from services.api.repositories.sql_certification_repository import SqlCertificationRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_certification_repository import SqlCertificationRepository
-
-        db = next(get_db())
-        return SqlCertificationRepository(db=db)
-
-    from libs.contracts.mocks.mock_certification_repository import (  # pragma: no cover
-        MockCertificationRepository,
-    )
-    return MockCertificationRepository()  # pragma: no cover
+    return SqlCertificationRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -131,21 +127,15 @@ def _serialize_certification_report(
         payload = _serialize_certification_report(events, datetime.now(timezone.utc))
         assert payload["total_count"] == len(events)
     """
-    blocked_count = sum(
-        1 for e in events if e.status == CertificationStatus.BLOCKED
-    )
-    certified_count = sum(
-        1 for e in events if e.status == CertificationStatus.CERTIFIED
-    )
+    blocked_count = sum(1 for e in events if e.status == CertificationStatus.BLOCKED)
+    certified_count = sum(1 for e in events if e.status == CertificationStatus.CERTIFIED)
     return {
         "certifications": [_serialize_certification_event(e) for e in events],
         "total_count": len(events),
         "blocked_count": blocked_count,
         "certified_count": certified_count,
         "generated_at": (
-            generated_at.isoformat()
-            if hasattr(generated_at, "isoformat")
-            else str(generated_at)
+            generated_at.isoformat() if hasattr(generated_at, "isoformat") else str(generated_at)
         ),
     }
 
@@ -159,6 +149,7 @@ def _serialize_certification_report(
 def get_data_certification(
     x_correlation_id: str = "no-corr",
     repo: CertificationRepositoryInterface = Depends(get_certification_repository),
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> JSONResponse:
     """
     Return the certification report for all feeds.
@@ -176,7 +167,10 @@ def get_data_certification(
         → {"certifications": [...], "total_count": 10, ...}
     """
     corr = x_correlation_id or "no-corr"
-    logger.info("data_certification.request", correlation_id=corr)
+    corr_id = correlation_id_var.get("no-corr")
+    logger.info(
+        "data_certification.request", correlation_id=corr_id, component="data_certification"
+    )
 
     events = repo.list(correlation_id=corr)
     generated_at = datetime.now(timezone.utc)
@@ -184,8 +178,7 @@ def get_data_certification(
     logger.info(
         "data_certification.response",
         feed_count=len(events),
-        correlation_id=corr,
+        correlation_id=corr_id,
+        component="data_certification",
     )
-    return JSONResponse(
-        content=_serialize_certification_report(events, generated_at)
-    )
+    return JSONResponse(content=_serialize_certification_report(events, generated_at))

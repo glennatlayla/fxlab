@@ -26,13 +26,17 @@ Example (curl):
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from libs.contracts.interfaces.feed_health_repository import FeedHealthRepositoryInterface
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
+from services.api.middleware.correlation import correlation_id_var
 
 logger = structlog.get_logger(__name__)
 
@@ -44,28 +48,21 @@ router = APIRouter(prefix="/feed-health", tags=["feed-health"])
 # ---------------------------------------------------------------------------
 
 
-def get_feed_health_repository() -> FeedHealthRepositoryInterface:
+def get_feed_health_repository(db: Session = Depends(get_db)) -> FeedHealthRepositoryInterface:
     """
     Provide the active FeedHealthRepositoryInterface implementation.
 
-    In tests: overridden via app.dependency_overrides[get_feed_health_repository].
-    In production: returns the DB-backed repository wired by the DI container.
+    Always returns the DB-backed repository bound to the current request's session.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
 
     Returns:
-        FeedHealthRepositoryInterface implementation.
+        FeedHealthRepositoryInterface implementation (SQL-backed).
     """
-    # ISS-014: Wire SqlFeedHealthRepository
-    import os
+    from services.api.repositories.sql_feed_health_repository import SqlFeedHealthRepository
 
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_feed_health_repository import SqlFeedHealthRepository
-
-        db = next(get_db())
-        return SqlFeedHealthRepository(db=db)
-
-    from libs.contracts.mocks.mock_feed_health_repository import MockFeedHealthRepository
-    return MockFeedHealthRepository()
+    return SqlFeedHealthRepository(db=db)
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +126,9 @@ def _serialize_health_list(result: Any) -> dict[str, Any]:
 
 @router.get("")
 def get_feed_health(
-    correlation_id: Optional[str] = Query(default=None, alias="x-correlation-id"),
+    correlation_id: str | None = Query(default=None, alias="x-correlation-id"),
     repo: FeedHealthRepositoryInterface = Depends(get_feed_health_repository),
+    user: AuthenticatedUser = Depends(require_scope("feeds:read")),
 ) -> JSONResponse:
     """
     Return the current health status for all registered feeds.
@@ -157,9 +155,11 @@ def get_feed_health(
           }
     """
     corr = correlation_id or "no-corr"
+    corr_id = correlation_id_var.get("no-corr")
     logger.info(
         "feed_health.request",
-        correlation_id=corr,
+        correlation_id=corr_id,
+        component="feed_health",
     )
 
     result = repo.get_all_health(correlation_id=corr)
@@ -167,7 +167,8 @@ def get_feed_health(
     logger.info(
         "feed_health.response",
         feed_count=len(result.feeds),
-        correlation_id=corr,
+        correlation_id=corr_id,
+        component="feed_health",
     )
 
     return JSONResponse(content=_serialize_health_list(result))

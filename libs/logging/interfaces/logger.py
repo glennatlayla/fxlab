@@ -1,12 +1,13 @@
 """Structured logging interface with correlation ID support."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Protocol
 from enum import Enum
+from typing import Any
 
 
 class LogLevel(str, Enum):
     """Log severity levels."""
+
     DEBUG = "debug"
     INFO = "info"
     WARNING = "warning"
@@ -16,7 +17,7 @@ class LogLevel(str, Enum):
 
 class StructuredLogger(ABC):
     """Abstract interface for structured logging with correlation tracking.
-    
+
     All log entries must include correlation IDs and structured context.
     """
 
@@ -29,7 +30,7 @@ class StructuredLogger(ABC):
         **context: Any,
     ) -> None:
         """Emit a structured log entry.
-        
+
         Args:
             level: Log severity level.
             message: Human-readable message.
@@ -62,7 +63,7 @@ class StructuredLogger(ABC):
         **context: Any,
     ) -> None:
         """Log error-level message with optional exception.
-        
+
         Args:
             message: Error description.
             correlation_id: Request/operation correlation ID.

@@ -77,11 +77,8 @@ def require_min_length(value: str, *, field: str, min_len: int) -> None:
     """
     if len(value) < min_len:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"'{field}' must be at least {min_len} characters "
-                f"(got {len(value)})."
-            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(f"'{field}' must be at least {min_len} characters (got {len(value)})."),
         )
 
 
@@ -102,11 +99,8 @@ def require_max_length(value: str, *, field: str, max_len: int) -> None:
     """
     if len(value) > max_len:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"'{field}' must be at most {max_len} characters "
-                f"(got {len(value)})."
-            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(f"'{field}' must be at most {max_len} characters (got {len(value)})."),
         )
 
 
@@ -126,7 +120,7 @@ def require_non_empty(value: str | None, *, field: str) -> None:
     """
     if not value or not value.strip():
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{field}' is required and must not be empty.",
         )
 
@@ -157,11 +151,8 @@ def require_ulid(value: str, *, field: str) -> None:
     """
     if not value or not _ULID_RE.match(value.upper()):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"'{field}' must be a valid ULID (26 Crockford Base32 chars). "
-                f"Got: {value!r}"
-            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(f"'{field}' must be a valid ULID (26 Crockford Base32 chars). Got: {value!r}"),
         )
 
 
@@ -188,13 +179,13 @@ def require_uri(value: str, *, field: str, schemes: tuple[str, ...] = ("http", "
     """
     if not value:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{field}' is required.",
         )
     parsed = urlparse(value)
     if parsed.scheme not in schemes:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
                 f"'{field}' must use one of these schemes: "
                 f"{', '.join(schemes)}. Got scheme: '{parsed.scheme}'."
@@ -203,7 +194,7 @@ def require_uri(value: str, *, field: str, schemes: tuple[str, ...] = ("http", "
     path = parsed.path.rstrip("/")
     if not path:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
                 f"'{field}' must reference a specific resource path, not just "
                 f"the host. Use a Jira ticket, Confluence doc, or issue URL."
@@ -212,7 +203,7 @@ def require_uri(value: str, *, field: str, schemes: tuple[str, ...] = ("http", "
 
 
 def require_pattern(value: str, *, field: str, pattern: str, description: str) -> None:
-    """
+    r"""
     Raise 422 if ``value`` does not match the given regex ``pattern``.
 
     Args:
@@ -231,7 +222,7 @@ def require_pattern(value: str, *, field: str, pattern: str, description: str) -
     """
     if not re.match(pattern, value):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{field}' must be a valid {description}. Got: {value!r}",
         )
 
@@ -258,7 +249,7 @@ def require_ge(value: Any, *, field: str, minimum: int | float) -> None:
     """
     if value < minimum:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{field}' must be ≥ {minimum} (got {value}).",
         )
 
@@ -280,6 +271,6 @@ def require_le(value: Any, *, field: str, maximum: int | float) -> None:
     """
     if value > maximum:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{field}' must be ≤ {maximum} (got {value}).",
         )

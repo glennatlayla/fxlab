@@ -1,71 +1,46 @@
-:root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+/*
+ * FXLab global styles.
+ *
+ * Tailwind base/components/utilities handle 95% of styling.
+ * Custom styles below are for edge cases that Tailwind cannot express.
+ */
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-
-button:hover {
-  border-color: #646cff;
-}
-
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
+@layer base {
+  body {
+    @apply bg-surface-50 text-surface-900 antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
-  a:hover {
-    color: #747bff;
+
+  /* Scrollbar styling for WebKit browsers */
+  ::-webkit-scrollbar {
+    @apply w-2;
   }
-  button {
-    background-color: #f9f9f9;
+
+  ::-webkit-scrollbar-track {
+    @apply bg-surface-100;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-surface-300;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-surface-400;
+  }
+}
+
+@layer components {
+  /* Card container used across dashboard widgets */
+  .card {
+    @apply rounded-lg border border-surface-200 bg-white p-4 shadow-sm;
+  }
+
+  /* Keyboard shortcut badge */
+  .kbd {
+    @apply inline-flex items-center rounded border border-surface-300 bg-surface-100 px-1.5 py-0.5 font-mono text-2xs text-surface-600;
   }
 }

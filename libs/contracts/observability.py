@@ -43,7 +43,7 @@ Example:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -92,9 +92,7 @@ class DependencyHealthRecord(BaseModel):
     """
 
     name: str = Field(..., description="Dependency identifier, e.g. 'database', 'queues'")
-    status: DependencyStatus = Field(
-        ..., description="Reachability / health classification"
-    )
+    status: DependencyStatus = Field(..., description="Reachability / health classification")
     latency_ms: float = Field(
         default=0.0, ge=0.0, description="Round-trip latency in milliseconds; 0.0 when not measured"
     )
@@ -179,19 +177,23 @@ class DiagnosticsSnapshot(BaseModel):
     """
 
     queue_contention_count: int = Field(
-        ..., ge=0,
+        ...,
+        ge=0,
         description="Number of queue classes currently reporting active contention",
     )
     feed_health_count: int = Field(
-        ..., ge=0,
+        ...,
+        ge=0,
         description="Total number of feed health snapshots in the system",
     )
     parity_critical_count: int = Field(
-        ..., ge=0,
+        ...,
+        ge=0,
         description="Number of unresolved CRITICAL severity parity events",
     )
     certification_blocked_count: int = Field(
-        ..., ge=0,
+        ...,
+        ge=0,
         description="Number of feeds with BLOCKED certification status",
     )
     generated_at: datetime = Field(..., description="Snapshot generation timestamp")

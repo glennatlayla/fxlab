@@ -30,14 +30,10 @@ Example:
 
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from libs.contracts.chart import DrawdownPoint, EquityCurvePoint
-from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.chart_repository import ChartRepositoryInterface
 
 logger = structlog.get_logger(__name__)

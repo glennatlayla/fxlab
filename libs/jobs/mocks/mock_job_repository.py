@@ -19,8 +19,6 @@ Example:
     assert retrieved.status == JobStatus.PENDING
 """
 
-from typing import Optional
-
 from libs.contracts.errors import NotFoundError
 from libs.jobs.interfaces.job import Job, JobRepositoryInterface, JobStatus
 

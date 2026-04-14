@@ -171,7 +171,7 @@ class SqlFeedRepository(FeedRepositoryInterface):
         return FeedDetailResponse(
             feed=feed_response,
             version_history=[],
-            connectivity_results=[],
+            connectivity_tests=[],
         )
 
     # -----------------------------------------------------------------------
@@ -192,9 +192,10 @@ class SqlFeedRepository(FeedRepositoryInterface):
         return FeedResponse(
             id=orm_feed.id,
             name=orm_feed.name,
-            feed_type=orm_feed.feed_type,
-            source=orm_feed.source or "",
+            provider=getattr(orm_feed, "provider", None) or orm_feed.source or "",
+            config=getattr(orm_feed, "config", None) or {},
             is_active=orm_feed.is_active,
+            is_quarantined=getattr(orm_feed, "is_quarantined", False),
             created_at=orm_feed.created_at,
             updated_at=orm_feed.updated_at,
         )

@@ -4,24 +4,10 @@ Tests verify AC1: All tables support ULID primary keys and include created_at/up
 """
 
 import pytest
-from datetime import datetime
 from sqlalchemy import inspect
-from sqlalchemy.exc import IntegrityError
+
 from libs.contracts.models import (
-    Base,
     Strategy,
-    StrategyBuild,
-    Candidate,
-    Deployment,
-    Run,
-    Trial,
-    Artifact,
-    AuditEvent,
-    Feed,
-    FeedHealthEvent,
-    ParityEvent,
-    Override,
-    ApprovalRequest,
     User,
 )
 

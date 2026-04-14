@@ -45,11 +45,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -106,9 +105,7 @@ def _validate_evidence_link(value: str | None) -> str:
     raw = str(value)
     parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(
-            f"evidence_link must use http or https scheme (got '{parsed.scheme}')"
-        )
+        raise ValueError(f"evidence_link must use http or https scheme (got '{parsed.scheme}')")
     # Strip trailing slash; '' or '/' after stripping means root path.
     path = parsed.path.rstrip("/")
     if not path:
@@ -136,7 +133,7 @@ class PromotionRequestCreate(BaseModel):
 
     candidate_id: str = Field(..., description="ULID of candidate to promote")
     target_environment: TargetEnvironment
-    evidence_link: Optional[HttpUrl] = Field(
+    evidence_link: HttpUrl | None = Field(
         None,
         description="Optional evidence link (Jira, Confluence, GitHub)",
     )
@@ -158,6 +155,8 @@ class PromotionRequestResponse(BaseModel):
         evidence_link: URI provided at submission time.
         created_at: Server timestamp of creation.
         updated_at: Server timestamp of last update.
+        override_watermark: Optional watermark metadata for active overrides on the
+            promoted candidate. Populated per spec §8.2.
     """
 
     id: str = Field(..., description="ULID")
@@ -165,12 +164,16 @@ class PromotionRequestResponse(BaseModel):
     target_environment: TargetEnvironment
     submitted_by: str
     status: PromotionStatus
-    reviewed_by: Optional[str] = None
-    reviewed_at: Optional[datetime] = None
-    decision_rationale: Optional[str] = None
-    evidence_link: Optional[str] = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    decision_rationale: str | None = None
+    evidence_link: str | None = None
     created_at: datetime
     updated_at: datetime
+    override_watermark: dict[str, Any] | None = Field(
+        None,
+        description="Override watermark metadata for active overrides (spec §8.2)",
+    )
 
     model_config = {"from_attributes": True}
 
@@ -260,8 +263,8 @@ class OverrideRequest(BaseModel):
     object_id: str = Field(..., description="ULID of candidate or deployment")
     object_type: str = Field(..., pattern="^(candidate|deployment)$")
     override_type: OverrideType
-    original_state: Dict[str, Any] = Field(..., description="State before override")
-    new_state: Dict[str, Any] = Field(..., description="State after override")
+    original_state: dict[str, Any] = Field(..., description="State before override")
+    new_state: dict[str, Any] = Field(..., description="State after override")
     evidence_link: str = Field(
         ...,
         description=(
@@ -313,22 +316,28 @@ class OverrideDetail(BaseModel):
         reviewed_at: Review decision timestamp (None until decided).
         created_at: Server creation timestamp.
         updated_at: Server last-update timestamp.
+        override_watermark: Optional watermark metadata indicating an active override
+            on the target entity. Populated in responses per spec §8.2.
     """
 
     id: str = Field(..., description="ULID")
     object_id: str
     object_type: str
     override_type: OverrideType
-    original_state: Dict[str, Any]
-    new_state: Dict[str, Any]
+    original_state: dict[str, Any]
+    new_state: dict[str, Any]
     evidence_link: str
     rationale: str
     submitter_id: str
     status: str
-    reviewed_by: Optional[str] = None
-    reviewed_at: Optional[datetime] = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    override_watermark: dict[str, Any] | None = Field(
+        None,
+        description="Override watermark metadata for active overrides (spec §8.2)",
+    )
 
     model_config = {"from_attributes": True}
 
@@ -352,8 +361,8 @@ class GovernanceOverrideCreate(BaseModel):
     object_id: str = Field(..., description="ULID of candidate or deployment")
     object_type: str = Field(..., pattern="^(candidate|deployment)$")
     override_type: OverrideType
-    original_state: Dict[str, Any] = Field(..., description="State before override")
-    new_state: Dict[str, Any] = Field(..., description="State after override")
+    original_state: dict[str, Any] = Field(..., description="State before override")
+    new_state: dict[str, Any] = Field(..., description="State after override")
     evidence_link: HttpUrl = Field(..., description="Required evidence URI")
     rationale: str = Field(..., min_length=20, description="Override rationale")
 
@@ -369,13 +378,13 @@ class GovernanceOverrideResponse(BaseModel):
     object_id: str
     object_type: str
     override_type: OverrideType
-    original_state: Dict[str, Any]
-    new_state: Dict[str, Any]
+    original_state: dict[str, Any]
+    new_state: dict[str, Any]
     evidence_link: str
     rationale: str
     created_by: str
-    approved_by: Optional[str] = None
-    approved_at: Optional[datetime] = None
+    approved_by: str | None = None
+    approved_at: datetime | None = None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -414,7 +423,7 @@ class DraftAutosavePayload(BaseModel):
     """
 
     user_id: str = Field(..., description="ULID of the user owning this draft")
-    draft_payload: Dict[str, Any] = Field(
+    draft_payload: dict[str, Any] = Field(
         ...,
         description="Partial StrategyDraftInput — may be incomplete",
     )

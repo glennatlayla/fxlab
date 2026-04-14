@@ -47,6 +47,10 @@ COPY libs/ ./libs/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./alembic.ini
 
+# Production sentinel — blocks ENVIRONMENT=test in production builds.
+# See services/api/main.py::_validate_startup_secrets() for enforcement.
+RUN touch /app/.production-build
+
 # Ensure non-root ownership
 RUN chown -R fxlab:fxlab /app
 

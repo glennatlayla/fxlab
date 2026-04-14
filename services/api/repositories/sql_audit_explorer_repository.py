@@ -31,6 +31,8 @@ Example:
 
 from __future__ import annotations
 
+import builtins
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -93,7 +95,7 @@ class SqlAuditExplorerRepository(AuditExplorerRepositoryInterface):
         cursor: str = "",
         limit: int = 50,
         correlation_id: str,
-    ) -> list[AuditEventRecord]:
+    ) -> builtins.list[AuditEventRecord]:
         """
         Return a filtered, cursor-paginated list of audit events.
 
@@ -183,6 +185,73 @@ class SqlAuditExplorerRepository(AuditExplorerRepositoryInterface):
 
         return self._orm_to_contract(orm_event)
 
+    def list_for_export(
+        self,
+        *,
+        date_from: datetime,
+        date_to: datetime,
+        actor: str = "",
+        action_type: str = "",
+        batch_size: int = 1000,
+        offset: int = 0,
+    ) -> builtins.list[AuditEventRecord]:
+        """
+        Return audit events within a date range for export.
+
+        Args:
+            date_from: Start of date range (inclusive).
+            date_to: End of date range (inclusive).
+            actor: Optional filter by actor. Empty = no filter.
+            action_type: Optional filter by action verb prefix. Empty = no filter.
+            batch_size: Maximum number of events to return per call.
+            offset: Pagination offset within the result set.
+
+        Returns:
+            List of matching AuditEventRecord.
+
+        Example:
+            events = repo.list_for_export(
+                date_from=datetime(2025, 1, 1),
+                date_to=datetime(2025, 12, 31),
+                actor="user:123",
+                batch_size=1000,
+                offset=0,
+            )
+        """
+        stmt = select(AuditEventModel).where(
+            AuditEventModel.created_at >= date_from,
+            AuditEventModel.created_at <= date_to,
+        )
+        filters = []
+
+        if actor:
+            filters.append(AuditEventModel.actor == actor)
+        if action_type:
+            filters.append(AuditEventModel.action.startswith(action_type))
+
+        if filters:
+            stmt = stmt.where(and_(*filters))
+
+        # Order by creation time ascending for export (oldest first)
+        stmt = stmt.order_by(AuditEventModel.created_at.asc())
+
+        # Apply pagination
+        stmt = stmt.limit(batch_size).offset(offset)
+
+        orm_events = self.db.execute(stmt).scalars().all()
+        events = [self._orm_to_contract(evt) for evt in orm_events]
+
+        logger.debug(
+            "audit.list_for_export",
+            event_count=len(events),
+            date_from=date_from.isoformat(),
+            date_to=date_to.isoformat(),
+            offset=offset,
+            batch_size=batch_size,
+        )
+
+        return events
+
     # -----------------------------------------------------------------------
     # Private helpers
     # -----------------------------------------------------------------------
@@ -198,12 +267,18 @@ class SqlAuditExplorerRepository(AuditExplorerRepositoryInterface):
         Returns:
             AuditEventRecord Pydantic model.
         """
+        # The AuditEvent ORM model may not have a correlation_id column
+        # (it was not part of the original Phase 1 schema).  Use getattr
+        # with a default to avoid AttributeError when reading events written
+        # before the column was added or on schemas that lack it.
         return AuditEventRecord(
             id=orm_event.id,
             actor=orm_event.actor,
             action=orm_event.action,
-            target_id=orm_event.object_id,
-            target_type=orm_event.object_type,
-            metadata=orm_event.event_metadata or {},
+            object_id=orm_event.object_id,
+            object_type=orm_event.object_type,
+            correlation_id=getattr(orm_event, "correlation_id", "") or "",
+            source=getattr(orm_event, "source", "") or "",
+            event_metadata=getattr(orm_event, "event_metadata", None) or {},
             created_at=orm_event.created_at,
         )

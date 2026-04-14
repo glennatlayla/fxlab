@@ -22,10 +22,10 @@ stable in the backend.
 ```
 MILESTONE INDEX
 ────────────────────────────────────────────────────────────────
-Total milestones: 7
+Total milestones: 9
 Track: M14 Enterprise Hardening
 
-M14: M14-T1, M14-T2, M14-T3, M14-T4, M14-T5, M14-T6, M14-T7
+M14: M14-T1, M14-T2, M14-T3, M14-T4, M14-T5, M14-T6, M14-T7, M14-T8, M14-T9
 ────────────────────────────────────────────────────────────────
 ```
 
@@ -40,8 +40,8 @@ M14: M14-T1, M14-T2, M14-T3, M14-T4, M14-T5, M14-T6, M14-T7
 | No request body size limit | P1 | T1 | **DONE** |
 | No rate limiting | P1 | T1 | **DONE** |
 | Correlation ID not propagated | P2 | T1 | **DONE** (middleware); routes still need log wiring |
-| Zero authentication | P0 | T2 | NOT STARTED |
-| X-User-ID trusted without verification | P0 | T2 | NOT STARTED |
+| Zero authentication | P0 | T2 | **DONE** |
+| X-User-ID trusted without verification | P0 | T2 | **DONE** |
 | Separation of duties not enforced | P2 | T3 | NOT STARTED |
 | No transactional integrity | P2 | T3 | NOT STARTED |
 | Pydantic guards incomplete | P1 | T3 | PARTIAL (~60%) |
@@ -94,7 +94,7 @@ All five deliverables are implemented and tested. Summary of completion:
 
 ---
 
-### M14-T2 — JWT Authentication Middleware  ❌ NOT STARTED
+### M14-T2 — JWT Authentication Middleware  ✅ COMPLETE (2026-04-01)
 
 **Current state:** `services/api/dependencies.py` uses X-User-ID header trust
 (not JWT). No `auth.py` exists. Zero routes are protected. No TEST_TOKEN.
@@ -369,6 +369,147 @@ connection pool validation documentation.
 
 ---
 
+### M14-T8 — OIDC Auth Provider Integration (P1)  ❌ NOT STARTED
+
+**Current state:** Phase 3 spec (line 243) requires "OIDC consuming Phase 1 auth
+service; `@auth0/auth0-react` or equivalent". However:
+- No OIDC provider exists anywhere in the codebase (no Keycloak, no Auth0, no custom IdP).
+- Phase 1 workplan deferred OIDC ("JWT bearer; local bootstrap; replaceable with OIDC later").
+- Current auth is self-rolled HS256 JWT in `services/api/auth.py`.
+- Frontend `AuthProvider.tsx` is a fake stub (`setIsAuthenticated(true)`).
+- No token endpoint, no discovery endpoint, no refresh token flow.
+
+**Spec reference:** `User Spec/FXLab_Phase_3_workplan_v1_1.md` lines 243, 1024–1026, 1041–1043.
+
+**Architecture decision required:** Choose an OIDC approach:
+- **Option A:** Self-hosted Keycloak (docker-compose service) — full control, complex ops.
+- **Option B:** Auth0 managed service — simpler, external dependency.
+- **Option C:** Extend current JWT with OIDC-compatible endpoints — minimal IdP, custom token
+  endpoint + discovery doc + refresh flow. Satisfies the spec's "Phase 1 auth service"
+  language without external dependencies. M22 frontend consumes it via `@auth0/auth0-react`
+  or `oidc-client-ts`.
+
+**Deliverables (regardless of option chosen):**
+
+1. **OIDC discovery endpoint** (`/.well-known/openid-configuration`)
+   - Returns issuer, authorization_endpoint, token_endpoint, jwks_uri, supported scopes.
+   - Required by any OIDC client library (auth0-react, oidc-client-ts).
+
+2. **Token endpoint** (`POST /auth/token`)
+   - Accepts `grant_type=password` (bootstrap) and `grant_type=refresh_token`.
+   - Returns `{ access_token, refresh_token, token_type, expires_in, scope }`.
+   - Access tokens: short-lived (15 min default, configurable via `JWT_EXPIRATION_MINUTES`).
+   - Refresh tokens: long-lived (7 days), stored server-side, revocable.
+
+3. **Refresh token storage** (`services/api/repositories/refresh_token_repository.py`)
+   - SQL table `refresh_tokens`: id, user_id, token_hash (SHA-256), expires_at, revoked_at.
+   - Alembic migration.
+   - Interface + mock for testing.
+
+4. **Token revocation endpoint** (`POST /auth/revoke`)
+   - Revoke a specific refresh token (logout) or all tokens for a user (force logout).
+   - Required for session management and security incident response.
+
+5. **JWKS endpoint** (`GET /auth/jwks`) — *only if migrating to RS256*
+   - Exposes public key for asymmetric token verification.
+   - If staying with HS256 for now, this endpoint can return 501 with documentation.
+
+6. **Scope enforcement** on protected routes
+   - Phase 3 spec defines 10 scopes: `strategies:write`, `runs:write`,
+     `promotions:request`, `approvals:write`, `overrides:request`,
+     `overrides:approve`, `exports:read`, `feeds:read`, `operator:read`, `audit:read`.
+   - `get_current_user` already extracts `role`; need a `require_scope("scope_name")`
+     dependency that checks token claims against required scope.
+   - Routes that require specific scopes must use `Depends(require_scope("..."))`.
+
+7. **Update `services/api/auth.py`** to include `scope` claim in tokens.
+
+8. **Update frontend `AuthProvider.tsx`** to use real token endpoint.
+   - Wire `@auth0/auth0-react` or `oidc-client-ts` to the OIDC discovery endpoint.
+   - Implement silent refresh via refresh token.
+   - Implement session persistence (store refresh token in httpOnly cookie or secure storage).
+   - Implement logout (call revoke endpoint, clear session).
+
+**Acceptance criteria:**
+- `GET /.well-known/openid-configuration` returns valid OIDC discovery document.
+- `POST /auth/token` with valid credentials returns access + refresh token.
+- `POST /auth/token` with `grant_type=refresh_token` returns new access token.
+- Access token expires after configured minutes; refresh token extends session.
+- `POST /auth/revoke` invalidates refresh token; subsequent refresh fails.
+- Frontend `AuthProvider` completes full auth flow against running backend (E2E).
+- Authenticated routes redirect to login when session is absent.
+- `hasScope("scope")` correctly reflects RBAC scopes from token claims.
+- Silent refresh succeeds without user interaction when access token expires.
+
+---
+
+### M14-T9 — Spec-Workplan Gap Closure (P2)  ❌ NOT STARTED
+
+**Purpose:** Address Phase 3 spec requirements that have no corresponding workplan
+task. Identified during 2026-04-01 audit comparing spec vs workplan.
+
+**Gap 1: Route-level scope enforcement**
+- Spec §7.7 defines 10 scopes and 4 default roles.
+- No route currently checks scopes — only checks for a valid token (authentication
+  without authorization).
+- Deliverable: `require_scope(scope_name)` FastAPI dependency; wire to routes per spec.
+- Blocked by: M14-T8 (scope claim in tokens).
+
+**Gap 2: Observability metrics**
+- Spec §15 requires Prometheus counters: `approval_requests_total`,
+  `override_requests_total`, `chart_cache_hits_total`, `lttb_applied_total`,
+  `export_requests_total`.
+- No metrics instrumentation exists.
+- Deliverable: `services/api/metrics.py` with `prometheus_client` counters;
+  `/metrics` endpoint for Prometheus scraping.
+
+**Gap 3: Draft autosave cleanup job**
+- Spec §7.5 requires purging autosaves older than 30 days.
+- No scheduled cleanup exists.
+- Deliverable: Management command or Celery beat task for `draft_autosaves` cleanup.
+
+**Gap 4: Chart cache eviction**
+- Spec §7.3 specifies write-once caching for completed runs, partial cache flagging.
+- Write-through cache not wired to SQL; no eviction policy documented.
+- Deliverable: Wire chart cache to SQL; document eviction policy.
+
+**Gap 5: mypy in GitHub Actions CI**
+- mypy runs in pre-commit but NOT in `.github/workflows/ci.yml` quality job.
+- Type errors can slip through if pre-commit is bypassed.
+- Deliverable: Add mypy step to CI quality job.
+
+**Gap 6: Governance structured log wiring**
+- Correlation ID middleware is DONE (T1), but route handlers do not include
+  `correlation_id` in their structured log calls yet.
+- Deliverable: Update all 17 route files to pass `correlation_id_var.get()` in log extras.
+- Note: Partially overlaps with M14-T3 (service layer).
+
+**Gap 7: Override watermark propagation to all 5 surfaces**
+- Spec §8.2 requires watermark visible on: run card, readiness page, export metadata,
+  strategy version page, approval detail.
+- Backend watermark model exists but propagation to all response payloads not confirmed.
+- Deliverable: Verify and wire watermark inclusion in all 5 API response shapes.
+
+**Gap 8: Evidence link bare-domain validation**
+- Spec M23 acceptance criteria require rejecting bare domains like `https://jira.example.com`
+  (must have a path component).
+- Current validation allows bare domains.
+- Deliverable: Update evidence_link validation to require path component.
+
+**Gap 9: Frontend acceptance test pack**
+- Spec §16 defines 28 Playwright E2E test scenarios.
+- No frontend tests exist.
+- Deliverable: Playwright test infrastructure + test scenarios (M31 scope, documented here
+  for tracking).
+
+**Acceptance criteria:**
+- Each gap has a corresponding implementation or explicit `# DEFERRED: <milestone>` comment.
+- mypy passes in GitHub Actions CI.
+- Correlation ID present in all route handler log lines.
+- Scope enforcement present on at least one route as proof-of-concept.
+
+---
+
 ## Definition of Done
 
 M14 is DONE when ALL of the following are true:
@@ -379,7 +520,7 @@ M14 is DONE when ALL of the following are true:
 - [x] POST to any endpoint with body > 512 KB returns 413.
 - [x] Governance endpoints rate-limited at 20 req/min.
 - [x] Every response carries `X-Correlation-ID`.
-- [ ] Inline `/health` duplicate removed from `main.py`.
+- [x] Inline `/health` duplicate removed from `main.py`.
 
 ### T2 (Authentication)
 - [ ] `services/api/auth.py` exists with `get_current_user()`, `get_optional_user()`, `create_access_token()`.
@@ -418,3 +559,19 @@ M14 is DONE when ALL of the following are true:
 - [ ] `DEPLOYMENT.md` present with HTTPS, secrets, pool, and pre-flight checklist.
 - [ ] `services/api/db.py` reads pool config from env vars.
 - [ ] `.env.example` includes all production-required variables.
+
+### T8 (OIDC Auth Provider)
+- [ ] OIDC discovery endpoint at `/.well-known/openid-configuration`.
+- [ ] Token endpoint (`POST /auth/token`) returns access + refresh tokens.
+- [ ] Refresh token flow works (silent refresh without user interaction).
+- [ ] Token revocation endpoint (`POST /auth/revoke`) invalidates refresh tokens.
+- [ ] `scope` claim included in access tokens.
+- [ ] `require_scope()` dependency enforces scope checks on routes.
+- [ ] Frontend `AuthProvider.tsx` wired to real OIDC endpoints.
+- [ ] Auth E2E test passes against running backend.
+
+### T9 (Spec-Workplan Gap Closure)
+- [ ] mypy step added to GitHub Actions CI quality job.
+- [ ] Correlation ID present in all route handler structured logs.
+- [ ] Scope enforcement on at least one route (proof-of-concept).
+- [ ] All gaps documented with implementation or `# DEFERRED: <milestone>` comment.

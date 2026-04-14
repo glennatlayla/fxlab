@@ -3,9 +3,9 @@ Unit tests for health service endpoints.
 Demonstrates testing pattern: happy path + error conditions.
 Achieves >90% coverage per quality rules.
 """
+
 import pytest
 from fastapi.testclient import TestClient
-
 from main import app
 
 
@@ -44,8 +44,9 @@ def test_readiness_endpoint_shutdown_state(client, monkeypatch):
     """Readiness returns 503 during graceful shutdown."""
     # Simulate shutdown flag
     import main
+
     monkeypatch.setattr(main, "shutdown_requested", True)
-    
+
     response = client.get("/ready")
     assert response.status_code == 503
     data = response.json()
@@ -65,10 +66,7 @@ def test_liveness_endpoint_returns_200(client):
 def test_correlation_id_header_propagation(client):
     """Correlation ID from request is echoed in response header."""
     correlation_id = "test-correlation-123"
-    response = client.get(
-        "/health",
-        headers={"X-Correlation-ID": correlation_id}
-    )
+    response = client.get("/health", headers={"X-Correlation-ID": correlation_id})
     assert response.headers["X-Correlation-ID"] == correlation_id
 
 
@@ -99,6 +97,7 @@ def test_cors_headers_not_present_by_default(client):
 def test_response_time_reasonable(client):
     """Health endpoints respond within reasonable time."""
     import time
+
     start = time.time()
     response = client.get("/health")
     duration = time.time() - start

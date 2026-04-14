@@ -25,15 +25,26 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://fxlab:fxlab@postgres:5432/fxlab
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-fxlab}:${POSTGRES_PASSWORD:-fxlab}@postgres:5432/${POSTGRES_DB:-fxlab}
       - REDIS_URL=redis://redis:6379/0
-      - LOG_LEVEL=INFO
+      - LOGIN_TRACKER_BACKEND=redis
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - PYTHONUNBUFFERED=1
-      - ENVIRONMENT=development
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4317}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-fxlab-api}
+      - OTEL_TRACES_SAMPLER_ARG=${OTEL_TRACES_SAMPLER_ARG:-1.0}
+      - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-fxlab}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-fxlab-api}
+      - KEYCLOAK_ADMIN_CLIENT_SECRET=${KEYCLOAK_ADMIN_CLIENT_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      keycloak:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -75,6 +86,40 @@ services:
       - fxlab-net
 
   # ---------------------------------------------------------------------------
+  # Keycloak — Identity Provider (RS256 token issuance, user management)
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: fxlab-keycloak
+    command: start-dev --import-realm
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-admin}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set in .env}
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-fxlab}
+      - KC_DB_USERNAME=${POSTGRES_USER:-fxlab}
+      - KC_DB_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      - KC_HEALTH_ENABLED=true
+      - KC_METRICS_ENABLED=true
+    volumes:
+      - ./config/keycloak:/opt/keycloak/data/import:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200\\|UP' <&3"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+
+  # ---------------------------------------------------------------------------
   # PostgreSQL — relational metadata database
   # ---------------------------------------------------------------------------
   postgres:
@@ -83,9 +128,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=fxlab
-      - POSTGRES_PASSWORD=fxlab
-      - POSTGRES_DB=fxlab
+      - POSTGRES_USER=${POSTGRES_USER:-fxlab}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-fxlab}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -115,6 +160,28 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+
+  # ---------------------------------------------------------------------------
+  # Jaeger — Distributed tracing backend (OpenTelemetry)
+  # ---------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    container_name: fxlab-jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC receiver
+      - "4318:4318"     # OTLP HTTP receiver
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:16687/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
     networks:
       - fxlab-net

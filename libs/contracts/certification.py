@@ -36,9 +36,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CertificationStatus(str, Enum):
@@ -101,18 +100,17 @@ class CertificationEvent(BaseModel):
             "Uses str (not Optional[str]) to avoid pydantic-core cross-arch stub (LL-007)."
         ),
     )
-    certified_at: Optional[datetime] = Field(
+    certified_at: datetime | None = Field(
         default=None,
         description="Timestamp when certification was granted; None if never certified",
     )
-    expires_at: Optional[datetime] = Field(
+    expires_at: datetime | None = Field(
         default=None,
         description="Timestamp when certification expires; None if no expiry set",
     )
     generated_at: datetime = Field(..., description="Record generation timestamp")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CertificationReport(BaseModel):

@@ -16,14 +16,16 @@ These tests do NOT test individual units in isolation — they verify the
 full permission enforcement path with real components wired together.
 """
 
-import pytest
-from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from libs.authz.interfaces.rbac import Permission, Role, ROLE_PERMISSIONS
+import pytest
+from fastapi.testclient import TestClient
+
+from libs.authz.interfaces.rbac import Permission, Role
 from libs.authz.mocks.mock_rbac import MockRBACService
 from services.api.main import app, check_permission
 
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -50,7 +52,7 @@ def populated_rbac() -> MockRBACService:
     svc = MockRBACService()
     svc.set_role("01HQAAAAAAAAAAAAAAAAAAAAAA", Role.ADMIN)
     svc.set_role("01HQBBBBBBBBBBBBBBBBBBBBBB", Role.OPERATOR)
-    svc.set_role("01HQCCCCCCCCCCCCCCCCCCCCCC", Role.RESEARCHER)
+    svc.set_role("01HQCCCCCCCCCCCCCCCCCCCCCC", Role.REVIEWER)
     svc.set_role("01HQDDDDDDDDDDDDDDDDDDDDDD", Role.VIEWER)
     return svc
 
@@ -77,7 +79,7 @@ class TestRolePermissionMatrix:
     # Expected True/False matrix per role.
     # Rows: role, Columns: permission
     EXPECTED: dict[Role, dict[Permission, bool]] = {
-        Role.ADMIN: {p: True for p in Permission},
+        Role.ADMIN: dict.fromkeys(Permission, True),
         Role.OPERATOR: {
             Permission.REQUEST_PROMOTION: False,
             Permission.APPROVE_PROMOTION: True,
@@ -91,7 +93,7 @@ class TestRolePermissionMatrix:
             Permission.VIEW_FEED_HEALTH: True,
             Permission.VIEW_QUEUE_CONTENTION: True,
         },
-        Role.RESEARCHER: {
+        Role.REVIEWER: {
             Permission.REQUEST_PROMOTION: True,
             Permission.APPROVE_PROMOTION: False,
             Permission.REJECT_PROMOTION: False,
@@ -131,27 +133,21 @@ class TestRolePermissionMatrix:
         operator_id = "01HQBBBBBBBBBBBBBBBBBBBBBB"
         for perm, expected in self.EXPECTED[Role.OPERATOR].items():
             result = populated_rbac.has_permission(operator_id, perm)
-            assert result == expected, (
-                f"Operator.{perm.value}: expected {expected}, got {result}"
-            )
+            assert result == expected, f"Operator.{perm.value}: expected {expected}, got {result}"
 
     def test_researcher_permission_matrix(self, populated_rbac: MockRBACService) -> None:
         """Researcher has exactly the researcher-level permissions."""
         researcher_id = "01HQCCCCCCCCCCCCCCCCCCCCCC"
-        for perm, expected in self.EXPECTED[Role.RESEARCHER].items():
+        for perm, expected in self.EXPECTED[Role.REVIEWER].items():
             result = populated_rbac.has_permission(researcher_id, perm)
-            assert result == expected, (
-                f"Researcher.{perm.value}: expected {expected}, got {result}"
-            )
+            assert result == expected, f"Researcher.{perm.value}: expected {expected}, got {result}"
 
     def test_viewer_permission_matrix(self, populated_rbac: MockRBACService) -> None:
         """Viewer has read-only permissions and none of the write permissions."""
         viewer_id = "01HQDDDDDDDDDDDDDDDDDDDDDD"
         for perm, expected in self.EXPECTED[Role.VIEWER].items():
             result = populated_rbac.has_permission(viewer_id, perm)
-            assert result == expected, (
-                f"Viewer.{perm.value}: expected {expected}, got {result}"
-            )
+            assert result == expected, f"Viewer.{perm.value}: expected {expected}, got {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +166,7 @@ class TestCheckPermissionWithRBACService:
     def test_researcher_granted_request_promotion(self, rbac: MockRBACService) -> None:
         """Researcher is granted REQUEST_PROMOTION via check_permission."""
         user_id = "01HQCCCCCCCCCCCCCCCCCCCCCC"
-        rbac.set_role(user_id, Role.RESEARCHER)
+        rbac.set_role(user_id, Role.REVIEWER)
         result = check_permission(
             user_id,
             permission=Permission.REQUEST_PROMOTION,
@@ -214,7 +210,7 @@ class TestCheckPermissionWithRBACService:
     def test_researcher_denied_approve_promotion(self, rbac: MockRBACService) -> None:
         """Researcher cannot approve promotions — separation of duties."""
         user_id = "01HQCCCCCCCCCCCCCCCCCCCCCC"
-        rbac.set_role(user_id, Role.RESEARCHER)
+        rbac.set_role(user_id, Role.REVIEWER)
         result = check_permission(
             user_id,
             permission=Permission.APPROVE_PROMOTION,
@@ -271,12 +267,12 @@ class TestMockRBACIntrospection:
     def test_get_all_roles_reflects_all_set_roles(self, rbac: MockRBACService) -> None:
         """get_all_roles() returns a mapping of all registered users → roles."""
         rbac.set_role("01HQAAAAAAAAAAAAAAAAAAAAAA", Role.ADMIN)
-        rbac.set_role("01HQBBBBBBBBBBBBBBBBBBBBBB", Role.RESEARCHER)
+        rbac.set_role("01HQBBBBBBBBBBBBBBBBBBBBBB", Role.REVIEWER)
 
         snapshot = rbac.get_all_roles()
 
         assert snapshot["01HQAAAAAAAAAAAAAAAAAAAAAA"] == Role.ADMIN
-        assert snapshot["01HQBBBBBBBBBBBBBBBBBBBBBB"] == Role.RESEARCHER
+        assert snapshot["01HQBBBBBBBBBBBBBBBBBBBBBB"] == Role.REVIEWER
         assert len(snapshot) == 2
 
     def test_get_all_roles_returns_shallow_copy(self, rbac: MockRBACService) -> None:
@@ -290,9 +286,7 @@ class TestMockRBACIntrospection:
         # Original role must be unchanged
         assert rbac.get_role(user_id) == Role.ADMIN
 
-    def test_count_registered_matches_number_of_set_role_calls(
-        self, rbac: MockRBACService
-    ) -> None:
+    def test_count_registered_matches_number_of_set_role_calls(self, rbac: MockRBACService) -> None:
         """count_registered() equals the number of distinct set_role() calls."""
         assert rbac.count_registered() == 0
         rbac.set_role("01HQAAAAAAAAAAAAAAAAAAAAAA", Role.ADMIN)
@@ -334,7 +328,7 @@ class TestPromotionEndpointWithRealRBAC:
         receives 202 Accepted when the endpoint delegates to check_permission.
         """
         rbac = MockRBACService()
-        rbac.set_role("01HQBBBBBBBBBBBBBBBBBBBBBB", Role.RESEARCHER)
+        rbac.set_role("01HQBBBBBBBBBBBBBBBBBBBBBB", Role.REVIEWER)
 
         def real_check(requester_id: str, **_kwargs: object) -> bool:
             return rbac.has_permission(requester_id, Permission.REQUEST_PROMOTION)
@@ -347,7 +341,9 @@ class TestPromotionEndpointWithRealRBAC:
                 }
                 with patch("services.api.main.audit_service"):
                     response = api_client.post(
-                        "/promotions/request", json=self._VALID_PAYLOAD
+                        "/promotions/request",
+                        json=self._VALID_PAYLOAD,
+                        headers=AUTH_HEADERS,
                     )
 
         assert response.status_code == 202, response.text
@@ -366,7 +362,9 @@ class TestPromotionEndpointWithRealRBAC:
 
         with patch("services.api.main.check_permission", side_effect=real_check):
             response = api_client.post(
-                "/promotions/request", json=self._VALID_PAYLOAD
+                "/promotions/request",
+                json=self._VALID_PAYLOAD,
+                headers=AUTH_HEADERS,
             )
 
         assert response.status_code == 403
@@ -383,7 +381,9 @@ class TestPromotionEndpointWithRealRBAC:
 
         with patch("services.api.main.check_permission", side_effect=real_check):
             response = api_client.post(
-                "/promotions/request", json=self._VALID_PAYLOAD
+                "/promotions/request",
+                json=self._VALID_PAYLOAD,
+                headers=AUTH_HEADERS,
             )
 
         assert response.status_code == 403
@@ -404,14 +404,14 @@ class TestPromotionEndpointWithRealRBAC:
                 }
                 with patch("services.api.main.audit_service"):
                     response = api_client.post(
-                        "/promotions/request", json=self._VALID_PAYLOAD
+                        "/promotions/request",
+                        json=self._VALID_PAYLOAD,
+                        headers=AUTH_HEADERS,
                     )
 
         assert response.status_code == 202
 
-    def test_unknown_user_denied_when_no_default_role(
-        self, api_client: TestClient
-    ) -> None:
+    def test_unknown_user_denied_when_no_default_role(self, api_client: TestClient) -> None:
         """
         An unregistered user_id raises NotFoundError in MockRBACService
         when no default_role is set; the endpoint propagates this as 403.
@@ -428,7 +428,9 @@ class TestPromotionEndpointWithRealRBAC:
 
         with patch("services.api.main.check_permission", side_effect=real_check):
             response = api_client.post(
-                "/promotions/request", json=self._VALID_PAYLOAD
+                "/promotions/request",
+                json=self._VALID_PAYLOAD,
+                headers=AUTH_HEADERS,
             )
 
         assert response.status_code == 403

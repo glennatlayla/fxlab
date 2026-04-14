@@ -19,14 +19,11 @@ from sqlalchemy.orm import sessionmaker
 
 from libs.contracts.audit import write_audit_event
 from libs.contracts.models import (
-    AuditEvent,
     Artifact,
+    AuditEvent,
     Base,
-    Candidate,
-    Deployment,
     Feed,
     FeedHealthEvent,
-    Override,
     Run,
     Strategy,
     Trial,
@@ -37,14 +34,14 @@ from libs.contracts.models import (
 # 26-char test ULIDs (Crockford Base32, all uppercase)
 # Format: "01HQ" (4 chars) + 22 repeated chars = 26 total
 # ---------------------------------------------------------------------------
-UID_USER = "01HQAAAAAAAAAAAAAAAAAAAAAA"   # 26 chars
+UID_USER = "01HQAAAAAAAAAAAAAAAAAAAAAA"  # 26 chars
 UID_STRAT = "01HQBBBBBBBBBBBBBBBBBBBBBB"  # 26 chars
-UID_RUN1 = "01HQCCCCCCCCCCCCCCCCCCCCCC"   # 26 chars
-UID_RUN2 = "01HQDDDDDDDDDDDDDDDDDDDDDD"   # 26 chars
-UID_RUN3 = "01HQEEEEEEEEEEEEEEEEEEEEEE"   # 26 chars
-UID_RUN4 = "01HQFFFFFFFFFFFFFFFFFFFFFF"   # 26 chars
-UID_FEED = "01HQGGGGGGGGGGGGGGGGGGGGGG"   # 26 chars
-UID_ARTI = "01HQHHHHHHHHHHHHHHHHHHHHHH"   # 26 chars
+UID_RUN1 = "01HQCCCCCCCCCCCCCCCCCCCCCC"  # 26 chars
+UID_RUN2 = "01HQDDDDDDDDDDDDDDDDDDDDDD"  # 26 chars
+UID_RUN3 = "01HQEEEEEEEEEEEEEEEEEEEEEE"  # 26 chars
+UID_RUN4 = "01HQFFFFFFFFFFFFFFFFFFFFFF"  # 26 chars
+UID_FEED = "01HQGGGGGGGGGGGGGGGGGGGGGG"  # 26 chars
+UID_ARTI = "01HQHHHHHHHHHHHHHHHHHHHHHH"  # 26 chars
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -100,7 +97,7 @@ def test_user(session):
         id=UID_USER,
         email="test@fxlab.io",
         hashed_password="$2b$12$hashed",
-        role="researcher",
+        role="operator",
     )
     session.add(user)
     session.flush()  # Write to DB within the current (nested) transaction
@@ -262,9 +259,7 @@ class TestM2ObjectGraph:
         session.add(health)
         session.flush()
 
-        queried = (
-            session.query(FeedHealthEvent).filter_by(feed_id=feed.id).first()
-        )
+        queried = session.query(FeedHealthEvent).filter_by(feed_id=feed.id).first()
         assert queried is not None
         assert queried.status == "healthy"
 

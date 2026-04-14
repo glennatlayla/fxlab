@@ -31,14 +31,16 @@ Example:
 from __future__ import annotations
 
 import os
-import threading
-import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from typing import Any
 
 import structlog
 
-from libs.contracts.interfaces.dependency_health_repository import DependencyHealthRepositoryInterface
+from libs.contracts.interfaces.dependency_health_repository import (
+    DependencyHealthRepositoryInterface,
+)
 from libs.contracts.observability import DependencyHealthRecord, DependencyHealthResponse
 
 logger = structlog.get_logger(__name__)
@@ -160,6 +162,7 @@ class RealDependencyHealthRepository(DependencyHealthRepositoryInterface):
         Returns:
             DependencyHealthRecord with OK or DOWN status.
         """
+
         def _check():
             try:
                 from services.api.db import check_db_connection
@@ -191,6 +194,7 @@ class RealDependencyHealthRepository(DependencyHealthRepositoryInterface):
         Returns:
             DependencyHealthRecord with OK or DOWN status.
         """
+
         def _check():
             redis_url = os.environ.get("REDIS_URL")
             if not redis_url:
@@ -231,6 +235,7 @@ class RealDependencyHealthRepository(DependencyHealthRepositoryInterface):
         Returns:
             DependencyHealthRecord with OK or DOWN status.
         """
+
         def _check():
             bucket = os.environ.get("ARTIFACT_BUCKET")
             endpoint = os.environ.get("MINIO_ENDPOINT")
@@ -283,10 +288,12 @@ class RealDependencyHealthRepository(DependencyHealthRepositoryInterface):
         Returns:
             DependencyHealthRecord with OK or DOWN status.
         """
+
         def _check():
             try:
-                from services.api.db import engine
                 from sqlalchemy import text
+
+                from services.api.db import engine
 
                 with engine.connect() as conn:
                     conn.execute(text("SELECT COUNT(*) FROM feed_health_events"))
@@ -322,38 +329,35 @@ class RealDependencyHealthRepository(DependencyHealthRepositoryInterface):
         Returns:
             DependencyHealthRecord with status and detail.
         """
-        result_holder = []
-
-        def run_check():
+        # Use a bounded thread pool (max 4 concurrent checks) to prevent
+        # thread exhaustion under load.
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="health") as pool:
+            future = pool.submit(check_fn)
             try:
-                status = check_fn()
-                result_holder.append(status)
+                status = future.result(timeout=_CHECK_TIMEOUT)
+            except FutureTimeoutError:
+                logger.warning(
+                    "dependency_health.check_timeout",
+                    dependency=name,
+                    timeout_seconds=_CHECK_TIMEOUT,
+                    correlation_id=correlation_id,
+                    component="dependency_health",
+                )
+                status = "DOWN"
+                detail = f"Check timed out after {_CHECK_TIMEOUT}s"
             except Exception as exc:
                 logger.warning(
                     "dependency_health.check_exception",
                     dependency=name,
                     error=str(exc),
+                    exc_info=True,
                     correlation_id=correlation_id,
+                    component="dependency_health",
                 )
-                result_holder.append("DOWN")
-
-        thread = threading.Thread(target=run_check, daemon=True)
-        thread.start()
-        thread.join(timeout=_CHECK_TIMEOUT)
-
-        if not result_holder:
-            # Timeout occurred
-            logger.warning(
-                "dependency_health.check_timeout",
-                dependency=name,
-                timeout_seconds=_CHECK_TIMEOUT,
-                correlation_id=correlation_id,
-            )
-            status = "DOWN"
-            detail = f"Check timed out after {_CHECK_TIMEOUT}s"
-        else:
-            status = result_holder[0]
-            detail = f"{name} connectivity check: {status.lower()}"
+                status = "DOWN"
+                detail = f"{name} check failed: {exc}"
+            else:
+                detail = f"{name} connectivity check: {status.lower()}"
 
         return DependencyHealthRecord(
             name=name,

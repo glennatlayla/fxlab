@@ -34,9 +34,10 @@ Example:
 from __future__ import annotations
 
 import json
-import structlog
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
+import structlog
 
 from libs.storage.base import ArtifactStorageBase
 
@@ -159,8 +160,8 @@ class LocalArtifactStorage(ArtifactStorageBase):
         data: bytes,
         bucket: str,
         key: str,
-        metadata: Optional[dict[str, Any]] = None,
-        correlation_id: Optional[str] = None,
+        metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """
         Write bytes to <root>/<bucket>/<key> and store metadata sidecar.
@@ -299,7 +300,7 @@ class LocalArtifactStorage(ArtifactStorageBase):
         bucket: str,
         prefix: str,
         correlation_id: str,
-        max_keys: Optional[int] = None,
+        max_keys: int | None = None,
     ) -> list[str]:
         """
         Return object keys in <bucket> whose key matches the given prefix.

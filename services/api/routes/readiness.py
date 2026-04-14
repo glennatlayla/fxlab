@@ -3,9 +3,14 @@ Readiness report endpoints.
 
 GET /runs/{run_id}/readiness - Retrieve readiness report for a run
 """
-import structlog
-from fastapi import APIRouter, HTTPException, Path
+
 from typing import Annotated
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Path
+
+from services.api.auth import AuthenticatedUser, get_current_user
+from services.api.middleware.correlation import correlation_id_var
 
 logger = structlog.get_logger()
 
@@ -23,28 +28,40 @@ def is_valid_ulid(ulid: str) -> bool:
 
 @router.get("/runs/{run_id}/readiness")
 async def get_run_readiness(
-    run_id: Annotated[str, Path(description="Run ULID")]
+    run_id: Annotated[str, Path(description="Run ULID")],
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Retrieve readiness report for a specific run.
-    
+
     Returns readiness grade and any blockers preventing promotion.
     """
-    logger.info("readiness.get", run_id=run_id)
-    
+    corr_id = correlation_id_var.get("no-corr")
+    logger.info("readiness.get", run_id=run_id, correlation_id=corr_id, component="readiness")
+
     # Validate ULID format
     if not is_valid_ulid(run_id):
-        logger.warning("readiness.invalid_ulid", run_id=run_id)
+        logger.warning(
+            "readiness.invalid_ulid", run_id=run_id, correlation_id=corr_id, component="readiness"
+        )
         raise HTTPException(status_code=422, detail="Invalid ULID format")
-    
+
     # Import here to allow test patching
     from services.api.main import get_readiness_report
-    
+
     report = get_readiness_report(run_id)
-    
+
     if report is None:
-        logger.warning("readiness.not_found", run_id=run_id)
+        logger.warning(
+            "readiness.not_found", run_id=run_id, correlation_id=corr_id, component="readiness"
+        )
         raise HTTPException(status_code=404, detail="Run not found")
-    
-    logger.info("readiness.retrieved", run_id=run_id, grade=report.get("readiness_grade"))
+
+    logger.info(
+        "readiness.retrieved",
+        run_id=run_id,
+        grade=report.get("readiness_grade"),
+        correlation_id=corr_id,
+        component="readiness",
+    )
     return report

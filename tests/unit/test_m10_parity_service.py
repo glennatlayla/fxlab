@@ -39,9 +39,10 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from libs.contracts.errors import NotFoundError
 from libs.contracts.mocks.mock_parity_repository import MockParityRepository
 from libs.contracts.parity import ParityEvent, ParityEventSeverity
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 # ---------------------------------------------------------------------------
 # Shared test data constants
@@ -205,8 +206,12 @@ class TestMockParityRepositoryM10:
         THEN only the AAPL CRITICAL event is returned.
         """
         repo = MockParityRepository()
-        repo.save(_make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.CRITICAL))
-        repo.save(_make_event(_PARITY_ULID_2, instrument="GOOG", severity=ParityEventSeverity.CRITICAL))
+        repo.save(
+            _make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.CRITICAL)
+        )
+        repo.save(
+            _make_event(_PARITY_ULID_2, instrument="GOOG", severity=ParityEventSeverity.CRITICAL)
+        )
         result = repo.list(severity="CRITICAL", instrument="AAPL", correlation_id="c")
         assert len(result) == 1
         assert result[0].instrument == "AAPL"
@@ -218,8 +223,12 @@ class TestMockParityRepositoryM10:
         THEN two ParityInstrumentSummary entries are returned with correct counts.
         """
         repo = MockParityRepository()
-        repo.save(_make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.CRITICAL))
-        repo.save(_make_event(_PARITY_ULID_2, instrument="AAPL", severity=ParityEventSeverity.WARNING))
+        repo.save(
+            _make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.CRITICAL)
+        )
+        repo.save(
+            _make_event(_PARITY_ULID_2, instrument="AAPL", severity=ParityEventSeverity.WARNING)
+        )
         repo.save(_make_event(_PARITY_ULID_3, instrument="GOOG", severity=ParityEventSeverity.INFO))
         summaries = repo.summarize(correlation_id="c")
         by_instrument = {s.instrument: s for s in summaries}
@@ -254,8 +263,12 @@ class TestMockParityRepositoryM10:
         """
         repo = MockParityRepository()
         repo.save(_make_event(_PARITY_ULID_1, instrument="TSLA", severity=ParityEventSeverity.INFO))
-        repo.save(_make_event(_PARITY_ULID_2, instrument="TSLA", severity=ParityEventSeverity.WARNING))
-        repo.save(_make_event(_PARITY_ULID_3, instrument="TSLA", severity=ParityEventSeverity.CRITICAL))
+        repo.save(
+            _make_event(_PARITY_ULID_2, instrument="TSLA", severity=ParityEventSeverity.WARNING)
+        )
+        repo.save(
+            _make_event(_PARITY_ULID_3, instrument="TSLA", severity=ParityEventSeverity.CRITICAL)
+        )
         summaries = repo.summarize(correlation_id="c")
         tsla = next(s for s in summaries if s.instrument == "TSLA")
         assert tsla.worst_severity == "CRITICAL"
@@ -284,8 +297,12 @@ class TestParityEventsEndpointExtended:
     def mixed_repo(self) -> MockParityRepository:
         """Repo with AAPL (WARNING), AAPL (CRITICAL), GOOG (INFO)."""
         repo = MockParityRepository()
-        repo.save(_make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.WARNING))
-        repo.save(_make_event(_PARITY_ULID_2, instrument="AAPL", severity=ParityEventSeverity.CRITICAL))
+        repo.save(
+            _make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.WARNING)
+        )
+        repo.save(
+            _make_event(_PARITY_ULID_2, instrument="AAPL", severity=ParityEventSeverity.CRITICAL)
+        )
         repo.save(_make_event(_PARITY_ULID_3, instrument="GOOG", severity=ParityEventSeverity.INFO))
         return repo
 
@@ -305,7 +322,7 @@ class TestParityEventsEndpointExtended:
         WHEN GET /parity/events (no params) is requested
         THEN all 3 are returned (backward-compat).
         """
-        resp = client.get("/parity/events")
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         body = resp.json()
         assert body["total_count"] == 3
@@ -318,7 +335,7 @@ class TestParityEventsEndpointExtended:
 
         FAILS: endpoint does not accept severity param until GREEN.
         """
-        resp = client.get("/parity/events", params={"severity": "CRITICAL"})
+        resp = client.get("/parity/events", params={"severity": "CRITICAL"}, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         body = resp.json()
         assert body["total_count"] == 1
@@ -332,7 +349,7 @@ class TestParityEventsEndpointExtended:
 
         FAILS: endpoint does not accept instrument param until GREEN.
         """
-        resp = client.get("/parity/events", params={"instrument": "AAPL"})
+        resp = client.get("/parity/events", params={"instrument": "AAPL"}, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         body = resp.json()
         assert body["total_count"] == 2
@@ -345,7 +362,7 @@ class TestParityEventsEndpointExtended:
         WHEN GET /parity/events?instrument=TSLA is requested
         THEN events is [] and total_count is 0.
         """
-        resp = client.get("/parity/events", params={"instrument": "TSLA"})
+        resp = client.get("/parity/events", params={"instrument": "TSLA"}, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         body = resp.json()
         assert body["total_count"] == 0
@@ -357,12 +374,18 @@ class TestParityEventsEndpointExtended:
         WHEN GET /parity/events is requested
         THEN each event has all required ParityEvent fields.
         """
-        resp = client.get("/parity/events")
+        resp = client.get("/parity/events", headers=AUTH_HEADERS)
         body = resp.json()
         required = (
-            "id", "feed_id_official", "feed_id_shadow",
-            "instrument", "timestamp", "delta", "delta_pct",
-            "severity", "detected_at",
+            "id",
+            "feed_id_official",
+            "feed_id_shadow",
+            "instrument",
+            "timestamp",
+            "delta",
+            "delta_pct",
+            "severity",
+            "detected_at",
         )
         for ev in body["events"]:
             for field in required:
@@ -418,10 +441,8 @@ class TestParityEventDetailEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client.get(f"/parity/events/{_PARITY_ULID_1}")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get(f"/parity/events/{_PARITY_ULID_1}", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_detail_contains_required_fields(self, client: TestClient) -> None:
         """
@@ -429,12 +450,18 @@ class TestParityEventDetailEndpoint:
         WHEN GET /parity/events/{id} is requested
         THEN all required ParityEvent fields are in the response body.
         """
-        resp = client.get(f"/parity/events/{_PARITY_ULID_1}")
+        resp = client.get(f"/parity/events/{_PARITY_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         required = (
-            "id", "feed_id_official", "feed_id_shadow",
-            "instrument", "timestamp", "delta", "delta_pct",
-            "severity", "detected_at",
+            "id",
+            "feed_id_official",
+            "feed_id_shadow",
+            "instrument",
+            "timestamp",
+            "delta",
+            "delta_pct",
+            "severity",
+            "detected_at",
         )
         for field in required:
             assert field in body, f"Missing field '{field}': {body}"
@@ -445,7 +472,7 @@ class TestParityEventDetailEndpoint:
         WHEN GET /parity/events/{_PARITY_ULID_1} is requested
         THEN instrument, severity, and delta match the saved values.
         """
-        resp = client.get(f"/parity/events/{_PARITY_ULID_1}")
+        resp = client.get(f"/parity/events/{_PARITY_ULID_1}", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["instrument"] == "AAPL", f"instrument wrong: {body}"
         assert body["severity"] == "CRITICAL", f"severity wrong: {body}"
@@ -459,10 +486,8 @@ class TestParityEventDetailEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client.get(f"/parity/events/{_PARITY_ULID_MISSING}")
-        assert resp.status_code == 404, (
-            f"Expected 404, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get(f"/parity/events/{_PARITY_ULID_MISSING}", headers=AUTH_HEADERS)
+        assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
 
 # ---------------------------------------------------------------------------
@@ -493,8 +518,12 @@ class TestParitySummaryEndpoint:
         - GOOG: 1 INFO (1 event, worst=INFO)
         """
         repo = MockParityRepository()
-        repo.save(_make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.CRITICAL))
-        repo.save(_make_event(_PARITY_ULID_2, instrument="AAPL", severity=ParityEventSeverity.WARNING))
+        repo.save(
+            _make_event(_PARITY_ULID_1, instrument="AAPL", severity=ParityEventSeverity.CRITICAL)
+        )
+        repo.save(
+            _make_event(_PARITY_ULID_2, instrument="AAPL", severity=ParityEventSeverity.WARNING)
+        )
         repo.save(_make_event(_PARITY_ULID_3, instrument="GOOG", severity=ParityEventSeverity.INFO))
         return repo
 
@@ -516,10 +545,8 @@ class TestParitySummaryEndpoint:
 
         FAILS: endpoint does not exist until GREEN.
         """
-        resp = client.get("/parity/summary")
-        assert resp.status_code == 200, (
-            f"Expected 200, got {resp.status_code}: {resp.text}"
-        )
+        resp = client.get("/parity/summary", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
 
     def test_summary_contains_required_keys(self, client: TestClient) -> None:
         """
@@ -527,7 +554,7 @@ class TestParitySummaryEndpoint:
         WHEN GET /parity/summary is requested
         THEN response contains 'summaries', 'total_event_count', 'generated_at'.
         """
-        resp = client.get("/parity/summary")
+        resp = client.get("/parity/summary", headers=AUTH_HEADERS)
         body = resp.json()
         for key in ("summaries", "total_event_count", "generated_at"):
             assert key in body, f"Missing key '{key}': {body}"
@@ -538,7 +565,7 @@ class TestParitySummaryEndpoint:
         WHEN GET /parity/summary is requested
         THEN summaries list has 2 entries.
         """
-        resp = client.get("/parity/summary")
+        resp = client.get("/parity/summary", headers=AUTH_HEADERS)
         body = resp.json()
         assert len(body["summaries"]) == 2, f"Expected 2 summaries: {body}"
 
@@ -548,7 +575,7 @@ class TestParitySummaryEndpoint:
         WHEN GET /parity/summary is requested
         THEN total_event_count is 3.
         """
-        resp = client.get("/parity/summary")
+        resp = client.get("/parity/summary", headers=AUTH_HEADERS)
         body = resp.json()
         assert body["total_event_count"] == 3, f"total_event_count wrong: {body}"
 
@@ -558,7 +585,7 @@ class TestParitySummaryEndpoint:
         WHEN GET /parity/summary is requested
         THEN AAPL summary has event_count=2, critical_count=1, warning_count=1, worst_severity=CRITICAL.
         """
-        resp = client.get("/parity/summary")
+        resp = client.get("/parity/summary", headers=AUTH_HEADERS)
         body = resp.json()
         aapl = next((s for s in body["summaries"] if s["instrument"] == "AAPL"), None)
         assert aapl is not None, f"AAPL not in summaries: {body}"
@@ -574,7 +601,7 @@ class TestParitySummaryEndpoint:
         WHEN GET /parity/summary is requested
         THEN each summary entry has all required ParityInstrumentSummary fields.
         """
-        resp = client.get("/parity/summary")
+        resp = client.get("/parity/summary", headers=AUTH_HEADERS)
         body = resp.json()
         required = (
             "instrument",
@@ -603,7 +630,7 @@ class TestParitySummaryEndpoint:
         app.dependency_overrides[get_parity_repository] = lambda: empty_repo
         tc = TestClient(app)
         try:
-            resp = tc.get("/parity/summary")
+            resp = tc.get("/parity/summary", headers=AUTH_HEADERS)
             body = resp.json()
             assert resp.status_code == 200
             assert body.get("summaries") == []

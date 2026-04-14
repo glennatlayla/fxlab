@@ -5,7 +5,7 @@ All Phase 3 services must implement this interface to support container
 orchestration and monitoring.
 """
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Protocol
 
 from libs.contracts.phase3.runtime import (

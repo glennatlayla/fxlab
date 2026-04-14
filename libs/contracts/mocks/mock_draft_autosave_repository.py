@@ -27,7 +27,7 @@ Example:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 _STUB_PREFIX = "01HMOCKSAVE"
@@ -106,9 +106,7 @@ class MockDraftAutosaveRepository:
         Returns:
             Autosave detail dict, or None if no autosave exists.
         """
-        user_saves = [
-            rec for rec in self._store.values() if rec["user_id"] == user_id
-        ]
+        user_saves = [rec for rec in self._store.values() if rec["user_id"] == user_id]
         if not user_saves:
             return None
 
@@ -136,6 +134,33 @@ class MockDraftAutosaveRepository:
             return False
         del self._store[autosave_id]
         return True
+
+    def purge_expired(self, max_age_days: int = 30) -> int:
+        """
+        Delete all autosave records older than max_age_days.
+
+        Args:
+            max_age_days: Number of days; autosaves older than this are deleted.
+                         Defaults to 30 days.
+
+        Returns:
+            Count of records deleted (0 if none).
+        """
+        cutoff_time = datetime.now(tz=timezone.utc) - timedelta(days=max_age_days)
+
+        # Find all autosaves older than the cutoff time.
+        ids_to_delete = [
+            autosave_id
+            for autosave_id, record in self._store.items()
+            if isinstance(record["saved_at"], datetime) and record["saved_at"] < cutoff_time
+        ]
+
+        # Delete them.
+        deleted_count = len(ids_to_delete)
+        for autosave_id in ids_to_delete:
+            del self._store[autosave_id]
+
+        return deleted_count
 
     # ------------------------------------------------------------------
     # Test introspection helpers

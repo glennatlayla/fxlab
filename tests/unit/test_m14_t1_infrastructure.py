@@ -11,17 +11,19 @@ Tests for:
 
 from __future__ import annotations
 
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
 
 
 @pytest.fixture(autouse=True)
 def cleanup_rate_limit_store():
     """Clear the rate limit store before and after each test."""
     from services.api.middleware.rate_limit import _window
+
     _window._store.clear()
     yield
     _window._store.clear()
@@ -36,12 +38,14 @@ class TestHealthCheckWithDBProbe:
         """
         with patch("services.api.db.check_db_connection", return_value=True):
             from services.api.main import app
+
             client = TestClient(app)
             response = client.get("/health")
             assert response.status_code == 200
             body = response.json()
-            assert body["success"] is True
             assert body["status"] == "ok"
+            assert body["service"] == "fxlab-api"
+            assert "components" in body
 
     def test_health_check_returns_503_when_db_down(self) -> None:
         """
@@ -49,25 +53,29 @@ class TestHealthCheckWithDBProbe:
         """
         with patch("services.api.db.check_db_connection", return_value=False):
             from services.api.main import app
+
             client = TestClient(app)
             response = client.get("/health")
             assert response.status_code == 503
             body = response.json()
-            assert body["success"] is False
             assert body["status"] == "degraded"
+            assert body["components"]["database"] == "error"
 
     def test_health_check_does_not_raise_exception_on_db_failure(self) -> None:
         """
         Health check does not raise an exception when DB check fails;
         instead returns a 503 response.
         """
-        with patch("services.api.db.check_db_connection", side_effect=RuntimeError("Connection timeout")):
+        with patch(
+            "services.api.db.check_db_connection", side_effect=RuntimeError("Connection timeout")
+        ):
             from services.api.main import app
+
             client = TestClient(app, raise_server_exceptions=False)
             response = client.get("/health")
             assert response.status_code == 503
             body = response.json()
-            assert body["success"] is False
+            assert body["status"] == "degraded"
 
 
 class TestBodySizeLimitMiddleware:
@@ -79,6 +87,7 @@ class TestBodySizeLimitMiddleware:
         Default limit is 512 KB.
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         # Create a payload larger than 512 KB
@@ -86,6 +95,7 @@ class TestBodySizeLimitMiddleware:
         response = client.post(
             "/approvals/test/reject",
             json=large_payload,
+            headers=AUTH_HEADERS,
         )
         assert response.status_code == 413
         assert "exceeds maximum size" in response.json()["detail"]
@@ -95,13 +105,17 @@ class TestBodySizeLimitMiddleware:
         POST with body under the limit succeeds (reaches the handler, not rejected by middleware).
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         # Small payload should not be rejected by body size middleware
-        payload = {"rationale": "This is a normal rejection reason that is long enough to pass validation."}
+        payload = {
+            "rationale": "This is a normal rejection reason that is long enough to pass validation."
+        }
         response = client.post(
             "/approvals/01HAPPROVAL000000000000001/reject",
             json=payload,
+            headers=AUTH_HEADERS,
         )
         # Should not be 413; may be 200 or 422 depending on route validation
         assert response.status_code != 413
@@ -111,6 +125,7 @@ class TestBodySizeLimitMiddleware:
         GET /health is excluded from body size limit checks.
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         response = client.get("/health")
@@ -131,6 +146,7 @@ class TestRateLimitMiddleware:
 
         # Reset the sliding window store to ensure clean state
         from services.api.middleware.rate_limit import _window
+
         _window._store.clear()
 
         payload = {
@@ -146,12 +162,12 @@ class TestRateLimitMiddleware:
 
         # Send 20 requests — should succeed
         for i in range(20):
-            response = client.post("/overrides/request", json=payload)
+            response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
             # Should not be rate limited (allow success or validation errors)
-            assert response.status_code != 429, f"Rate limited on request {i+1}"
+            assert response.status_code != 429, f"Rate limited on request {i + 1}"
 
         # 21st request should be rate limited
-        response = client.post("/overrides/request", json=payload)
+        response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 429
 
     def test_rate_limit_includes_retry_after_header(self) -> None:
@@ -177,10 +193,10 @@ class TestRateLimitMiddleware:
 
         # Max out the governance rate limit
         for _ in range(20):
-            client.post("/overrides/request", json=payload)
+            client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
 
         # Next request should be rate limited with Retry-After
-        response = client.post("/overrides/request", json=payload)
+        response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 429
         assert "Retry-After" in response.headers
 
@@ -189,6 +205,7 @@ class TestRateLimitMiddleware:
         GET /health is not rate limited.
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         # Make many requests to /health — should never be rate limited
@@ -201,6 +218,7 @@ class TestRateLimitMiddleware:
         OPTIONS requests are not rate limited.
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         # Make many OPTIONS requests — should not be rate limited
@@ -217,6 +235,7 @@ class TestCorrelationIDMiddleware:
         Every response includes X-Correlation-ID header.
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         response = client.get("/")
@@ -228,6 +247,7 @@ class TestCorrelationIDMiddleware:
         When client provides X-Correlation-ID, the same ID is echoed in response.
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         provided_id = "test-correlation-id-12345"
@@ -239,6 +259,7 @@ class TestCorrelationIDMiddleware:
         When client does not provide X-Correlation-ID, one is generated (UUID4 format).
         """
         from services.api.main import app
+
         client = TestClient(app)
 
         response = client.get("/")
@@ -251,8 +272,8 @@ class TestCorrelationIDMiddleware:
         """
         Correlation ID is stored in a ContextVar and accessible within the request context.
         """
-        from services.api.middleware.correlation import correlation_id_var
         from services.api.main import app
+
         client = TestClient(app)
 
         # The context var should be accessible and populated during request handling
@@ -270,7 +291,7 @@ class TestMiddlewareRegistrationOrder:
         """
         from services.api.main import app
 
-        middleware_names = [mw.__class__.__name__ for mw in app.user_middleware]
+        [mw.__class__.__name__ for mw in app.user_middleware]
         # Should contain our custom middleware
         # Note: user_middleware is in reverse registration order (last-registered first)
         assert any("CorrelationIDMiddleware" in str(mw) for mw in app.user_middleware)

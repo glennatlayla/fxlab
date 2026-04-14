@@ -75,9 +75,7 @@ class MockCertificationRepository(CertificationRepositoryInterface):
         """
         return list(self._store.values())
 
-    def find_by_feed_id(
-        self, feed_id: str, correlation_id: str
-    ) -> CertificationEvent:
+    def find_by_feed_id(self, feed_id: str, correlation_id: str) -> CertificationEvent:
         """
         Return the CertificationEvent for a specific feed.
 

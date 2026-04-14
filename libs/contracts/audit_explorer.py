@@ -41,9 +41,9 @@ Example:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AuditEventRecord(BaseModel):
@@ -74,6 +74,7 @@ class AuditEventRecord(BaseModel):
             object_id="01HQRUN0AAAAAAAAAAAAAAAA0",
             object_type="run",
             correlation_id="corr-123",
+            source="api",
             event_metadata={"trigger": "scheduled"},
             created_at=datetime.now(timezone.utc),
         )
@@ -103,14 +104,21 @@ class AuditEventRecord(BaseModel):
         default="",
         description="Request-scoped correlation ID propagated from the originating API call",
     )
-    event_metadata: Dict[str, Any] = Field(
+    source: str = Field(
+        default="",
+        description=(
+            "Source client identifier (web-desktop, web-mobile, api). "
+            "Empty string when not applicable. "
+            "Uses str (not Optional[str]) to avoid pydantic-core cross-arch stub (LL-007)."
+        ),
+    )
+    event_metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Action-specific context (evidence links, target environment, etc.)",
     )
     created_at: datetime = Field(..., description="Timestamp when the audit event was recorded")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AuditExplorerResponse(BaseModel):

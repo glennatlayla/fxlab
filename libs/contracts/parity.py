@@ -32,10 +32,10 @@ Example:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ParityEventSeverity(str, Enum):
@@ -64,7 +64,7 @@ class ParityEvent(BaseModel):
 
     Responsibilities:
         - Identify which feed pair diverged (feed_id_official vs feed_id_shadow).
-        - Report the instrument, timestamp, absolute delta, and relative delta.
+        - Report the magnitude of the delta and delta percentage.
         - Carry a severity classification for dashboard filtering.
         - Record when the discrepancy was detected.
 
@@ -89,19 +89,20 @@ class ParityEvent(BaseModel):
     id: str = Field(..., description="ULID uniquely identifying this parity event")
     feed_id_official: str = Field(..., description="ULID of the official/primary feed")
     feed_id_shadow: str = Field(..., description="ULID of the shadow/comparison feed")
-    instrument: str = Field(..., description="Instrument identifier (ticker symbol)")
-    timestamp: datetime = Field(..., description="Point in time where the discrepancy occurred")
-    delta: float = Field(..., description="Absolute difference between official and shadow values")
-    delta_pct: float = Field(
-        ..., description="Relative discrepancy: abs(delta) / official_value"
+    instrument: str = Field(..., description="Instrument/ticker symbol (e.g. AAPL)")
+    timestamp: datetime = Field(
+        ..., description="Timestamp of the data point where discrepancy was detected"
     )
+    delta: float = Field(
+        ..., description="Absolute difference in values between official and shadow feeds"
+    )
+    delta_pct: float = Field(..., description="Percentage difference (delta / official_value)")
     severity: ParityEventSeverity = Field(
-        ..., description="Severity classification for dashboard filtering"
+        ..., description="Severity classification (INFO/WARNING/CRITICAL)"
     )
     detected_at: datetime = Field(..., description="Timestamp when the discrepancy was detected")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ParityEventList(BaseModel):

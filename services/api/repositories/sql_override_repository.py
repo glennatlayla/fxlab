@@ -36,39 +36,33 @@ Example:
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
 from typing import Any
 
 import structlog
 
-from libs.contracts.models import Override
+from libs.contracts.interfaces.override_repository import OverrideRepositoryInterface
+from libs.contracts.models import Override  # type: ignore[import-not-found]
 
 logger = structlog.get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# Monotonic counter for stub ULID generation.
-# Override IDs must survive process restarts in production, so we combine
-# a timestamp prefix with a counter suffix to ensure uniqueness within a
-# single second. A real ULID library is preferred for production.
-# ---------------------------------------------------------------------------
-_counter: int = 0
 
 
 def _generate_ulid() -> str:
     """
-    Generate a time-ordered ULID-shaped ID for new override records.
+    Generate a cryptographically random, time-ordered ULID for new records.
+
+    Uses python-ulid which is thread-safe and produces spec-compliant
+    26-character Crockford base32 ULIDs with millisecond-precision
+    timestamps and 80 bits of cryptographic randomness.
 
     Returns:
-        26-character string prefixed with timestamp milliseconds.
+        26-character ULID string (Crockford base32).
     """
-    global _counter
-    _counter += 1
-    ts_ms = int(time.time() * 1000)
-    return f"{ts_ms:013d}{_counter:013d}"[:26]
+    import ulid as _ulid
+
+    return str(_ulid.ULID())
 
 
-class SqlOverrideRepository:
+class SqlOverrideRepository(OverrideRepositoryInterface):
     """
     SQLAlchemy-backed repository for governance override requests.
 
@@ -137,7 +131,6 @@ class SqlOverrideRepository:
             # record == {"override_id": "01H...", "status": "pending"}
         """
         override_id = _generate_ulid()
-        now = datetime.now(tz=timezone.utc)
 
         row = Override(
             id=override_id,
@@ -154,7 +147,7 @@ class SqlOverrideRepository:
         )
 
         self._db.add(row)
-        self._db.commit()
+        self._db.flush()  # Emit SQL but keep transaction open for atomicity.
         self._db.refresh(row)
 
         logger.debug(
@@ -202,3 +195,60 @@ class SqlOverrideRepository:
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
+
+    def update_decision(
+        self,
+        *,
+        override_id: str,
+        reviewer_id: str,
+        status: str,
+        decision_rationale: str,
+    ) -> dict[str, Any]:
+        """
+        Record a reviewer's decision (approve/reject) on an override.
+
+        Args:
+            override_id: ULID of the override being decided.
+            reviewer_id: ULID of the reviewer making the decision.
+            status: New status — must be 'approved' or 'rejected'.
+            decision_rationale: Reviewer's justification for the decision.
+
+        Returns:
+            Dict with updated override detail.
+
+        Raises:
+            NotFoundError: If override_id does not exist.
+
+        Example:
+            result = repo.update_decision(
+                override_id="01HOVERRIDE...",
+                reviewer_id="01HREVIEWER...",
+                status="approved",
+                decision_rationale="Evidence is sound.",
+            )
+        """
+        from datetime import datetime, timezone
+
+        from libs.contracts.errors import NotFoundError
+
+        row: Override | None = self._db.get(Override, override_id)
+        if row is None:
+            raise NotFoundError(f"Override {override_id!r} not found")
+
+        now = datetime.now(tz=timezone.utc)
+        row.status = status
+        row.reviewer_id = reviewer_id
+        row.decision_rationale = decision_rationale
+        row.decided_at = now  # type: ignore[assignment]
+        row.updated_at = now  # type: ignore[assignment]
+
+        self._db.flush()
+
+        logger.debug(
+            "override.sql.decision_recorded",
+            override_id=override_id,
+            reviewer_id=reviewer_id,
+            status=status,
+        )
+
+        return self.get_by_id(override_id) or {}

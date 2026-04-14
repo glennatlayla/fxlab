@@ -5,10 +5,8 @@ Services that manage application lifecycle, startup/shutdown, and
 runtime coordination.
 """
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Protocol
-
-from libs.contracts.phase3.runtime import ServiceConfiguration
 
 
 class RuntimeService(Protocol):

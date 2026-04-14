@@ -31,15 +31,12 @@ Example:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
-
 import structlog
 from sqlalchemy.orm import Session
 
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.symbol_lineage_repository import SymbolLineageRepositoryInterface
-from libs.contracts.symbol_lineage import SymbolFeedRef, SymbolLineageResponse, SymbolRunRef
+from libs.contracts.symbol_lineage import SymbolLineageResponse
 
 logger = structlog.get_logger(__name__)
 
@@ -82,9 +79,7 @@ class SqlSymbolLineageRepository(SymbolLineageRepositoryInterface):
         """
         self.db = db
 
-    def find_by_symbol(
-        self, symbol: str, correlation_id: str
-    ) -> SymbolLineageResponse:
+    def find_by_symbol(self, symbol: str, correlation_id: str) -> SymbolLineageResponse:
         """
         Return the lineage record for a given instrument symbol.
 

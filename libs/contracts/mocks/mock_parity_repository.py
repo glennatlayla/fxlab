@@ -48,6 +48,8 @@ Example:
 
 from __future__ import annotations
 
+import builtins
+
 from libs.contracts.errors import NotFoundError
 from libs.contracts.interfaces.parity_repository import ParityRepositoryInterface
 from libs.contracts.parity import ParityEvent, ParityEventSeverity, ParityInstrumentSummary
@@ -86,7 +88,7 @@ class MockParityRepository(ParityRepositoryInterface):
         instrument: str = "",
         feed_id: str = "",
         correlation_id: str,
-    ) -> list[ParityEvent]:
+    ) -> builtins.list[ParityEvent]:
         """
         Return parity events matching all non-empty filter criteria (AND semantics).
 
@@ -109,8 +111,7 @@ class MockParityRepository(ParityRepositoryInterface):
             results = [e for e in results if e.instrument == instrument]
         if feed_id:
             results = [
-                e for e in results
-                if e.feed_id_official == feed_id or e.feed_id_shadow == feed_id
+                e for e in results if e.feed_id_official == feed_id or e.feed_id_shadow == feed_id
             ]
         return results
 
@@ -135,7 +136,7 @@ class MockParityRepository(ParityRepositoryInterface):
             raise NotFoundError(f"ParityEvent id={id!r} not found")
         return self._store[id]
 
-    def summarize(self, *, correlation_id: str) -> list[ParityInstrumentSummary]:
+    def summarize(self, *, correlation_id: str) -> builtins.list[ParityInstrumentSummary]:
         """
         Return per-instrument severity aggregates computed from the in-memory store.
 

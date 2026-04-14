@@ -19,15 +19,36 @@ from fastapi.testclient import TestClient
 
 from services.api.main import app
 
+AUTH_HEADERS = {"Authorization": "Bearer TEST_TOKEN"}
+
+# Reviewer-scoped auth headers — approval endpoints require "approvals:write"
+# which the operator TEST_TOKEN does not carry.
+_REVIEWER_TOKEN: str | None = None
+
+
+def _get_reviewer_headers() -> dict[str, str]:
+    """Return auth headers for a reviewer-scoped user (has approvals:write)."""
+    global _REVIEWER_TOKEN
+    if _REVIEWER_TOKEN is None:
+        from services.api.auth import create_access_token
+
+        _REVIEWER_TOKEN = create_access_token(
+            user_id="01HABCDEF00000000000000099",
+            role="reviewer",
+            expires_minutes=60,
+        )
+    return {"Authorization": f"Bearer {_REVIEWER_TOKEN}"}
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 SUBMITTER_ID = "01HSUBMITTER00000000000000A"
-APPROVER_ID  = "01HAPPROVER000000000000000B"
-APPROVAL_ID  = "01HAPPROVALID0000000000000C"
-OVERRIDE_ID  = "01HOVERRIDEID0000000000000D"
-AUTOSAVE_ID  = "01HAUTOSAVEID0000000000000E"
+APPROVER_ID = "01HAPPROVER000000000000000B"
+APPROVAL_ID = "01HAPPROVALID0000000000000C"
+OVERRIDE_ID = "01HOVERRIDEID0000000000000D"
+AUTOSAVE_ID = "01HAUTOSAVEID0000000000000E"
 
 
 @pytest.fixture(scope="module")
@@ -44,25 +65,31 @@ def client() -> TestClient:
 class TestApprovalReject:
     """Tests for POST /approvals/{approval_id}/reject."""
 
-    def test_reject_valid_request_returns_200(self, client: TestClient) -> None:
+    def test_reject_valid_request_returns_404_when_approval_not_seeded(
+        self, client: TestClient
+    ) -> None:
         """
-        Rejecting a pending approval with a valid rationale returns 200
-        and a payload that includes approval_id and status=rejected.
+        Rejecting a non-existent approval returns 404.
+
+        With M14-T3 GovernanceService, reject looks up the approval in the
+        backing store. Since no approvals are seeded in the mock, the correct
+        response is 404 with the approval_id in the detail message.
         """
         response = client.post(
             f"/approvals/{APPROVAL_ID}/reject",
             json={"rationale": "Insufficient evidence for this promotion."},
+            headers=_get_reviewer_headers(),
         )
-        assert response.status_code == 200
-        body = response.json()
-        assert body["approval_id"] == APPROVAL_ID
-        assert body["status"] == "rejected"
+        assert response.status_code == 404
+        assert APPROVAL_ID in response.json()["detail"]
 
     def test_reject_missing_rationale_returns_422(self, client: TestClient) -> None:
         """
         Rejecting without a rationale body returns 422 Unprocessable Entity.
         """
-        response = client.post(f"/approvals/{APPROVAL_ID}/reject", json={})
+        response = client.post(
+            f"/approvals/{APPROVAL_ID}/reject", json={}, headers=_get_reviewer_headers()
+        )
         assert response.status_code == 422
 
     def test_reject_short_rationale_returns_422(self, client: TestClient) -> None:
@@ -72,6 +99,7 @@ class TestApprovalReject:
         response = client.post(
             f"/approvals/{APPROVAL_ID}/reject",
             json={"rationale": "Too short"},
+            headers=_get_reviewer_headers(),
         )
         assert response.status_code == 422
 
@@ -99,7 +127,7 @@ class TestOverrideRequest:
         """
         A well-formed override request with valid evidence_link returns 201.
         """
-        response = client.post("/overrides/request", json=self._VALID_PAYLOAD)
+        response = client.post("/overrides/request", json=self._VALID_PAYLOAD, headers=AUTH_HEADERS)
         assert response.status_code == 201
         body = response.json()
         assert "override_id" in body
@@ -111,7 +139,7 @@ class TestOverrideRequest:
         """
         payload = {**self._VALID_PAYLOAD}
         del payload["evidence_link"]
-        response = client.post("/overrides/request", json=payload)
+        response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 422
 
     def test_non_http_evidence_link_returns_422(self, client: TestClient) -> None:
@@ -120,7 +148,7 @@ class TestOverrideRequest:
         A relative path or non-HTTP scheme is rejected.
         """
         payload = {**self._VALID_PAYLOAD, "evidence_link": "ftp://example.com/file"}
-        response = client.post("/overrides/request", json=payload)
+        response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 422
 
     def test_root_path_evidence_link_returns_422(self, client: TestClient) -> None:
@@ -129,7 +157,7 @@ class TestOverrideRequest:
         https://example.com or https://example.com/ is rejected.
         """
         payload = {**self._VALID_PAYLOAD, "evidence_link": "https://example.com/"}
-        response = client.post("/overrides/request", json=payload)
+        response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 422
 
     def test_short_rationale_returns_422(self, client: TestClient) -> None:
@@ -137,7 +165,7 @@ class TestOverrideRequest:
         Rationale shorter than 20 characters is rejected.
         """
         payload = {**self._VALID_PAYLOAD, "rationale": "Too brief."}
-        response = client.post("/overrides/request", json=payload)
+        response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 422
 
     def test_invalid_object_type_returns_422(self, client: TestClient) -> None:
@@ -145,7 +173,7 @@ class TestOverrideRequest:
         object_type must be 'candidate' or 'deployment'.
         """
         payload = {**self._VALID_PAYLOAD, "object_type": "strategy"}
-        response = client.post("/overrides/request", json=payload)
+        response = client.post("/overrides/request", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 422
 
 
@@ -173,12 +201,14 @@ class TestOverrideGet:
         POST then GET: the returned override_id resolves to 200.
         """
         # First create an override, capturing the server-assigned ID.
-        create_resp = client.post("/overrides/request", json=self._VALID_REQUEST)
+        create_resp = client.post(
+            "/overrides/request", json=self._VALID_REQUEST, headers=AUTH_HEADERS
+        )
         assert create_resp.status_code == 201, create_resp.text
         override_id = create_resp.json()["override_id"]
 
         # Then retrieve it by the server-assigned ID.
-        response = client.get(f"/overrides/{override_id}")
+        response = client.get(f"/overrides/{override_id}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         body = response.json()
         assert "override_id" in body or "id" in body
@@ -187,7 +217,7 @@ class TestOverrideGet:
         """
         GET /overrides/{id} returns 404 for an unknown ID.
         """
-        response = client.get("/overrides/01HNONEXISTENT00000000000Z")
+        response = client.get("/overrides/01HNONEXISTENT00000000000Z", headers=AUTH_HEADERS)
         assert response.status_code == 404
 
 
@@ -211,7 +241,9 @@ class TestDraftAutosavePost:
         """
         A valid autosave payload returns 200 with autosave_id and saved_at.
         """
-        response = client.post("/strategies/draft/autosave", json=self._VALID_PAYLOAD)
+        response = client.post(
+            "/strategies/draft/autosave", json=self._VALID_PAYLOAD, headers=AUTH_HEADERS
+        )
         assert response.status_code == 200
         body = response.json()
         assert "autosave_id" in body
@@ -223,7 +255,7 @@ class TestDraftAutosavePost:
         """
         payload = {**self._VALID_PAYLOAD}
         del payload["user_id"]
-        response = client.post("/strategies/draft/autosave", json=payload)
+        response = client.post("/strategies/draft/autosave", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 422
 
     def test_missing_draft_payload_returns_422(self, client: TestClient) -> None:
@@ -232,7 +264,7 @@ class TestDraftAutosavePost:
         """
         payload = {**self._VALID_PAYLOAD}
         del payload["draft_payload"]
-        response = client.post("/strategies/draft/autosave", json=payload)
+        response = client.post("/strategies/draft/autosave", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 422
 
 
@@ -258,12 +290,15 @@ class TestDraftAutosaveGetLatest:
         After POSTing an autosave, GET /latest returns 200 for that user.
         """
         # Create an autosave first.
-        post_resp = client.post("/strategies/draft/autosave", json=self._SAVE_PAYLOAD)
+        post_resp = client.post(
+            "/strategies/draft/autosave", json=self._SAVE_PAYLOAD, headers=AUTH_HEADERS
+        )
         assert post_resp.status_code == 200, post_resp.text
 
         response = client.get(
             "/strategies/draft/autosave/latest",
             params={"user_id": self._UNIQUE_USER_ID},
+            headers=AUTH_HEADERS,
         )
         assert response.status_code in (200, 204)
 
@@ -271,7 +306,7 @@ class TestDraftAutosaveGetLatest:
         """
         GET /strategies/draft/autosave/latest without user_id returns 422.
         """
-        response = client.get("/strategies/draft/autosave/latest")
+        response = client.get("/strategies/draft/autosave/latest", headers=AUTH_HEADERS)
         assert response.status_code == 422
 
 
@@ -297,16 +332,64 @@ class TestDraftAutosaveDelete:
         POST an autosave then DELETE it — should return 204 No Content.
         """
         # Create the autosave to get a real server-assigned ID.
-        post_resp = client.post("/strategies/draft/autosave", json=self._SAVE_PAYLOAD)
+        post_resp = client.post(
+            "/strategies/draft/autosave", json=self._SAVE_PAYLOAD, headers=AUTH_HEADERS
+        )
         assert post_resp.status_code == 200, post_resp.text
         autosave_id = post_resp.json()["autosave_id"]
 
-        response = client.delete(f"/strategies/draft/autosave/{autosave_id}")
+        response = client.delete(f"/strategies/draft/autosave/{autosave_id}", headers=AUTH_HEADERS)
         assert response.status_code == 204
 
     def test_delete_nonexistent_autosave_returns_404(self, client: TestClient) -> None:
         """
         DELETE /strategies/draft/autosave/{id} returns 404 for an unknown ID.
         """
-        response = client.delete("/strategies/draft/autosave/01HNONEXISTENT00000000000Z")
+        response = client.delete(
+            "/strategies/draft/autosave/01HNONEXISTENT00000000000Z", headers=AUTH_HEADERS
+        )
         assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /governance/ — List Governance Items (M14-T6)
+# ---------------------------------------------------------------------------
+
+
+class TestGovernanceList:
+    """Tests for GET /governance/ — deferred list endpoint.
+
+    The governance list endpoint is not yet wired to real repositories.
+    Until M29 (Governance Workflows Frontend) implements the full listing,
+    the endpoint returns 501 Not Implemented with an explicit deferral
+    message so callers know this is intentional, not broken.
+
+    Acceptance criteria (M14-T6):
+    - Endpoint returns 501 with explicit "not implemented" detail.
+    - Response includes the milestone where wiring is planned.
+    - Unauthenticated requests still return 401 (auth enforced).
+    """
+
+    def test_governance_list_returns_501_not_implemented(self, client: TestClient) -> None:
+        """
+        GET /governance/ returns 501 with deferral information.
+
+        Scenario: Authenticated user requests governance item list.
+        Expected: 501 with detail indicating deferred milestone.
+        """
+        response = client.get("/governance/", headers=_get_reviewer_headers())
+        assert response.status_code == 501
+
+        data = response.json()
+        assert "detail" in data
+        assert "M29" in data["detail"], "Response must reference the target milestone"
+
+    def test_governance_list_unauthenticated_returns_401(self, client: TestClient) -> None:
+        """
+        GET /governance/ without auth returns 401 (not 501).
+
+        Scenario: Unauthenticated request to governance list.
+        Expected: Auth enforcement takes precedence over 501.
+        """
+        response = client.get("/governance/")
+        assert response.status_code == 401

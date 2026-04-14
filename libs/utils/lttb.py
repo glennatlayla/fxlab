@@ -128,9 +128,7 @@ def lttb_downsample(
             # Area of triangle with vertices A, B (candidate), C (bucket avg).
             # Formula: 0.5 * |ax(by − cy) + bx(cy − ay) + cx(ay − by)|
             # Simplified to avoid the 0.5 factor (monotone under max selection):
-            area = abs(
-                (ax - avg_x) * (by - ay) - (ax - bx) * (avg_y - ay)
-            )
+            area = abs((ax - avg_x) * (by - ay) - (ax - bx) * (avg_y - ay))
             if area > max_area:
                 max_area = area
                 max_area_idx = j

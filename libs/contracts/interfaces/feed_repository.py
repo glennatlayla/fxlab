@@ -27,8 +27,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from libs.contracts.feed import FeedDetailResponse, FeedListResponse
 from libs.contracts.errors import NotFoundError  # noqa: F401 — document raised type
+from libs.contracts.feed import FeedDetailResponse, FeedListResponse
 
 
 class FeedRepositoryInterface(ABC):

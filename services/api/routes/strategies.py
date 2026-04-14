@@ -2,52 +2,56 @@
 Strategy Routes.
 
 Responsibilities:
-- Strategy list/get/versions endpoints.
+- Strategy CRUD endpoints (POST create, GET by id, GET list).
+- DSL condition validation endpoint (POST /validate-dsl).
 - Draft autosave endpoints (POST, GET /latest, DELETE /{id}).
 
-Draft autosave allows non-technical operators to recover from session loss.
-The frontend calls POST /strategies/draft/autosave every 30 seconds and on
-field blur. GET /strategies/draft/autosave/latest is called on login to
-offer recovery of incomplete drafts.
-
 Does NOT:
-- Contain business logic or scoring logic.
-- Access the database directly (routed through repository layer).
-- Enforce RBAC (that is the service layer's responsibility).
+- Contain business logic or DSL parsing (service layer responsibility).
+- Access the database directly (routed through repository/service layer).
 
 Dependencies:
-- libs.contracts.governance: DraftAutosavePayload, DraftAutosaveResponse
-- SqlDraftAutosaveRepository (when ENVIRONMENT != "test")
-- MockDraftAutosaveRepository (when ENVIRONMENT == "test" / unset)
-- structlog for structured logging
+- StrategyService: Business logic for strategy management.
+- SqlDraftAutosaveRepository: Draft autosave persistence.
+- structlog for structured logging.
 
 Error conditions:
-- 422 Unprocessable Entity: missing required fields in autosave payload.
-- 404 Not Found: autosave_id does not exist.
+- 201 Created: strategy successfully created.
+- 200 OK: strategy retrieved or validation result.
+- 422 Unprocessable Entity: DSL validation failure or missing fields.
+- 404 Not Found: strategy or autosave not found.
 - 204 No Content: no autosave found for user_id (GET /latest).
 
 Example:
-    POST /strategies/draft/autosave
-    {"user_id": "01H...", "draft_payload": {...}, "form_step": "parameters", ...}
-    → 200 {"autosave_id": "01H...", "saved_at": "..."}
+    POST /strategies
+    {"name": "RSI Reversal", "entry_condition": "RSI(14) < 30", ...}
+    → 201 {"strategy": {...}, "entry_validation": {...}}
 
-    GET /strategies/draft/autosave/latest?user_id=01H...
-    → 200 {autosave payload} or 204 if none
-
-    DELETE /strategies/draft/autosave/01H...
-    → 204 No Content
+    POST /strategies/validate-dsl
+    {"expression": "RSI(14) < 30 AND price > SMA(200)"}
+    → 200 {"is_valid": true, "errors": [], ...}
 """
 
 from __future__ import annotations
 
-import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from services.api.repositories.sql_draft_autosave_repository import (
+        SqlDraftAutosaveRepository,
+    )
 
 import structlog
-from fastapi import APIRouter, HTTPException, Path, Query, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
+from libs.contracts.errors import NotFoundError, ValidationError
 from libs.contracts.governance import DraftAutosavePayload
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
+from services.api.middleware.correlation import correlation_id_var
 
 logger = structlog.get_logger(__name__)
 
@@ -55,65 +59,290 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Repository factory — ENVIRONMENT gate.
-# ENVIRONMENT="test" (or unset) → MockDraftAutosaveRepository (fast, in-memory).
-# Any other value              → SqlDraftAutosaveRepository (PostgreSQL/SQLite).
-# Production containers set ENV ENVIRONMENT=production in the Dockerfile.
+# Request/response models for strategy endpoints
 # ---------------------------------------------------------------------------
 
-def _get_repository():
+
+class CreateStrategyRequest(BaseModel):
     """
-    Return the appropriate autosave repository implementation.
+    Request payload for POST /strategies.
+
+    Contains all fields from the Strategy Studio wizard form.
+    """
+
+    name: str = Field(..., min_length=1, max_length=255, description="Strategy name")
+    entry_condition: str = Field(..., min_length=1, description="DSL entry condition")
+    exit_condition: str = Field(..., min_length=1, description="DSL exit condition")
+    description: str | None = Field(None, description="Strategy description")
+    instrument: str | None = Field(None, description="Target instrument (e.g. AAPL)")
+    timeframe: str | None = Field(None, description="Candle timeframe (e.g. 1h, 1d)")
+    max_position_size: float | None = Field(None, ge=0, description="Max position in dollars")
+    stop_loss_percent: float | None = Field(None, ge=0, le=100, description="Stop loss %")
+    take_profit_percent: float | None = Field(None, ge=0, le=100, description="Take profit %")
+    parameters: dict[str, Any] | None = Field(None, description="Custom parameters")
+
+
+class ValidateDslRequest(BaseModel):
+    """Request payload for POST /strategies/validate-dsl."""
+
+    expression: str = Field(..., description="DSL expression to validate")
+
+
+# ---------------------------------------------------------------------------
+# Module-level DI for StrategyService
+# ---------------------------------------------------------------------------
+
+_strategy_service = None
+
+
+def set_strategy_service(service: Any) -> None:
+    """
+    Register the StrategyService instance for route injection.
+
+    Called during application bootstrap or in test setup.
+
+    Args:
+        service: StrategyServiceInterface implementation.
+    """
+    global _strategy_service
+    _strategy_service = service
+
+
+def get_strategy_service() -> Any:
+    """
+    Retrieve the registered StrategyService.
 
     Returns:
-        SqlDraftAutosaveRepository when ENVIRONMENT != "test".
-        MockDraftAutosaveRepository when ENVIRONMENT == "test" (pytest default).
+        The registered StrategyServiceInterface implementation.
+
+    Raises:
+        RuntimeError: If no service has been registered.
     """
-    if os.environ.get("ENVIRONMENT", "test") != "test":
-        from services.api.db import get_db
-        from services.api.repositories.sql_draft_autosave_repository import (
-            SqlDraftAutosaveRepository,
-        )
-        db = next(get_db())
-        return SqlDraftAutosaveRepository(db=db)
-    from libs.contracts.mocks.mock_draft_autosave_repository import (
-        MockDraftAutosaveRepository,
+    if _strategy_service is None:
+        raise RuntimeError("StrategyService not configured. Call set_strategy_service() first.")
+    return _strategy_service
+
+
+# ---------------------------------------------------------------------------
+# Dependency provider for draft autosave (SQL-backed)
+# ---------------------------------------------------------------------------
+
+
+def get_draft_autosave_repository(
+    db: Session = Depends(get_db),
+) -> SqlDraftAutosaveRepository:
+    """
+    Provide a request-scoped DraftAutosave repository.
+
+    Always returns the SQL-backed implementation bound to the current
+    request's DB session. In tests, get_db() yields a SQLite session
+    (configured in db.py) so the SQL repos work identically.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
+
+    Returns:
+        DraftAutosaveRepositoryInterface implementation bound to the request's session.
+    """
+    from services.api.repositories.sql_draft_autosave_repository import (
+        SqlDraftAutosaveRepository,
     )
-    return MockDraftAutosaveRepository()
+
+    return SqlDraftAutosaveRepository(db=db)
 
 
-# Module-level singleton — lazily initialised.
-_repo = None
+# ---------------------------------------------------------------------------
+# Strategy CRUD endpoints (M10)
+# ---------------------------------------------------------------------------
 
 
-def _repo_instance():
+@router.post(
+    "/",
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new strategy",
+)
+async def create_strategy(
+    payload: CreateStrategyRequest,
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
     """
-    Lazily initialise and return the module-level repository singleton.
+    Create a new strategy with validated DSL conditions.
+
+    Validates both entry and exit conditions using the DSL parser.
+    Returns 201 with the persisted strategy and validation metadata.
+
+    Args:
+        payload: CreateStrategyRequest with name, conditions, and risk params.
+        user: Authenticated user with strategies:write scope.
 
     Returns:
-        The draft autosave repository singleton for this worker process.
+        201 JSONResponse with strategy record and validation details.
+
+    Raises:
+        HTTPException 422: If DSL conditions are syntactically invalid.
+
+    Example:
+        POST /strategies
+        {"name": "RSI Reversal", "entry_condition": "RSI(14) < 30", ...}
+        → 201 {"strategy": {...}, "entry_validation": {...}}
     """
-    global _repo
-    if _repo is None:
-        _repo = _get_repository()
-    return _repo
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    logger.info(
+        "strategies.create.called",
+        name=payload.name,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+    )
+
+    try:
+        result = service.create_strategy(
+            name=payload.name,
+            entry_condition=payload.entry_condition,
+            exit_condition=payload.exit_condition,
+            description=payload.description,
+            instrument=payload.instrument,
+            timeframe=payload.timeframe,
+            max_position_size=payload.max_position_size,
+            stop_loss_percent=payload.stop_loss_percent,
+            take_profit_percent=payload.take_profit_percent,
+            parameters=payload.parameters,
+            created_by=user.user_id,
+        )
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        ) from e
+
+    logger.info(
+        "strategies.create.completed",
+        strategy_id=result["strategy"]["id"],
+        correlation_id=corr_id,
+        component="strategies",
+    )
+
+    return JSONResponse(content=result, status_code=status.HTTP_201_CREATED)
 
 
-# ---------------------------------------------------------------------------
-# Strategy list endpoint (pre-existing stub)
-# ---------------------------------------------------------------------------
+@router.get("/{strategy_id}", summary="Get strategy by ID")
+async def get_strategy(
+    strategy_id: str = Path(..., description="Strategy ULID"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Retrieve a strategy by its ULID, including parsed code fields.
+
+    Args:
+        strategy_id: ULID of the strategy.
+        user: Authenticated user with strategies:write scope.
+
+    Returns:
+        200 JSONResponse with strategy record and parsed code.
+
+    Raises:
+        HTTPException 404: If strategy does not exist.
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    try:
+        result = service.get_strategy(strategy_id)
+    except NotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Strategy {strategy_id} not found",
+        ) from exc
+
+    logger.debug(
+        "strategies.get.completed",
+        strategy_id=strategy_id,
+        correlation_id=corr_id,
+        component="strategies",
+    )
+
+    return JSONResponse(content=result)
 
 
 @router.get("/", summary="List strategies")
-async def list_strategies() -> dict:
+async def list_strategies(
+    created_by: str | None = Query(None, description="Filter by creator ULID"),
+    is_active: bool | None = Query(None, description="Filter by active status"),
+    limit: int = Query(50, ge=1, le=200, description="Page size"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
     """
-    List strategies.
+    List strategies with optional filtering and pagination.
+
+    Args:
+        created_by: Optional filter by creator ULID.
+        is_active: Optional filter by active status.
+        limit: Maximum results per page (1-200, default 50).
+        offset: Number of results to skip.
+        user: Authenticated user with strategies:write scope.
 
     Returns:
-        Paginated list of strategy summaries (stub returns empty list).
+        200 JSONResponse with strategies list and count.
     """
-    logger.info("strategies.list.called")
-    return {"success": True, "data": []}
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    result = service.list_strategies(
+        created_by=created_by,
+        is_active=is_active,
+        limit=limit,
+        offset=offset,
+    )
+
+    logger.debug(
+        "strategies.list.completed",
+        count=result["count"],
+        correlation_id=corr_id,
+        component="strategies",
+    )
+
+    return JSONResponse(content=result)
+
+
+@router.post("/validate-dsl", summary="Validate DSL expression")
+async def validate_dsl(
+    payload: ValidateDslRequest,
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Validate a DSL condition expression without creating a strategy.
+
+    Used by the frontend DslEditor for live validation as the user types.
+    Does not persist anything — purely syntactic analysis.
+
+    Args:
+        payload: ValidateDslRequest with the DSL expression to validate.
+        user: Authenticated user with strategies:write scope.
+
+    Returns:
+        200 JSONResponse with is_valid, errors, indicators_used, variables_used.
+
+    Example:
+        POST /strategies/validate-dsl
+        {"expression": "RSI(14) < 30 AND price > SMA(200)"}
+        → 200 {"is_valid": true, "errors": [], "indicators_used": ["RSI", "SMA"], ...}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    result = service.validate_dsl_expression(payload.expression)
+
+    logger.debug(
+        "strategies.validate_dsl.completed",
+        is_valid=result["is_valid"],
+        correlation_id=corr_id,
+        component="strategies",
+    )
+
+    return JSONResponse(content=result)
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +354,11 @@ async def list_strategies() -> dict:
     "/draft/autosave",
     summary="Save a draft strategy autosave",
 )
-async def post_draft_autosave(payload: DraftAutosavePayload) -> dict:
+async def post_draft_autosave(
+    payload: DraftAutosavePayload,
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+    repo: Any = Depends(get_draft_autosave_repository),
+) -> dict:
     """
     Persist a draft strategy autosave for the given user.
 
@@ -139,6 +372,8 @@ async def post_draft_autosave(payload: DraftAutosavePayload) -> dict:
     Args:
         payload: DraftAutosavePayload containing user_id, draft_payload,
                  form_step, client_ts, and session_id.
+        user: Authenticated user (required).
+        repo: Injected DraftAutosaveRepositoryInterface.
 
     Returns:
         Dict with autosave_id and saved_at timestamp (ISO-8601).
@@ -151,7 +386,7 @@ async def post_draft_autosave(payload: DraftAutosavePayload) -> dict:
         {"user_id": "01H...", "draft_payload": {"name": "S1"}, ...}
         → 200 {"autosave_id": "01H...", "saved_at": "2026-03-28T11:00:01Z"}
     """
-    repo = _repo_instance()
+    corr_id = correlation_id_var.get("no-corr")
     result = repo.create(
         user_id=payload.user_id,
         draft_payload=payload.draft_payload,
@@ -165,6 +400,8 @@ async def post_draft_autosave(payload: DraftAutosavePayload) -> dict:
         autosave_id=result["autosave_id"],
         user_id=payload.user_id,
         form_step=payload.form_step,
+        correlation_id=corr_id,
+        component="strategies",
     )
 
     return result
@@ -175,10 +412,12 @@ async def post_draft_autosave(payload: DraftAutosavePayload) -> dict:
     summary="Retrieve the latest draft autosave for a user",
 )
 async def get_latest_draft_autosave(
-    user_id: Optional[str] = Query(
+    user_id: str | None = Query(
         None,
         description="ULID of the user whose latest autosave to fetch",
     ),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+    repo: Any = Depends(get_draft_autosave_repository),
 ) -> Any:
     """
     Return the most recent autosave for the given user, or 204 if none exists.
@@ -189,6 +428,8 @@ async def get_latest_draft_autosave(
 
     Args:
         user_id: Query parameter — ULID of the user.
+        user: Authenticated user (required).
+        repo: Injected DraftAutosaveRepositoryInterface.
 
     Returns:
         200 with the most recent autosave record if found.
@@ -201,24 +442,31 @@ async def get_latest_draft_autosave(
         GET /strategies/draft/autosave/latest?user_id=01H...
         → 200 {"autosave_id": "01H...", "draft_payload": {...}, ...}
     """
+    corr_id = correlation_id_var.get("no-corr")
     # Manual validation — pydantic Query(...) 422 enforcement is broken in this env.
     if not user_id:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="user_id query parameter is required",
         )
 
-    repo = _repo_instance()
     latest = repo.get_latest(user_id=user_id)
 
     if latest is None:
-        logger.debug("draft.autosave.latest.none", user_id=user_id)
+        logger.debug(
+            "draft.autosave.latest.none",
+            user_id=user_id,
+            correlation_id=corr_id,
+            component="strategies",
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     logger.debug(
         "draft.autosave.latest.found",
         user_id=user_id,
         autosave_id=latest["autosave_id"],
+        correlation_id=corr_id,
+        component="strategies",
     )
     return latest
 
@@ -226,10 +474,14 @@ async def get_latest_draft_autosave(
 @router.delete(
     "/draft/autosave/{autosave_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    response_model=None,
     summary="Discard a draft autosave",
 )
 async def delete_draft_autosave(
     autosave_id: str = Path(..., description="Autosave ULID to discard"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+    repo: Any = Depends(get_draft_autosave_repository),
 ) -> None:
     """
     Explicitly discard a draft autosave record.
@@ -238,6 +490,8 @@ async def delete_draft_autosave(
 
     Args:
         autosave_id: ULID of the autosave record to delete.
+        user: Authenticated user (required).
+        repo: Injected DraftAutosaveRepositoryInterface.
 
     Returns:
         204 No Content on success.
@@ -249,16 +503,26 @@ async def delete_draft_autosave(
         DELETE /strategies/draft/autosave/01H...
         → 204 No Content
     """
-    repo = _repo_instance()
+    corr_id = correlation_id_var.get("no-corr")
     deleted = repo.delete(autosave_id=autosave_id)
 
     if not deleted:
-        logger.warning("draft.autosave.delete.not_found", autosave_id=autosave_id)
+        logger.warning(
+            "draft.autosave.delete.not_found",
+            autosave_id=autosave_id,
+            correlation_id=corr_id,
+            component="strategies",
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Autosave '{autosave_id}' not found.",
         )
 
-    logger.info("draft.autosave.deleted", autosave_id=autosave_id)
+    logger.info(
+        "draft.autosave.deleted",
+        autosave_id=autosave_id,
+        correlation_id=corr_id,
+        component="strategies",
+    )
     # FastAPI returns 204 with no body when the function returns None
     # and status_code=204 is set on the decorator.

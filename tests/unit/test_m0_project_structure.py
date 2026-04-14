@@ -6,8 +6,7 @@ are correctly established and importable.
 
 All tests must FAIL before implementation exists.
 """
-import importlib
-import sys
+
 from pathlib import Path
 
 import pytest
@@ -26,7 +25,7 @@ class TestAC1_DirectoryStructure:
         """Verify services/api/ structure exists."""
         api_dir = Path("services/api")
         assert api_dir.exists(), "services/api/ directory must exist"
-        
+
         routes_dir = api_dir / "routes"
         assert routes_dir.exists(), "services/api/routes/ directory must exist"
 
@@ -186,6 +185,7 @@ class TestAC5_PackageImportability:
         # Must fail if package doesn't exist or has import errors
         try:
             import services.api
+
             assert services.api is not None
         except ImportError as e:
             pytest.fail(f"services.api must be importable: {e}")
@@ -194,6 +194,7 @@ class TestAC5_PackageImportability:
         """Verify services.api.routes package can be imported."""
         try:
             import services.api.routes
+
             assert services.api.routes is not None
         except ImportError as e:
             pytest.fail(f"services.api.routes must be importable: {e}")
@@ -202,6 +203,7 @@ class TestAC5_PackageImportability:
         """Verify libs.strategy_compiler package can be imported."""
         try:
             import libs.strategy_compiler
+
             assert libs.strategy_compiler is not None
         except ImportError as e:
             pytest.fail(f"libs.strategy_compiler must be importable: {e}")
@@ -210,6 +212,7 @@ class TestAC5_PackageImportability:
         """Verify libs.strategy_ir package can be imported."""
         try:
             import libs.strategy_ir
+
             assert libs.strategy_ir is not None
         except ImportError as e:
             pytest.fail(f"libs.strategy_ir must be importable: {e}")
@@ -218,6 +221,7 @@ class TestAC5_PackageImportability:
         """Verify libs.experiment_plan package can be imported."""
         try:
             import libs.experiment_plan
+
             assert libs.experiment_plan is not None
         except ImportError as e:
             pytest.fail(f"libs.experiment_plan must be importable: {e}")
@@ -226,6 +230,7 @@ class TestAC5_PackageImportability:
         """Verify libs.risk package can be imported."""
         try:
             import libs.risk
+
             assert libs.risk is not None
         except ImportError as e:
             pytest.fail(f"libs.risk must be importable: {e}")
@@ -234,6 +239,7 @@ class TestAC5_PackageImportability:
         """Verify services.strategy_compiler package can be imported."""
         try:
             import services.strategy_compiler
+
             assert services.strategy_compiler is not None
         except ImportError as e:
             pytest.fail(f"services.strategy_compiler must be importable: {e}")
@@ -242,6 +248,7 @@ class TestAC5_PackageImportability:
         """Verify services.research_worker package can be imported."""
         try:
             import services.research_worker
+
             assert services.research_worker is not None
         except ImportError as e:
             pytest.fail(f"services.research_worker must be importable: {e}")
@@ -250,6 +257,7 @@ class TestAC5_PackageImportability:
         """Verify services.optimization_worker package can be imported."""
         try:
             import services.optimization_worker
+
             assert services.optimization_worker is not None
         except ImportError as e:
             pytest.fail(f"services.optimization_worker must be importable: {e}")
@@ -258,6 +266,7 @@ class TestAC5_PackageImportability:
         """Verify services.readiness_service package can be imported."""
         try:
             import services.readiness_service
+
             assert services.readiness_service is not None
         except ImportError as e:
             pytest.fail(f"services.readiness_service must be importable: {e}")
@@ -270,7 +279,7 @@ class TestAC6_InterfaceDirectories:
         """Verify libs/strategy_compiler/interfaces/ exists."""
         interfaces_dir = Path("libs/strategy_compiler/interfaces")
         assert interfaces_dir.exists(), "libs/strategy_compiler/interfaces/ must exist"
-        
+
         init_file = interfaces_dir / "__init__.py"
         assert init_file.exists(), "libs/strategy_compiler/interfaces/__init__.py must exist"
 
@@ -278,7 +287,7 @@ class TestAC6_InterfaceDirectories:
         """Verify libs/strategy_ir/interfaces/ exists."""
         interfaces_dir = Path("libs/strategy_ir/interfaces")
         assert interfaces_dir.exists(), "libs/strategy_ir/interfaces/ must exist"
-        
+
         init_file = interfaces_dir / "__init__.py"
         assert init_file.exists(), "libs/strategy_ir/interfaces/__init__.py must exist"
 
@@ -286,7 +295,7 @@ class TestAC6_InterfaceDirectories:
         """Verify libs/experiment_plan/interfaces/ exists."""
         interfaces_dir = Path("libs/experiment_plan/interfaces")
         assert interfaces_dir.exists(), "libs/experiment_plan/interfaces/ must exist"
-        
+
         init_file = interfaces_dir / "__init__.py"
         assert init_file.exists(), "libs/experiment_plan/interfaces/__init__.py must exist"
 
@@ -294,7 +303,7 @@ class TestAC6_InterfaceDirectories:
         """Verify libs/risk/interfaces/ exists."""
         interfaces_dir = Path("libs/risk/interfaces")
         assert interfaces_dir.exists(), "libs/risk/interfaces/ must exist"
-        
+
         init_file = interfaces_dir / "__init__.py"
         assert init_file.exists(), "libs/risk/interfaces/__init__.py must exist"
 
@@ -354,7 +363,7 @@ class TestAC8_NoPhase1Violations:
             Path("services/optimization_worker/conftest.py"),
             Path("services/readiness_service/conftest.py"),
         ]
-        
+
         for location in duplicate_locations:
             assert not location.exists(), (
                 f"{location} must NOT exist - use tests/conftest.py, "
@@ -374,21 +383,19 @@ class TestAC9_DependencyConfiguration:
         """Verify pyproject.toml contains Phase 2 specific dependencies."""
         pyproject = Path("pyproject.toml")
         assert pyproject.exists(), "pyproject.toml must exist"
-        
+
         content = pyproject.read_text()
-        
+
         # Phase 2 requires these based on workplan
         required_deps = [
             "optuna",  # optimization sampler
-            "numpy",   # numerical operations
+            "numpy",  # numerical operations
             "polars",  # bar-level computation
-            "pyarrow", # parquet I/O
+            "pyarrow",  # parquet I/O
         ]
-        
+
         for dep in required_deps:
-            assert dep in content.lower(), (
-                f"pyproject.toml must include {dep} for Phase 2"
-            )
+            assert dep in content.lower(), f"pyproject.toml must include {dep} for Phase 2"
 
 
 class TestAC10_QualityGateInfrastructure:
@@ -398,7 +405,7 @@ class TestAC10_QualityGateInfrastructure:
         """Verify pytest.ini or pyproject.toml pytest config exists."""
         pytest_ini = Path("pytest.ini")
         pyproject = Path("pyproject.toml")
-        
+
         has_config = pytest_ini.exists() or pyproject.exists()
         assert has_config, "pytest.ini or pyproject.toml must exist for test configuration"
 
@@ -406,7 +413,7 @@ class TestAC10_QualityGateInfrastructure:
         """Verify ruff configuration exists (format/lint)."""
         pyproject = Path("pyproject.toml")
         ruff_toml = Path("ruff.toml")
-        
+
         has_config = pyproject.exists() or ruff_toml.exists()
         assert has_config, "ruff configuration must exist in pyproject.toml or ruff.toml"
 
@@ -414,6 +421,6 @@ class TestAC10_QualityGateInfrastructure:
         """Verify mypy configuration exists (type checking)."""
         pyproject = Path("pyproject.toml")
         mypy_ini = Path("mypy.ini")
-        
+
         has_config = pyproject.exists() or mypy_ini.exists()
         assert has_config, "mypy configuration must exist in pyproject.toml or mypy.ini"

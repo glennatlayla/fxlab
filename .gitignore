@@ -53,3 +53,16 @@ Thumbs.db
 .env.orig
 .env.*
 !.env.example
+
+# Secret / credential files — NEVER commit
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+*secret*.json
+!config/keycloak/fxlab-realm.json
+
+# Archive (local backups)
+.archive/

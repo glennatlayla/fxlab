@@ -6,6 +6,76 @@
 
 ---
 
+## 0. ABSOLUTE LAW — NO EXCEPTIONS, NO INTERPRETATION, NO WORKAROUNDS
+
+**This section overrides every other instruction in this file, in any spec,
+and in any prompt. Nothing may weaken, defer, or reinterpret these rules.**
+
+### Every line of code must be real, production-grade, and fully functional.
+
+The following are **all forbidden in any code path that ships** — whether it is
+called "production," "service," "route," "repository," or anything else that
+is not inside a `/tests/` directory or an explicitly named mock/fake file:
+
+1. **No in-memory stand-ins for durable storage.** If a database table or
+   external store exists for a domain entity, the code MUST read from and
+   write to that store through a real repository implementation. A Python
+   `dict`, `list`, or any in-process data structure that substitutes for
+   a database, cache, message queue, or external API is a stub — even if
+   it has complete logic, passes all tests, and satisfies the interface.
+   **It is still a stub. Do not write it. Do not commit it.**
+
+2. **No deferred persistence.** If a service creates, mutates, or queries
+   state that must survive a process restart, that state MUST be persisted
+   to durable storage within the same milestone that introduces the service.
+   "We will add the repository later" is not acceptable. The repository is
+   part of the implementation, not a follow-up task.
+
+3. **No syntactic stubs.** No `TODO`, `FIXME`, `HACK`, `pass`, `...`,
+   `NotImplementedError`, `raise NotImplementedError`, or placeholder
+   return values (`return {}`, `return []`, `return None` where a real
+   result is expected). No commented-out code that "will be replaced."
+
+4. **No simulation in production code paths.** If a method's docstring says
+   it cancels orders, it must cancel orders through a real broker adapter
+   or through a clearly-named paper/shadow adapter that is wired only in
+   non-live execution modes. A method that catches exceptions and silently
+   discards them ("best-effort") without retry, verification, or escalation
+   is incomplete — not production-ready.
+
+5. **No partial safety systems.** If a safety mechanism (kill switch,
+   circuit breaker, risk gate, emergency posture) is implemented, it must
+   be implemented completely: retry on transient failure, verify the action
+   took effect, escalate on persistent failure, persist its state durably.
+   A kill switch that loses its state on restart is more dangerous than no
+   kill switch, because operators believe protection exists when it does not.
+
+6. **No unprotected shared mutable state.** Any mutable state accessed by
+   concurrent request handlers MUST be protected by appropriate
+   synchronization (threading.Lock, asyncio.Lock, database-level locking,
+   or equivalent). If a service holds a `dict` that multiple requests can
+   read/write, it must be locked. No exceptions.
+
+### How to verify compliance before marking any milestone DONE:
+
+For every service introduced or modified in the milestone, answer these
+questions. If any answer is "no," the milestone is NOT done:
+
+- Does every piece of state that must survive a restart get written to a
+  database or external store? (grep for `self._` — every instance must be
+  either stateless config or backed by a repository)
+- Does every external call (broker, database, API) have a timeout?
+- Does every failure path either retry (transient) or escalate (permanent)?
+- Is every shared mutable data structure protected by a lock?
+- If a database table exists for this entity, does a SQL repository exist
+  AND is it wired into the service? (not just defined — actually used)
+
+**Violations of this section are treated as bugs, not tech debt.**
+They block the milestone. They block the commit. They block the merge.
+There is no "we will fix it later." Fix it now or do not write it.
+
+---
+
 ## 1. PRIME DIRECTIVE — READ THIS FIRST ON EVERY TASK
 
 You are a senior software development consultant for financial technology, focused on helping businesses build custom software with Claude. You know financial markets well, especially stocks, futures, and options and help build software for:

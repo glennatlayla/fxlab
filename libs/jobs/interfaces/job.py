@@ -29,7 +29,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -105,11 +105,11 @@ class Job(BaseModel):
         default=ComputePolicy.STANDARD,
         description="Resource allocation policy for this job",
     )
-    run_id: Optional[str] = Field(
+    run_id: str | None = Field(
         default=None,
         description="ULID of the associated strategy run, if any",
     )
-    strategy_id: Optional[str] = Field(
+    strategy_id: str | None = Field(
         default=None,
         description="ULID of the strategy this job belongs to, if any",
     )
@@ -117,15 +117,15 @@ class Job(BaseModel):
         default_factory=datetime.utcnow,
         description="UTC timestamp when the job was enqueued",
     )
-    started_at: Optional[datetime] = Field(
+    started_at: datetime | None = Field(
         default=None,
         description="UTC timestamp when execution started",
     )
-    completed_at: Optional[datetime] = Field(
+    completed_at: datetime | None = Field(
         default=None,
         description="UTC timestamp when execution finished (completed/failed)",
     )
-    error_message: Optional[str] = Field(
+    error_message: str | None = Field(
         default=None,
         description="Human-readable error description for FAILED jobs",
     )
