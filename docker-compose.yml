@@ -39,13 +39,21 @@ services:
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-fxlab}
       - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-fxlab-api}
       - KEYCLOAK_ADMIN_CLIENT_SECRET=${KEYCLOAK_ADMIN_CLIENT_SECRET:-}
+    # B3 (2026-04-15 cascade): depends_on edges are deliberately split into
+    # "genuine" service_healthy edges (postgres, redis — api's lifespan
+    # startup blocks on these) and "cascade-safe" service_started edges
+    # (keycloak — api fetches JWKS lazily on first authenticated request,
+    # so keycloak being temporarily unhealthy must not prevent api from
+    # serving /health). See tests/unit/test_docker_compose_cascade_safety.py
+    # for the full classification and docs/remediation/2026-04-15-minitux-
+    # install-failure.md (Commit 6) for the incident history.
     depends_on:
       postgres:
-        condition: service_healthy
+        condition: service_healthy    # genuine: api runs migrations + secret validation against postgres at startup
       redis:
-        condition: service_healthy
+        condition: service_healthy    # genuine: api performs synchronous PING during lifespan startup
       keycloak:
-        condition: service_healthy
+        condition: service_started    # cascade-safe: JWKS fetched lazily per-request, not at startup
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -79,9 +87,18 @@ services:
     environment:
       - VITE_API_URL=http://api:8000
       - NODE_ENV=development
+    # B3 (2026-04-15 cascade): web is an nginx-served static SPA. It does
+    # NOT require api to be healthy — the bundle can render a "backend
+    # unavailable" state when api is down, which is strictly preferable to
+    # parking web in 'created' state forever (which is what service_healthy
+    # did during the 2026-04-15 minitux install: api crashlooped on Redis
+    # EINVAL, web never started, the root cause was buried). service_started
+    # keeps compose's log ordering sensible without propagating failure.
+    # See tests/unit/test_docker_compose_cascade_safety.py and
+    # docs/remediation/2026-04-15-minitux-install-failure.md (Commit 6).
     depends_on:
       api:
-        condition: service_healthy
+        condition: service_started    # cascade-safe: static SPA tolerates api unavailability
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 15s
@@ -120,9 +137,13 @@ services:
       - KC_METRICS_ENABLED=true
     volumes:
       - ./config/keycloak:/opt/keycloak/data/import:ro
+    # B3 (2026-04-15 cascade): keycloak persists its realm/user schema in
+    # postgres at boot; without a healthy postgres keycloak crashloops.
+    # Genuine service_healthy edge. See tests/unit/
+    # test_docker_compose_cascade_safety.py for the full classification.
     depends_on:
       postgres:
-        condition: service_healthy
+        condition: service_healthy    # genuine: keycloak writes its schema to postgres at boot
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200\\|UP' <&3"]
       interval: 15s

@@ -88,9 +88,17 @@ class TestAPIStartupProductionRedisEnforcement:
                     verify_redis_connection,
                 )
 
-                # Should raise ConfigError
-                with pytest.raises(ConfigError, match="Cannot connect to Redis"):
-                    verify_redis_connection("redis://redis:6379/0")
+                # After B2 (2026-04-15 remediation) verify_redis_connection
+                # retries transient PING failures before surfacing a
+                # ConfigError. We inject a no-op sleep so the test runs in
+                # milliseconds rather than the production 1+2+4+8+16=31 s
+                # exponential backoff, and we relax the regex to match the
+                # post-B2/D2 classified-error message.
+                with pytest.raises(ConfigError, match=r"Redis health check failed"):
+                    verify_redis_connection(
+                        "redis://redis:6379/0",
+                        sleep=lambda _seconds: None,
+                    )
 
 
 class TestAPIStartupNonProductionPermissive:
