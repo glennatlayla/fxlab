@@ -106,7 +106,9 @@ fail() {
 # ---------------------------------------------------------------------------
 
 detect_mode() {
-    if [[ -d "${FXLAB_HOME}/.git" ]]; then
+    # A fresh clone has .git but no .env (install.sh creates .env on first run).
+    # "update" means install.sh has run before — .env exists and services were deployed.
+    if [[ -f "${FXLAB_HOME}/.env" ]]; then
         INSTALL_MODE="update"
     else
         INSTALL_MODE="fresh"
@@ -614,7 +616,7 @@ verify_installation() {
     # Frontend
     local web_healthy=0
     for attempt in 1 2 3; do
-        if docker compose -f docker-compose.prod.yml exec -T web wget -qO- http://localhost:3000 &>/dev/null; then
+        if docker compose -f docker-compose.prod.yml exec -T web curl -sf http://localhost:3000 &>/dev/null; then
             web_healthy=1
             break
         fi
@@ -622,8 +624,8 @@ verify_installation() {
     done
     [[ "$web_healthy" -eq 1 ]] && log INFO "Frontend health check passed." || log WARN "Frontend health check failed — may still be starting."
 
-    # Edge proxy
-    if curl -sf "http://localhost:${FXLAB_HTTP_PORT}/health" &>/dev/null; then
+    # Edge proxy (check from host via Docker exec on nginx container)
+    if docker compose -f docker-compose.prod.yml exec -T nginx curl -sf http://localhost/health &>/dev/null; then
         log INFO "Nginx edge proxy health check passed."
     else
         log WARN "Nginx not responding on port ${FXLAB_HTTP_PORT}."
@@ -731,8 +733,14 @@ main() {
     check_ports
 
     if [[ "$INSTALL_MODE" == "fresh" ]]; then
-        check_github_access
-        clone_repo
+        if [[ -d "${FXLAB_HOME}/.git" ]]; then
+            # Repo was already cloned by the user (recommended install path).
+            # Skip clone and GitHub access check — the code is already here.
+            log INFO "Repository already cloned at ${FXLAB_HOME} — skipping clone."
+        else
+            check_github_access
+            clone_repo
+        fi
     elif [[ "$INSTALL_MODE" == "update" ]]; then
         pull_latest
     fi

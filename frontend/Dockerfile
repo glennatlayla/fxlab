@@ -26,6 +26,8 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 FROM nginx:1.25-alpine AS runtime
 
+RUN apk add --no-cache curl
+
 # Copy built assets
 COPY --from=builder /app/dist /usr/share/nginx/html
 
@@ -35,6 +37,6 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 3000
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=15s \
-    CMD wget -qO- http://localhost:3000 || exit 1
+    CMD curl -sf http://localhost:3000 || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]
