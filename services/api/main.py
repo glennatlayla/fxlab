@@ -21,8 +21,9 @@ Example:
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
-from typing import Any
+import time
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any, Iterator
 
 import structlog
 from fastapi import FastAPI
@@ -139,6 +140,125 @@ def _check_pydantic_core() -> None:
             error=str(exc),
             exc_info=True,
         )
+
+
+@contextmanager
+def _startup_phase(name: str, **fields: Any) -> Iterator[None]:
+    """
+    Instrument a discrete startup phase with structured begin/complete/failed logs.
+
+    This exists so operators troubleshooting an install on a remote host
+    (e.g. minitux) can identify EXACTLY which wiring block produced a
+    failure, how long each phase took, and — on failure — the concrete
+    error, all from structured logs without having to add print statements
+    and redeploy.
+
+    Each invocation emits:
+    - ``startup.phase_begin``   at entry
+    - ``startup.phase_complete`` at successful exit (with duration_ms)
+    - ``startup.phase_failed``   on exception (with exc_info and duration_ms)
+
+    The exception is re-raised after logging so the caller decides whether
+    to let it abort startup or to catch it and degrade gracefully.
+
+    Args:
+        name: Phase name in snake_case (e.g. "live_execution_wiring").
+        **fields: Additional structured fields to include on all three events.
+
+    Yields:
+        None. Use as a context manager.
+
+    Example:
+        with _startup_phase("redis_health_check", backend="redis"):
+            verify_redis_connection(redis_url, timeout_seconds=5.0)
+    """
+    started = time.monotonic()
+    logger.info(
+        "startup.phase_begin",
+        component="startup",
+        phase=name,
+        **fields,
+    )
+    try:
+        yield
+    except Exception:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.error(
+            "startup.phase_failed",
+            component="startup",
+            phase=name,
+            duration_ms=elapsed_ms,
+            exc_info=True,
+            **fields,
+        )
+        raise
+    else:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "startup.phase_complete",
+            component="startup",
+            phase=name,
+            duration_ms=elapsed_ms,
+            **fields,
+        )
+
+
+def _log_runtime_versions() -> None:
+    """
+    Emit a single structured log line with the runtime versions of
+    packages that have historically caused environment-specific issues.
+
+    Specifically logs versions of pydantic, pydantic-core, SQLAlchemy,
+    FastAPI, and structlog, plus the Python and platform strings. This
+    is the fastest way to confirm from production logs whether a host
+    has the expected dependency set — a prior incident in this codebase
+    was caused by a macOS-built pydantic-core wheel landing on a Linux
+    host.
+
+    Also logs a non-secret snapshot of environment-shaping variables
+    (ENVIRONMENT, DATABASE_URL scheme, REDIS_URL scheme, RATE_LIMIT_BACKEND,
+    RECONCILIATION_INTERVAL_SECONDS) to confirm the deploy wired the
+    intended configuration.
+    """
+    import platform
+    import sys
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    def _safe_version(pkg: str) -> str:
+        try:
+            return _pkg_version(pkg)
+        except PackageNotFoundError:
+            return "not_installed"
+        except Exception:  # pragma: no cover - defensive
+            return "error"
+
+    def _url_scheme(url: str) -> str:
+        if not url:
+            return "unset"
+        return url.split("://", 1)[0] + "://..."
+
+    logger.info(
+        "startup.runtime_versions",
+        component="startup",
+        python_version=sys.version.split()[0],
+        platform=platform.platform(),
+        machine=platform.machine(),
+        pydantic=_safe_version("pydantic"),
+        pydantic_core=_safe_version("pydantic_core"),
+        sqlalchemy=_safe_version("SQLAlchemy"),
+        fastapi=_safe_version("fastapi"),
+        structlog=_safe_version("structlog"),
+        alembic=_safe_version("alembic"),
+        environment=os.environ.get("ENVIRONMENT", ""),
+        database_url_scheme=_url_scheme(os.environ.get("DATABASE_URL", "")),
+        redis_url_scheme=_url_scheme(os.environ.get("REDIS_URL", "")),
+        rate_limit_backend=os.environ.get("RATE_LIMIT_BACKEND", "memory"),
+        reconciliation_interval_seconds=os.environ.get(
+            "RECONCILIATION_INTERVAL_SECONDS", "300"
+        ),
+        artifact_storage_backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
+    )
 
 
 #: Sentinel file path baked into production Docker images.
@@ -300,8 +420,14 @@ async def lifespan(app: FastAPI):
     from services.api.infrastructure.lifecycle_manager import GracefulLifecycleManager
     from services.api.infrastructure.redis_health import verify_redis_connection
 
-    _check_pydantic_core()
-    _validate_startup_secrets()
+    # Emit versions first — this is the single most useful log line when
+    # triaging "it works on my laptop but fails on minitux" style issues.
+    _log_runtime_versions()
+
+    with _startup_phase("pydantic_core_check"):
+        _check_pydantic_core()
+    with _startup_phase("validate_startup_secrets"):
+        _validate_startup_secrets()
 
     # Verify Redis health in production if rate limiting is Redis-backed.
     # This ensures the application fails fast if critical infrastructure
@@ -471,6 +597,12 @@ async def lifespan(app: FastAPI):
     # Wire the LiveExecutionService for live trading endpoints.
     # This instantiates all dependencies and registers the service with the
     # live routes module so that /live/* endpoints have access to it.
+    _live_exec_phase_start = time.monotonic()
+    logger.info(
+        "startup.phase_begin",
+        component="startup",
+        phase="live_execution_wiring",
+    )
     try:
         from services.api.db import SessionLocal
         from services.api.repositories.sql_deployment_repository import (
@@ -554,13 +686,25 @@ async def lifespan(app: FastAPI):
             component="startup",
             detail="LiveExecutionService wired with all dependencies and registered with /live routes.",
         )
+        logger.info(
+            "startup.phase_complete",
+            component="startup",
+            phase="live_execution_wiring",
+            duration_ms=int((time.monotonic() - _live_exec_phase_start) * 1000),
+        )
 
     except Exception as exc:
+        logger.error(
+            "startup.phase_failed",
+            component="startup",
+            phase="live_execution_wiring",
+            duration_ms=int((time.monotonic() - _live_exec_phase_start) * 1000),
+            exc_info=True,
+        )
         logger.critical(
             "live_execution.wiring_failed",
             error=str(exc),
             component="startup",
-            exc_info=True,
             detail="Failed to wire LiveExecutionService at startup. "
             "Live trading endpoints will return 503 Service Unavailable.",
         )
@@ -576,6 +720,14 @@ async def lifespan(app: FastAPI):
     # bounds that divergence window to the configured interval.
     #
     # Wiring notes:
+    # - This block is INTENTIONALLY self-contained. It does NOT reference
+    #   any local variables from the LiveExecutionService wiring block
+    #   above (adapter_registry_dict, db_session_live, etc.) — if that
+    #   block raises, those names never get bound and any reference here
+    #   would NameError inside this try/except, producing a misleading
+    #   "periodic_reconciliation.wiring_failed" log whose real root cause
+    #   is in the LiveExecutionService block. Each wiring block builds
+    #   what it needs from the durable inputs (broker_registry + SessionLocal).
     # - Each tick is given its own fresh SQLAlchemy Session via a factory,
     #   because a single Session is NOT safe to share across threads
     #   (SQLAlchemy docs). The factory constructs a session + repos +
@@ -586,110 +738,125 @@ async def lifespan(app: FastAPI):
     #   = 5 min). Set to 0 to disable the periodic job entirely.
     app.state.periodic_reconciliation_job = None
     try:
-        from services.api.db import SessionLocal
-        from services.api.infrastructure.periodic_reconciliation_job import (
-            PeriodicReconciliationJob,
-        )
-        from services.api.repositories.sql_deployment_repository import (
-            SqlDeploymentRepository,
-        )
-        from services.api.repositories.sql_order_repository import (
-            SqlOrderRepository,
-        )
-        from services.api.repositories.sql_position_repository import (
-            SqlPositionRepository,
-        )
-        from services.api.repositories.sql_reconciliation_repository import (
-            SqlReconciliationRepository,
-        )
-        from services.api.routes.reconciliation import set_reconciliation_service
-        from services.api.services.reconciliation_service import (
-            ReconciliationService,
-        )
+        with _startup_phase(
+            "periodic_reconciliation_wiring",
+            interval_s_env=os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"),
+        ):
+            from services.api.db import SessionLocal
+            from services.api.infrastructure.periodic_reconciliation_job import (
+                PeriodicReconciliationJob,
+            )
+            from services.api.repositories.sql_deployment_repository import (
+                SqlDeploymentRepository,
+            )
+            from services.api.repositories.sql_order_repository import (
+                SqlOrderRepository,
+            )
+            from services.api.repositories.sql_position_repository import (
+                SqlPositionRepository,
+            )
+            from services.api.repositories.sql_reconciliation_repository import (
+                SqlReconciliationRepository,
+            )
+            from services.api.routes.reconciliation import (
+                set_reconciliation_service,
+            )
+            from services.api.services.reconciliation_service import (
+                ReconciliationService,
+            )
 
-        # Per-tick factory: fresh session, fresh repos, fresh service.
-        # The session is closed by the job via its normal lifecycle; we
-        # attach a close hook on the service via a shim that wraps the
-        # underlying run_reconciliation to close the session after use.
-        def _build_periodic_reconciliation_service() -> ReconciliationService:
-            """
-            Build a ReconciliationService wired with a fresh session.
+            # Per-tick factory: fresh session, fresh repos, fresh adapter
+            # snapshot, fresh service. A fresh Session per tick is required
+            # because SQLAlchemy Session instances are NOT thread-safe.
+            def _build_periodic_reconciliation_service() -> ReconciliationService:
+                """
+                Build a ReconciliationService wired with a fresh session.
 
-            The session is intentionally leaked to the GC (no explicit
-            close in the factory) because SessionLocal()'s default
-            sessionmaker returns regular Session objects — these are
-            cheap to let fall out of scope. Production should move to a
-            context-managed factory once scoped_session is introduced.
-            """
-            tick_session = SessionLocal()
-            dep_repo = SqlDeploymentRepository(db=tick_session)
-            order_repo_tick = SqlOrderRepository(db=tick_session)
-            position_repo_tick = SqlPositionRepository(db=tick_session)
-            recon_repo = SqlReconciliationRepository(db=tick_session)
+                The session is intentionally leaked to the GC (no explicit
+                close in the factory) because SessionLocal()'s default
+                sessionmaker returns regular Session objects — these are
+                cheap to let fall out of scope. Production should move to
+                a context-managed factory once scoped_session is introduced.
+                """
+                tick_session = SessionLocal()
+                dep_repo = SqlDeploymentRepository(db=tick_session)
+                order_repo_tick = SqlOrderRepository(db=tick_session)
+                position_repo_tick = SqlPositionRepository(db=tick_session)
+                recon_repo = SqlReconciliationRepository(db=tick_session)
 
-            # Build a per-tick adapter map from the shared broker registry.
-            # The registry's internal lock makes this copy safe.
-            tick_adapter_map: dict[str, Any] = {}
+                # Build a per-tick adapter map from the shared broker
+                # registry. The registry's internal lock makes this copy
+                # safe. We rebuild on every tick so adapters registered
+                # after startup are picked up automatically.
+                tick_adapter_map: dict[str, Any] = {}
+                with broker_registry._lock:
+                    for dep_id, (adapter, _btype) in broker_registry._registry.items():
+                        tick_adapter_map[dep_id] = adapter
+
+                return ReconciliationService(
+                    deployment_repo=dep_repo,
+                    reconciliation_repo=recon_repo,
+                    adapter_registry=tick_adapter_map,
+                    order_repo=order_repo_tick,
+                    position_repo=position_repo_tick,
+                )
+
+            # Separate session + repo for listing active deployments in
+            # the job's check_and_reconcile() — list_by_state is a
+            # single-shot read, safe to hold for the job's lifetime.
+            recon_list_session = SessionLocal()
+            app.state.periodic_reconciliation_session = recon_list_session
+            recon_deployment_repo = SqlDeploymentRepository(db=recon_list_session)
+
+            # Also register a service with the /reconciliation routes so
+            # on-demand endpoints work. Build a SEPARATE long-lived
+            # session + adapter snapshot here rather than reusing anything
+            # from the LiveExecutionService block, so a failure there does
+            # not cascade to disable on-demand reconciliation here.
+            routes_session = SessionLocal()
+            app.state.periodic_reconciliation_routes_session = routes_session
+            routes_adapter_map: dict[str, Any] = {}
             with broker_registry._lock:
                 for dep_id, (adapter, _btype) in broker_registry._registry.items():
-                    tick_adapter_map[dep_id] = adapter
-
-            return ReconciliationService(
-                deployment_repo=dep_repo,
-                reconciliation_repo=recon_repo,
-                adapter_registry=tick_adapter_map,
-                order_repo=order_repo_tick,
-                position_repo=position_repo_tick,
+                    routes_adapter_map[dep_id] = adapter
+            set_reconciliation_service(
+                ReconciliationService(
+                    deployment_repo=SqlDeploymentRepository(db=routes_session),
+                    reconciliation_repo=SqlReconciliationRepository(db=routes_session),
+                    adapter_registry=routes_adapter_map,
+                    order_repo=SqlOrderRepository(db=routes_session),
+                    position_repo=SqlPositionRepository(db=routes_session),
+                )
             )
 
-        # Separate session + repo for listing active deployments in the
-        # job's check_and_reconcile() — list_by_state is a single-shot
-        # read, safe to hold for the job's lifetime.
-        recon_list_session = SessionLocal()
-        app.state.periodic_reconciliation_session = recon_list_session
-        recon_deployment_repo = SqlDeploymentRepository(db=recon_list_session)
-
-        # Also register a lightweight service with the /reconciliation
-        # routes so the on-demand endpoints work. This uses the existing
-        # long-lived session that other routes use; it is the same pattern
-        # as LiveExecutionService above.
-        live_session_for_routes = app.state.live_execution_db_session
-        set_reconciliation_service(
-            ReconciliationService(
-                deployment_repo=SqlDeploymentRepository(db=live_session_for_routes),
-                reconciliation_repo=SqlReconciliationRepository(
-                    db=live_session_for_routes
-                ),
-                adapter_registry=adapter_registry_dict,
-                order_repo=SqlOrderRepository(db=live_session_for_routes),
-                position_repo=SqlPositionRepository(db=live_session_for_routes),
+            interval_s = float(os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"))
+            periodic_job = PeriodicReconciliationJob(
+                reconciliation_service_factory=_build_periodic_reconciliation_service,
+                deployment_repo=recon_deployment_repo,
+                check_interval_seconds=interval_s,
             )
-        )
-
-        interval_s = float(os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"))
-        periodic_job = PeriodicReconciliationJob(
-            reconciliation_service_factory=_build_periodic_reconciliation_service,
-            deployment_repo=recon_deployment_repo,
-            check_interval_seconds=interval_s,
-        )
-        periodic_job.start()
-        app.state.periodic_reconciliation_job = periodic_job
-        logger.info(
-            "periodic_reconciliation.wired",
-            component="startup",
-            check_interval_seconds=interval_s,
-            enabled=interval_s > 0,
-        )
+            periodic_job.start()
+            app.state.periodic_reconciliation_job = periodic_job
+            logger.info(
+                "periodic_reconciliation.wired",
+                component="startup",
+                check_interval_seconds=interval_s,
+                enabled=interval_s > 0,
+            )
     except Exception:
+        # _startup_phase already logged startup.phase_failed with exc_info.
+        # This warning is the domain-specific follow-up explaining the
+        # operational impact so oncall knows the divergence-detection
+        # window has regressed to "next restart only".
         logger.warning(
             "periodic_reconciliation.wiring_failed",
             component="startup",
-            exc_info=True,
             detail=(
                 "Periodic reconciliation job did not start. Startup "
                 "reconciliation still ran; divergences introduced "
                 "mid-process-life will only be caught at next restart "
-                "until the periodic job is repaired."
+                "until the periodic job is repaired. See the preceding "
+                "startup.phase_failed log for the root-cause exception."
             ),
         )
 
@@ -716,6 +883,16 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.warning(
                 "periodic_reconciliation.session_close_failed",
+                component="shutdown",
+                exc_info=True,
+            )
+    routes_session = getattr(app.state, "periodic_reconciliation_routes_session", None)
+    if routes_session is not None:
+        try:
+            routes_session.close()
+        except Exception:
+            logger.warning(
+                "periodic_reconciliation.routes_session_close_failed",
                 component="shutdown",
                 exc_info=True,
             )
