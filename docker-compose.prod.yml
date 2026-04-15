@@ -23,8 +23,6 @@
 #   redis-data     — Persistent Redis AOF
 #   nginx-certs    — TLS certificates (optional, for HTTPS)
 
-version: '3.8'
-
 services:
 
   # ---------------------------------------------------------------------------
@@ -322,6 +320,10 @@ services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: fxlab-cadvisor
+    # Privileged mode required for cAdvisor to access cgroup filesystem
+    # and /dev/kmsg on cgroupsv2 hosts (Ubuntu 22.04+, RHEL 9+).
+    # Without this, cAdvisor fails to initialise and dumps help text.
+    privileged: true
     expose:
       - "8080"
     command:
@@ -329,19 +331,22 @@ services:
       - '--housekeeping_interval=30s'
       - '--max_housekeeping_interval=60s'
       - '--disable_metrics=accelerator,cpu_topology,resctrl'
+    devices:
+      - /dev/kmsg:/dev/kmsg
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
     environment:
       - TZ=UTC
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 10s
-      retries: 2
+      retries: 3
       start_period: 30s
     restart: unless-stopped
     networks:

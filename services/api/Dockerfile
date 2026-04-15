@@ -66,8 +66,10 @@ USER fxlab
 EXPOSE 8000
 
 # Health check matching docker-compose expectation
-HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=10s \
-    CMD curl -f http://localhost:8000/health || exit 1
+# start-period must match docker-compose.prod.yml (15s) to allow time for
+# Alembic migrations before the first health check probe.
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=15s \
+    CMD curl -sf http://localhost:8000/health || exit 1
 
 # Default: production mode (no reload). Override ENVIRONMENT=development to enable reload.
 ARG ENVIRONMENT=production

@@ -505,6 +505,71 @@ setup_env() {
 }
 
 # ---------------------------------------------------------------------------
+# Host kernel tuning
+# ---------------------------------------------------------------------------
+
+tune_host_kernel() {
+    # Tune host kernel parameters required by containerised services.
+    # Each setting is checked before writing so we only modify what is needed,
+    # and we persist changes across reboots via /etc/sysctl.d/.
+    log STEP "Tuning host kernel parameters..."
+
+    local changed=0
+
+    # --- vm.overcommit_memory = 1 ---
+    # Redis requires this for reliable background persistence (RDB/AOF).
+    # Without it Redis logs: "WARNING Memory overcommit must be enabled!"
+    # and background saves may fail under memory pressure.
+    local current_overcommit
+    current_overcommit="$(sysctl -n vm.overcommit_memory 2>/dev/null)" || current_overcommit=""
+    if [[ "$current_overcommit" != "1" ]]; then
+        log INFO "Setting vm.overcommit_memory=1 (required by Redis for background saves)."
+        sysctl -w vm.overcommit_memory=1 >>"$LOG_FILE" 2>&1
+
+        # Persist across reboots
+        local sysctl_conf="/etc/sysctl.d/99-fxlab.conf"
+        if [[ -f "$sysctl_conf" ]] && grep -q "vm.overcommit_memory" "$sysctl_conf"; then
+            sed -i 's/^vm.overcommit_memory.*/vm.overcommit_memory=1/' "$sysctl_conf"
+        else
+            echo "# FXLab — Redis requires overcommit for background persistence" >> "$sysctl_conf"
+            echo "vm.overcommit_memory=1" >> "$sysctl_conf"
+        fi
+        changed=1
+    else
+        log INFO "vm.overcommit_memory already set to 1."
+    fi
+
+    # --- net.core.somaxconn ---
+    # Redis and Nginx benefit from a higher listen backlog.  The default
+    # of 128 (or 4096 on some distros) is usually fine, but if the current
+    # value is below 512 we bump it.  This prevents connection drops under
+    # burst traffic.
+    local current_somaxconn
+    current_somaxconn="$(sysctl -n net.core.somaxconn 2>/dev/null)" || current_somaxconn="128"
+    if [[ "$current_somaxconn" -lt 512 ]]; then
+        log INFO "Raising net.core.somaxconn from ${current_somaxconn} to 512."
+        sysctl -w net.core.somaxconn=512 >>"$LOG_FILE" 2>&1
+
+        local sysctl_conf="/etc/sysctl.d/99-fxlab.conf"
+        if [[ -f "$sysctl_conf" ]] && grep -q "net.core.somaxconn" "$sysctl_conf"; then
+            sed -i 's/^net.core.somaxconn.*/net.core.somaxconn=512/' "$sysctl_conf"
+        else
+            echo "# FXLab — higher listen backlog for Redis and Nginx" >> "$sysctl_conf"
+            echo "net.core.somaxconn=512" >> "$sysctl_conf"
+        fi
+        changed=1
+    else
+        log INFO "net.core.somaxconn already ${current_somaxconn} (≥512)."
+    fi
+
+    if [[ "$changed" -eq 1 ]]; then
+        log INFO "Kernel parameters tuned and persisted to /etc/sysctl.d/99-fxlab.conf."
+    else
+        log INFO "All kernel parameters already at required values."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Build & deploy
 # ---------------------------------------------------------------------------
 
@@ -904,6 +969,7 @@ main() {
     fi
 
     setup_env
+    tune_host_kernel
     build_and_start
     wait_for_healthy
     install_systemd
