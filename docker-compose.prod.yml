@@ -1,0 +1,201 @@
+# FXLab Platform — Production Docker Compose
+#
+# This file defines the full production stack for FXLab. It is designed to
+# run on a single Linux host behind an Nginx reverse proxy.
+#
+# Services:
+#   api       — FastAPI backend (Gunicorn + Uvicorn workers)
+#   web       — React frontend (Nginx, static assets)
+#   postgres  — PostgreSQL 15 database
+#   redis     — Redis 7 (rate limiting, job queue, cache)
+#   nginx     — Edge reverse proxy (TLS termination, routing)
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Prerequisites:
+#   - Docker Engine 24+ and Docker Compose v2
+#   - .env file with all required secrets (see .env.production.template)
+#   - Ports 80 and 443 available on the host
+#
+# Volumes:
+#   postgres-data  — Persistent PostgreSQL storage
+#   redis-data     — Persistent Redis AOF
+#   nginx-certs    — TLS certificates (optional, for HTTPS)
+
+version: '3.8'
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Nginx — Edge reverse proxy
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: fxlab-nginx
+    ports:
+      - "${FXLAB_HTTP_PORT:-80}:80"
+      - "${FXLAB_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/nginx/fxlab.conf:/etc/nginx/conf.d/default.conf:ro
+      - nginx-certs:/etc/nginx/certs:ro
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+
+  # ---------------------------------------------------------------------------
+  # API — FastAPI backend
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+      args:
+        ENVIRONMENT: production
+    container_name: fxlab-api
+    expose:
+      - "8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-fxlab}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fxlab}?sslmode=prefer
+      - REDIS_URL=redis://redis:6379/0
+      - RATE_LIMIT_BACKEND=redis
+      - LOGIN_TRACKER_BACKEND=redis
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-WARNING}
+      - PYTHONUNBUFFERED=1
+      - ENVIRONMENT=production
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://localhost}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+
+  # ---------------------------------------------------------------------------
+  # Web — React frontend (served via nginx)
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fxlab-web
+    expose:
+      - "3000"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — Relational database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: fxlab-postgres
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-fxlab}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-fxlab}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fxlab} -d ${POSTGRES_DB:-fxlab}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+
+  # ---------------------------------------------------------------------------
+  # Redis — Cache, rate limiting, job queue
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: fxlab-redis
+    expose:
+      - "6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --tcp-backlog 128
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '0.5'
+
+networks:
+  fxlab-net:
+    driver: bridge
+    name: fxlab-network
+
+volumes:
+  postgres-data:
+    name: fxlab-postgres-data
+  redis-data:
+    name: fxlab-redis-data
+  nginx-certs:
+    name: fxlab-nginx-certs

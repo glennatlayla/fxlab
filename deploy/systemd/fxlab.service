@@ -1,0 +1,56 @@
+# FXLab Platform — systemd service unit
+#
+# Manages the FXLab Docker Compose production stack as a systemd service.
+# Ensures the platform starts on boot, restarts on failure, and supports
+# standard systemctl operations (start, stop, restart, status).
+#
+# Installation:
+#   sudo cp deploy/systemd/fxlab.service /etc/systemd/system/fxlab.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable fxlab
+#   sudo systemctl start fxlab
+#
+# Logs:
+#   journalctl -u fxlab -f
+#
+# Dependencies:
+#   - Docker Engine 24+
+#   - Docker Compose v2 (docker compose)
+#   - FXLab installed at /opt/fxlab (configurable via FXLAB_HOME)
+
+[Unit]
+Description=FXLab Trading Platform
+Documentation=file:///opt/fxlab/README-INSTALL.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/fxlab
+EnvironmentFile=/opt/fxlab/.env
+
+# Pull latest images (if using pre-built), then start the stack
+ExecStartPre=/usr/bin/docker compose -f docker-compose.prod.yml pull --quiet --ignore-pull-failures
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml down --timeout 30
+ExecReload=/usr/bin/docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+
+# Restart policy — restart on failure after 30 seconds, up to 5 times
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Timeout for startup (image builds can take time on first run)
+TimeoutStartSec=600
+TimeoutStopSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fxlab
+
+[Install]
+WantedBy=multi-user.target

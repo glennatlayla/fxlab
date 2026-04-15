@@ -1,0 +1,21 @@
+[Unit]
+Description=FXLab Database Backup Timer
+Documentation=file:///opt/fxlab/deploy/scripts/README-backup.md
+Requires=fxlab-backup-db.service
+
+[Timer]
+# Run daily at 2 AM UTC (adjust for your timezone)
+# Format: Day HH:MM:SS (e.g., Mon *-*-* 02:00:00 for Monday 2 AM)
+OnCalendar=*-*-* 02:00:00
+
+# Run backup on boot if it hasn't run in 24 hours
+Persistent=yes
+
+# Accuracy specification (run within 15 minutes of scheduled time)
+AccuracySec=15min
+
+# Unit to activate
+Unit=fxlab-backup-db.service
+
+[Install]
+WantedBy=timers.target

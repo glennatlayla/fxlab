@@ -1,0 +1,49 @@
+[Unit]
+Description=FXLab Database Backup Service
+Documentation=file:///opt/fxlab/deploy/scripts/README-backup.md
+Requires=docker.service
+After=docker.service
+ConditionFileNotEmpty=/opt/fxlab/deploy/scripts/backup-db.sh
+
+[Service]
+Type=oneshot
+
+# User and group (use root for access to docker socket, or add user to docker group)
+User=root
+Group=root
+
+# Working directory for the backup script
+WorkingDirectory=/opt/fxlab
+
+# Environment configuration (adjust to match your setup)
+Environment="BACKUP_DIR=/opt/fxlab/backups"
+Environment="BACKUP_RETENTION_DAYS=30"
+Environment="DOCKER_CONTAINER=fxlab-postgres"
+Environment="POSTGRES_USER=fxlab"
+Environment="POSTGRES_DB=fxlab"
+Environment="LOG_LEVEL=INFO"
+
+# Execute the backup script
+ExecStart=/opt/fxlab/deploy/scripts/backup-db.sh
+
+# Standard output/error handling
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fxlab-backup
+
+# Restart policy (oneshot doesn't auto-restart, but timer controls frequency)
+Restart=no
+
+# Timeout for backup operations (adjust based on database size)
+TimeoutStartSec=600
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/fxlab/backups
+
+# Resource limits (adjust as needed)
+MemoryLimit=2G
+CPUQuota=80%
