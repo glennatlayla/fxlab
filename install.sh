@@ -466,6 +466,25 @@ setup_env() {
         changed=1
     fi
 
+    # Auto-detect CORS origins if still at placeholder
+    if [[ -z "${CORS_ALLOWED_ORIGINS:-}" || "${CORS_ALLOWED_ORIGINS:-}" == "CHANGE_ME" ]]; then
+        # Detect the primary IP address of this server so the frontend can
+        # reach the API via CORS.  The edge nginx serves both on the same
+        # origin, but CORS headers are still required for XHR from the
+        # browser when accessing via IP or hostname.
+        local server_ip
+        server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || server_ip="localhost"
+        local cors_origins="http://${server_ip},http://${server_ip}:${FXLAB_HTTP_PORT},http://localhost"
+        if grep -q "^CORS_ALLOWED_ORIGINS=" "$env_file"; then
+            sed -i "s|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=${cors_origins}|" "$env_file"
+        else
+            echo "CORS_ALLOWED_ORIGINS=${cors_origins}" >> "$env_file"
+        fi
+        log INFO "Auto-detected CORS origins: ${cors_origins}"
+        log INFO "Edit ${env_file} to add HTTPS or custom domain origins."
+        changed=1
+    fi
+
     # Set port configuration
     for var_name in FXLAB_HTTP_PORT FXLAB_HTTPS_PORT; do
         local var_val="${!var_name}"

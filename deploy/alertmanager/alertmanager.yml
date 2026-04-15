@@ -84,7 +84,7 @@ receivers:
   #   }
   - name: 'default_webhook'
     webhook_configs:
-      - url: '${ALERTMANAGER_WEBHOOK_URL:-http://localhost:5000/alerts}'
+      - url: '__ALERTMANAGER_WEBHOOK_URL__'
         send_resolved: true
 
   # =========================================================================
@@ -94,7 +94,7 @@ receivers:
   # to a dedicated webhook with faster processing requirements.
   - name: 'critical_webhook'
     webhook_configs:
-      - url: '${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://localhost:5001/alerts/critical}'
+      - url: '__ALERTMANAGER_CRITICAL_WEBHOOK_URL__'
         send_resolved: true
 
 # ============================================================================

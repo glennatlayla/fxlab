@@ -70,14 +70,14 @@ services:
       - "8000"
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-fxlab}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fxlab}?sslmode=prefer
-      - REDIS_URL=redis://redis:6379/0
-      - RATE_LIMIT_BACKEND=redis
-      - LOGIN_TRACKER_BACKEND=redis
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-redis}
+      - LOGIN_TRACKER_BACKEND=${LOGIN_TRACKER_BACKEND:-redis}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - LOG_LEVEL=${LOG_LEVEL:-WARNING}
       - PYTHONUNBUFFERED=1
       - ENVIRONMENT=production
-      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://localhost}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
     depends_on:
       postgres:
         condition: service_healthy
@@ -241,17 +241,27 @@ services:
     container_name: fxlab-alertmanager
     expose:
       - "9093"
+    # Alertmanager does NOT interpolate env vars in its config file.
+    # The config uses __PLACEHOLDER__ markers; this entrypoint runs sed
+    # to replace them with actual env-var values before starting.
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
-      - '--log.level=info'
+      - |
+        sed \
+          -e "s|__ALERTMANAGER_WEBHOOK_URL__|$$ALERTMANAGER_WEBHOOK_URL|g" \
+          -e "s|__ALERTMANAGER_CRITICAL_WEBHOOK_URL__|$$ALERTMANAGER_CRITICAL_WEBHOOK_URL|g" \
+          /etc/alertmanager/alertmanager.yml.tmpl > /tmp/alertmanager.yml
+        exec /bin/alertmanager \
+          --config.file=/tmp/alertmanager.yml \
+          --storage.path=/alertmanager \
+          --log.level=info
     volumes:
-      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml.tmpl:ro
       - alertmanager-data:/alertmanager
     environment:
       - TZ=UTC
-      - ALERTMANAGER_WEBHOOK_URL=${ALERTMANAGER_WEBHOOK_URL:-http://localhost:5000/alerts}
-      - ALERTMANAGER_CRITICAL_WEBHOOK_URL=${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://localhost:5001/alerts/critical}
+      - ALERTMANAGER_WEBHOOK_URL=${ALERTMANAGER_WEBHOOK_URL:-http://fxlab-api:8000/observability/alert-webhook}
+      - ALERTMANAGER_CRITICAL_WEBHOOK_URL=${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://fxlab-api:8000/observability/alert-webhook}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:9093/-/healthy"]
       interval: 15s
