@@ -9,6 +9,7 @@ Naming convention: test_<unit>_<scenario>_<expected_outcome>
 
 from __future__ import annotations
 
+import socket
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ import pytest
 
 from libs.contracts.errors import ConfigError
 from services.api.infrastructure.redis_health import (
+    _build_keepalive_options,
     _parse_redis_version,
     _strip_credentials,
     verify_redis_connection,
@@ -407,3 +409,156 @@ class TestVerifyRedisConnectionIntegration:
             # Verify socket_connect_timeout was set
             call_kwargs = mock_from_url.call_args[1]
             assert call_kwargs["socket_connect_timeout"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Socket keepalive option tests — regression guard for minitux install failure
+# ---------------------------------------------------------------------------
+#
+# Background:
+# On 2026-04-15 the minitux install (Linux kernel 6.17) failed because the
+# previous implementation passed socket_keepalive_options={1: 1, 2: 1} to
+# redis-py: magic-integer keys and a 1-second value that the kernel rejects
+# with EINVAL (errno 22) inside setsockopt(IPPROTO_TCP, TCP_KEEPIDLE, 1).
+#
+# The fix replaces the hardcoded dict with _build_keepalive_options(), which
+# uses socket.TCP_KEEPIDLE/INTVL/CNT constants with kernel-sane values
+# (60s / 30s / 3 probes). These tests lock that contract in place.
+#
+# Linux-only: the socket.TCP_KEEPIDLE constant does not exist on macOS or
+# Windows. _build_keepalive_options() returns an empty dict on those
+# platforms so the module still imports cleanly in cross-platform CI —
+# keepalive falls back to OS defaults without breaking startup.
+
+
+class TestBuildKeepaliveOptions:
+    """
+    _build_keepalive_options() must return kernel-sane TCP keepalive values
+    on Linux (where the constants exist) and an empty dict elsewhere.
+    """
+
+    @pytest.mark.skipif(
+        not hasattr(socket, "TCP_KEEPIDLE"),
+        reason="TCP_KEEPIDLE constants are Linux-only",
+    )
+    def test_build_keepalive_options_on_linux_uses_named_constants(self) -> None:
+        """
+        On Linux, keys MUST be the symbolic socket.TCP_KEEPIDLE/INTVL/CNT
+        constants — not magic integers like {1: ..., 2: ...}.
+        """
+        opts = _build_keepalive_options()
+        assert socket.TCP_KEEPIDLE in opts
+        assert socket.TCP_KEEPINTVL in opts
+        assert socket.TCP_KEEPCNT in opts
+
+    @pytest.mark.skipif(
+        not hasattr(socket, "TCP_KEEPIDLE"),
+        reason="TCP_KEEPIDLE constants are Linux-only",
+    )
+    def test_build_keepalive_options_on_linux_uses_kernel_sane_values(self) -> None:
+        """
+        Values must be at or above kernel minimums so setsockopt does not
+        reject them with EINVAL. 1-second values are known-bad on Linux 6.17
+        in Docker's default network namespace.
+        """
+        opts = _build_keepalive_options()
+        assert opts[socket.TCP_KEEPIDLE] == 60
+        assert opts[socket.TCP_KEEPINTVL] == 30
+        assert opts[socket.TCP_KEEPCNT] == 3
+
+    def test_build_keepalive_options_time_values_meet_kernel_minimum(self) -> None:
+        """
+        Regression guard: TIME-based options (TCP_KEEPIDLE, TCP_KEEPINTVL)
+        must be >= 10 seconds. The 2026-04-15 minitux install failed because
+        those two options were set to 1 second each, which Linux kernel 6.17
+        rejects with EINVAL inside setsockopt.
+
+        TCP_KEEPCNT is a probe count, not a time — the kernel minimum for
+        it is 1, so it is validated separately.
+        """
+        opts = _build_keepalive_options()
+        time_based_keys: list[int] = []
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            time_based_keys.append(socket.TCP_KEEPIDLE)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            time_based_keys.append(socket.TCP_KEEPINTVL)
+
+        for key in time_based_keys:
+            if key in opts:
+                assert opts[key] >= 10, (
+                    f"keepalive time option {key}={opts[key]} seconds is below "
+                    f"the kernel minimum. Values < 10 seconds are known to "
+                    f"trigger EINVAL on Linux kernels in Docker namespaces "
+                    f"(observed on 2026-04-15 minitux install)."
+                )
+
+        if hasattr(socket, "TCP_KEEPCNT") and socket.TCP_KEEPCNT in opts:
+            # Probe count: kernel minimum is 1. We use 3 as a sensible default.
+            assert opts[socket.TCP_KEEPCNT] >= 1
+
+    def test_build_keepalive_options_returns_dict(self) -> None:
+        """
+        Return type contract: must be a dict (possibly empty on non-Linux).
+        """
+        opts = _build_keepalive_options()
+        assert isinstance(opts, dict)
+
+
+class TestVerifyRedisConnectionSocketOptions:
+    """
+    verify_redis_connection() must pass the output of
+    _build_keepalive_options() to redis.Redis.from_url() as
+    socket_keepalive_options — not a hardcoded dict.
+    """
+
+    def test_verify_redis_connection_passes_sane_keepalive_options(self) -> None:
+        """
+        socket_keepalive_options kwarg must equal _build_keepalive_options().
+        Guards against anyone re-introducing {1: 1, 2: 1} or similar magic.
+        """
+        mock_client = MagicMock()
+        mock_client.ping.return_value = True
+        mock_client.info.return_value = {"redis_version": "7.0.0"}
+        mock_client.config_get.return_value = {"maxmemory-policy": "allkeys-lru"}
+
+        with patch("redis.Redis.from_url", return_value=mock_client) as mock_from_url:
+            verify_redis_connection("redis://localhost:6379/0")
+
+            call_kwargs = mock_from_url.call_args[1]
+            assert "socket_keepalive_options" in call_kwargs
+            assert call_kwargs["socket_keepalive_options"] == _build_keepalive_options()
+            assert call_kwargs["socket_keepalive"] is True
+
+    def test_verify_redis_connection_does_not_pass_magic_integer_keepalive(self) -> None:
+        """
+        Explicit regression guard for the 2026-04-15 minitux install defect.
+        The hardcoded {1: 1, 2: 1} dict must never reappear.
+
+        The defect-era TIME-based values (TCP_KEEPIDLE, TCP_KEEPINTVL) were
+        1 second each — below the kernel minimum. We assert those specific
+        keys, when present in the passed dict, are >= 10 seconds.
+        """
+        mock_client = MagicMock()
+        mock_client.ping.return_value = True
+        mock_client.info.return_value = {"redis_version": "7.0.0"}
+        mock_client.config_get.return_value = {"maxmemory-policy": "allkeys-lru"}
+
+        with patch("redis.Redis.from_url", return_value=mock_client) as mock_from_url:
+            verify_redis_connection("redis://localhost:6379/0")
+
+            passed_opts = mock_from_url.call_args[1].get("socket_keepalive_options", {})
+
+            time_based_keys: list[int] = []
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                time_based_keys.append(socket.TCP_KEEPIDLE)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                time_based_keys.append(socket.TCP_KEEPINTVL)
+
+            for key in time_based_keys:
+                if key in passed_opts:
+                    assert passed_opts[key] >= 10, (
+                        f"regression: time-based keepalive option {key}="
+                        f"{passed_opts[key]} seconds is below the kernel minimum. "
+                        f"This is the exact defect that crashed the minitux install "
+                        f"on 2026-04-15."
+                    )

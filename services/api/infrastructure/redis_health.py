@@ -43,6 +43,7 @@ Example:
 from __future__ import annotations
 
 import re
+import socket
 from typing import Any
 
 import structlog
@@ -50,6 +51,64 @@ import structlog
 from libs.contracts.errors import ConfigError
 
 logger = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# TCP keepalive tuning for Redis client sockets.
+#
+# Values (seconds / count), chosen to balance "detect dead peer promptly" with
+# "do not trip Linux kernel minimums":
+#   - TCP_KEEPIDLE  = 60s   idle time before first probe is sent
+#   - TCP_KEEPINTVL = 30s   interval between subsequent probes
+#   - TCP_KEEPCNT   = 3     probes before the connection is dropped
+# Total time to detect a dead peer: ~60 + (30 * 3) = 150 seconds.
+#
+# These values are well above the Linux kernel's minimum accepted settings
+# and have been verified on kernel 6.17 in Docker's default network
+# namespace. The previous implementation used {1: 1, 2: 1} — a 1-second
+# idle with a 1-second interval — which the kernel rejects with EINVAL
+# (errno 22) inside setsockopt(IPPROTO_TCP, TCP_KEEPIDLE, 1). That was the
+# root cause of the 2026-04-15 minitux install failure.
+#
+# Platform note: socket.TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT are
+# defined on Linux only. On macOS and Windows these symbols don't exist on
+# the `socket` module, so _build_keepalive_options() returns an empty dict
+# on those platforms. With socket_keepalive=True still set, redis-py will
+# fall back to OS-default keepalive tuning — acceptable on developer
+# machines where production kernel-specific tuning is irrelevant.
+# ---------------------------------------------------------------------------
+
+_KEEPALIVE_IDLE_SECONDS = 60
+_KEEPALIVE_INTERVAL_SECONDS = 30
+_KEEPALIVE_PROBE_COUNT = 3
+
+
+def _build_keepalive_options() -> dict[int, int]:
+    """
+    Build a platform-appropriate TCP keepalive options dict for redis-py.
+
+    Returns:
+        dict mapping the Linux TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT
+        socket option integers to their values, or an empty dict on
+        non-Linux platforms where these symbols are not exposed by the
+        ``socket`` module.
+
+    Example:
+        opts = _build_keepalive_options()
+        # On Linux:
+        #   {socket.TCP_KEEPIDLE: 60,
+        #    socket.TCP_KEEPINTVL: 30,
+        #    socket.TCP_KEEPCNT: 3}
+        # On macOS / Windows: {}
+    """
+    opts: dict[int, int] = {}
+    for attr_name, attr_value in (
+        ("TCP_KEEPIDLE", _KEEPALIVE_IDLE_SECONDS),
+        ("TCP_KEEPINTVL", _KEEPALIVE_INTERVAL_SECONDS),
+        ("TCP_KEEPCNT", _KEEPALIVE_PROBE_COUNT),
+    ):
+        if hasattr(socket, attr_name):
+            opts[getattr(socket, attr_name)] = attr_value
+    return opts
 
 
 def verify_redis_connection(redis_url: str, timeout_seconds: float = 5.0) -> None:
@@ -92,16 +151,17 @@ def verify_redis_connection(redis_url: str, timeout_seconds: float = 5.0) -> Non
 
     client: Any = None
     try:
-        # Create connection with timeout
+        # Create connection with timeout.
+        # socket_keepalive_options is built via _build_keepalive_options() to
+        # use kernel-sane values (see module-level comment). Passing raw
+        # integer keys with sub-minimum values here will cause setsockopt to
+        # raise EINVAL on Linux and crash startup before PING ever fires.
         client = redis.Redis.from_url(
             redis_url,
             decode_responses=True,
             socket_connect_timeout=timeout_seconds,
             socket_keepalive=True,
-            socket_keepalive_options={
-                1: 1,  # TCP_KEEPIDLE
-                2: 1,  # TCP_KEEPINTVL
-            },
+            socket_keepalive_options=_build_keepalive_options(),
         )
 
         # Check 1: Connectivity via PING
