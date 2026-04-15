@@ -285,12 +285,43 @@ services:
     container_name: fxlab-node-exporter
     expose:
       - "9100"
+    # N2 remediation (2026-04-15): node-exporter v1.7.0 enables ~44
+    # default collectors. Several probe /sys paths that do not exist
+    # in the containerised kernel view on minitux / Azure VMs;
+    # each failing collector closes its connection early, which
+    # Prometheus sees as "connection reset by peer". To eliminate
+    # that flood:
+    #
+    #   --collector.disable-defaults turns the collector list into
+    #   an explicit allowlist; only the collectors named below run.
+    #   --web.max-requests raises the concurrent-request cap above
+    #   the default 40, removing the race window where Prometheus's
+    #   first scrape burst could be RST'd.
+    #
+    # The allowlist is the minimum set required by the existing
+    # alert rules and Grafana dashboards. Adding a collector here is
+    # a deliberate review decision; see
+    # tests/unit/test_node_exporter_scrape_hygiene.py for the contract.
     command:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
       - '--path.rootfs=/rootfs'
+      - '--collector.disable-defaults'
+      - '--collector.cpu'
+      - '--collector.meminfo'
+      - '--collector.loadavg'
+      - '--collector.filesystem'
+      - '--collector.diskstats'
+      - '--collector.netdev'
+      - '--collector.netstat'
+      - '--collector.uname'
+      - '--collector.time'
+      - '--collector.stat'
+      - '--collector.vmstat'
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-      - '--collector.netdev.device-exclude=^(veth.*|br.*|docker.*|virbr.*)'
+      - '--collector.netdev.device-exclude=^(veth.*|br.*|docker.*|virbr.*|lo)$$'
+      - '--web.max-requests=100'
+      - '--web.listen-address=:9100'
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -302,7 +333,11 @@ services:
       interval: 15s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      # start_period=30s: allows /proc and /sys collectors to stabilise
+      # on a cold boot before the first healthcheck probes the listener.
+      # Anything shorter produces 'starting' → 'unhealthy' flapping
+      # that compounds with scrape-side RSTs.
+      start_period: 30s
     restart: unless-stopped
     networks:
       - fxlab-net
