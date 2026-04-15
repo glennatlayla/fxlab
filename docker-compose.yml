@@ -52,7 +52,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    restart: unless-stopped
+    # D1: cap restart attempts so a permanent startup defect (e.g. the
+    # 2026-04-15 Redis setsockopt EINVAL) stops spinning workers instead
+    # of hiding under interleaved log noise. The api container's own
+    # lifespan handler exits with code 3 on ConfigError; that counts as
+    # an "on-failure" exit, so the restart budget is consumed. After 3
+    # attempts the orchestrator gives up and the installer surfaces the
+    # failed service by name.
+    restart: on-failure:3
     networks:
       - fxlab-net
     volumes:
@@ -81,7 +88,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    restart: unless-stopped
+    # D1: cap restart attempts so a permanent startup defect (e.g. the
+    # 2026-04-15 Redis setsockopt EINVAL) stops spinning workers instead
+    # of hiding under interleaved log noise. The api container's own
+    # lifespan handler exits with code 3 on ConfigError; that counts as
+    # an "on-failure" exit, so the restart budget is consumed. After 3
+    # attempts the orchestrator gives up and the installer surfaces the
+    # failed service by name.
+    restart: on-failure:3
     networks:
       - fxlab-net
 
@@ -115,7 +129,14 @@ services:
       timeout: 10s
       retries: 10
       start_period: 60s
-    restart: unless-stopped
+    # D1: cap restart attempts so a permanent startup defect (e.g. the
+    # 2026-04-15 Redis setsockopt EINVAL) stops spinning workers instead
+    # of hiding under interleaved log noise. The api container's own
+    # lifespan handler exits with code 3 on ConfigError; that counts as
+    # an "on-failure" exit, so the restart budget is consumed. After 3
+    # attempts the orchestrator gives up and the installer surfaces the
+    # failed service by name.
+    restart: on-failure:3
     networks:
       - fxlab-net
 
@@ -139,7 +160,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    restart: unless-stopped
+    # D1: cap restart attempts so a permanent startup defect (e.g. the
+    # 2026-04-15 Redis setsockopt EINVAL) stops spinning workers instead
+    # of hiding under interleaved log noise. The api container's own
+    # lifespan handler exits with code 3 on ConfigError; that counts as
+    # an "on-failure" exit, so the restart budget is consumed. After 3
+    # attempts the orchestrator gives up and the installer surfaces the
+    # failed service by name.
+    restart: on-failure:3
     networks:
       - fxlab-net
 
@@ -160,7 +188,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
-    restart: unless-stopped
+    # D1: cap restart attempts so a permanent startup defect (e.g. the
+    # 2026-04-15 Redis setsockopt EINVAL) stops spinning workers instead
+    # of hiding under interleaved log noise. The api container's own
+    # lifespan handler exits with code 3 on ConfigError; that counts as
+    # an "on-failure" exit, so the restart budget is consumed. After 3
+    # attempts the orchestrator gives up and the installer surfaces the
+    # failed service by name.
+    restart: on-failure:3
     networks:
       - fxlab-net
 
@@ -182,7 +217,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    restart: unless-stopped
+    # D1: cap restart attempts so a permanent startup defect (e.g. the
+    # 2026-04-15 Redis setsockopt EINVAL) stops spinning workers instead
+    # of hiding under interleaved log noise. The api container's own
+    # lifespan handler exits with code 3 on ConfigError; that counts as
+    # an "on-failure" exit, so the restart budget is consumed. After 3
+    # attempts the orchestrator gives up and the installer surfaces the
+    # failed service by name.
+    restart: on-failure:3
     networks:
       - fxlab-net
 

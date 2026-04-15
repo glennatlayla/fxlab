@@ -21,6 +21,7 @@ Example:
 from __future__ import annotations
 
 import os
+import sys
 import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Iterator
@@ -29,6 +30,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from libs.contracts.errors import ConfigError
 from services.api import metrics as metrics_module
 from services.api.middleware.body_size import BodySizeLimitMiddleware
 from services.api.middleware.client_source import ClientSourceMiddleware
@@ -418,479 +420,511 @@ async def lifespan(app: FastAPI):
     from services.api.infrastructure.lifecycle_manager import GracefulLifecycleManager
     from services.api.infrastructure.redis_health import verify_redis_connection
 
-    # Emit versions first — this is the single most useful log line when
-    # triaging "it works on my laptop but fails on minitux" style issues.
-    _log_runtime_versions()
+    # D1 — Outer ConfigError trap. Any ConfigError that propagates out of a
+    # startup phase below is caught here, reported as a single
+    # startup.aborted structured event, and converted to sys.exit(3). The
+    # distinctive exit code tells the orchestrator (docker compose
+    # restart: on-failure) that this was a permanent configuration error —
+    # the restart budget still counts it, so after the configured max
+    # attempts the service gives up instead of spinning workers forever on
+    # the same defect. Shutdown code below the `yield` is intentionally
+    # outside this try: shutdown runs only when startup succeeded.
+    try:
+        # Emit versions first — this is the single most useful log line when
+        # triaging "it works on my laptop but fails on minitux" style issues.
+        _log_runtime_versions()
 
-    with _startup_phase("pydantic_core_check"):
-        _check_pydantic_core()
-    with _startup_phase("validate_startup_secrets"):
-        _validate_startup_secrets()
+        with _startup_phase("pydantic_core_check"):
+            _check_pydantic_core()
+        with _startup_phase("validate_startup_secrets"):
+            _validate_startup_secrets()
 
-    # Verify Redis health in production if rate limiting is Redis-backed.
-    # This ensures the application fails fast if critical infrastructure
-    # is unavailable, rather than degrading silently to in-memory fallback.
-    environment = os.environ.get("ENVIRONMENT", "").lower()
-    rate_limit_backend = os.environ.get("RATE_LIMIT_BACKEND", "memory").lower()
+        # Verify Redis health in production if rate limiting is Redis-backed.
+        # This ensures the application fails fast if critical infrastructure
+        # is unavailable, rather than degrading silently to in-memory fallback.
+        environment = os.environ.get("ENVIRONMENT", "").lower()
+        rate_limit_backend = os.environ.get("RATE_LIMIT_BACKEND", "memory").lower()
 
-    if environment == "production" and rate_limit_backend == "redis":
-        redis_url = os.environ.get("REDIS_URL", "")
-        if not redis_url:
-            raise RuntimeError(
-                "REDIS_URL is required in production when RATE_LIMIT_BACKEND=redis. "
-                "Set REDIS_URL to your Redis cluster endpoint "
-                "(e.g. redis://redis:6379/0)."
+        if environment == "production" and rate_limit_backend == "redis":
+            redis_url = os.environ.get("REDIS_URL", "")
+            if not redis_url:
+                raise RuntimeError(
+                    "REDIS_URL is required in production when RATE_LIMIT_BACKEND=redis. "
+                    "Set REDIS_URL to your Redis cluster endpoint "
+                    "(e.g. redis://redis:6379/0)."
+                )
+            # Phase-wrap so the operator log carries an explicit
+            # startup.phase_failed event for this phase when Redis is
+            # misconfigured. Without this wrap the failure surfaces as a
+            # bare traceback — which is what broke minitux triage on
+            # 2026-04-15.
+            try:
+                with _startup_phase(
+                    "redis_health_check",
+                    environment="production",
+                    backend="redis",
+                    redis_url_scheme=redis_url.split("://", 1)[0] + "://..."
+                    if "://" in redis_url
+                    else "unset",
+                ):
+                    verify_redis_connection(redis_url, timeout_seconds=5.0)
+                logger.info(
+                    "redis.health_check_passed",
+                    component="startup",
+                )
+            except Exception as exc:
+                logger.critical(
+                    "redis.health_check_failed",
+                    error=str(exc),
+                    component="startup",
+                    detail="Redis is required in production for rate limiting. "
+                    "Startup is blocked. Ensure Redis is available and configured.",
+                )
+                raise
+        elif rate_limit_backend == "redis":
+            # Non-production: log warning if Redis health check fails, but allow startup
+            redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+            try:
+                with _startup_phase(
+                    "redis_health_check",
+                    environment=environment or "unset",
+                    backend="redis",
+                    fallback_on_failure="in_memory_rate_limiter",
+                    redis_url_scheme=redis_url.split("://", 1)[0] + "://..."
+                    if "://" in redis_url
+                    else "unset",
+                ):
+                    verify_redis_connection(redis_url, timeout_seconds=5.0)
+                logger.info(
+                    "redis.health_check_passed",
+                    component="startup",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "redis.health_check_failed",
+                    error=str(exc),
+                    component="startup",
+                    detail="Redis is unavailable. Rate limiting will fall back to in-memory. "
+                    "This is acceptable for development but not for production.",
+                )
+
+        # Auto-create tables when backed by SQLite (dev / test).
+        # Production uses Alembic migrations against PostgreSQL.
+        db_url = str(engine.url)
+        if db_url.startswith("sqlite"):
+            Base.metadata.create_all(engine)
+            logger.info(
+                "db.tables_created",
+                component="startup",
+                detail="SQLite backend — auto-created tables from ORM metadata.",
             )
-        # Phase-wrap so the operator log carries an explicit
-        # startup.phase_failed event for this phase when Redis is
-        # misconfigured. Without this wrap the failure surfaces as a
-        # bare traceback — which is what broke minitux triage on
-        # 2026-04-15.
+
+        # Initialize artifact storage backend (MinIO or local filesystem).
+        # In production with ARTIFACT_STORAGE_BACKEND=minio, this creates the
+        # required S3 buckets.  In dev/test with local backend, this creates the
+        # root directory.  Failures here are non-fatal: the application starts
+        # but artifact upload/download routes will return 503 until storage is
+        # available.  This is intentional — the API should serve non-artifact
+        # requests even when the storage backend is temporarily unreachable.
+        #
+        # Phase-wrapped so a MinIO misconfiguration surfaces as a structured
+        # startup.phase_failed event (with duration_ms and exc_info) before
+        # the degrade-to-None fallback kicks in. Without this wrap operators
+        # had to correlate "artifact_storage.initialization_failed" with
+        # whatever traceback happened to hit stderr to figure out which
+        # backend and which credential path were in play.
         try:
             with _startup_phase(
-                "redis_health_check",
-                environment="production",
-                backend="redis",
-                redis_url_scheme=redis_url.split("://", 1)[0] + "://..."
-                if "://" in redis_url
-                else "unset",
+                "artifact_storage_init",
+                backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
             ):
-                verify_redis_connection(redis_url, timeout_seconds=5.0)
+                from services.api.routes.artifacts import get_artifact_storage
+
+                artifact_storage = get_artifact_storage()
+                artifact_storage.initialize(correlation_id="startup")
+                app.state.artifact_storage = artifact_storage
             logger.info(
-                "redis.health_check_passed",
-                component="startup",
-            )
-        except Exception as exc:
-            logger.critical(
-                "redis.health_check_failed",
-                error=str(exc),
-                component="startup",
-                detail="Redis is required in production for rate limiting. "
-                "Startup is blocked. Ensure Redis is available and configured.",
-            )
-            raise
-    elif rate_limit_backend == "redis":
-        # Non-production: log warning if Redis health check fails, but allow startup
-        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-        try:
-            with _startup_phase(
-                "redis_health_check",
-                environment=environment or "unset",
-                backend="redis",
-                fallback_on_failure="in_memory_rate_limiter",
-                redis_url_scheme=redis_url.split("://", 1)[0] + "://..."
-                if "://" in redis_url
-                else "unset",
-            ):
-                verify_redis_connection(redis_url, timeout_seconds=5.0)
-            logger.info(
-                "redis.health_check_passed",
+                "artifact_storage.initialized",
+                backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
                 component="startup",
             )
         except Exception as exc:
             logger.warning(
-                "redis.health_check_failed",
+                "artifact_storage.initialization_failed",
+                error=str(exc),
+                backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
+                component="startup",
+                detail="Artifact storage unavailable — upload/download routes may fail.",
+            )
+            app.state.artifact_storage = None
+
+        # Build the lifecycle manager for coordinated shutdown.
+        # The broker registry is instantiated here — in production, adapters
+        # are registered by the deployment service during normal operation.
+        # The drain timeout is configurable via DRAIN_TIMEOUT_S env var.
+        broker_registry = BrokerAdapterRegistry()
+        drain_timeout_s = float(os.environ.get("DRAIN_TIMEOUT_S", "30"))
+
+        lifecycle_manager = GracefulLifecycleManager(
+            drain=_drain_middleware,
+            broker_registry=broker_registry,
+            engine=engine,
+            drain_timeout_s=drain_timeout_s,
+        )
+
+        # Store references on app.state so route handlers and tests
+        # can access the registry and lifecycle manager if needed.
+        app.state.broker_registry = broker_registry
+        app.state.lifecycle_manager = lifecycle_manager
+        app.state.drain = _drain_middleware
+
+        # Run startup reconciliation for any pre-registered adapters.
+        lifecycle_manager.startup_reconciliation()
+
+        # Run orphaned order recovery for all active live deployments.
+        # This detects orders that were submitted to brokers but not recorded
+        # internally due to crashes after submission but before acknowledgment.
+        #
+        # Phase-wrapped so operator logs carry an explicit
+        # startup.phase_failed event when recovery fails at startup. The
+        # except clause below still emits orphan_recovery.startup_failed for
+        # context-specific messaging.
+        try:
+            with _startup_phase("orphan_recovery"):
+                from services.api.db import SessionLocal
+                from services.api.services.orphaned_order_recovery_service import (
+                    OrphanedOrderRecoveryService,
+                )
+
+                # Instantiate repositories for orphan recovery
+                db_session = SessionLocal()
+                try:
+                    from services.api.repositories.sql_deployment_repository import (
+                        SqlDeploymentRepository,
+                    )
+                    from services.api.repositories.sql_execution_event_repository import (
+                        SqlExecutionEventRepository,
+                    )
+                    from services.api.repositories.sql_order_repository import (
+                        SqlOrderRepository,
+                    )
+
+                    deployment_repo = SqlDeploymentRepository(db_session)
+                    order_repo = SqlOrderRepository(db_session)
+                    event_repo = SqlExecutionEventRepository(db_session)
+
+                    recovery_service = OrphanedOrderRecoveryService(
+                        deployment_repo=deployment_repo,
+                        order_repo=order_repo,
+                        execution_event_repo=event_repo,
+                        broker_registry=broker_registry,
+                    )
+
+                    # Run recovery for all active live deployments
+                    reports = recovery_service.recover_all_deployments(
+                        correlation_id="startup-orphan-recovery"
+                    )
+
+                    logger.info(
+                        "orphan_recovery.startup_completed",
+                        deployments_recovered=len(reports),
+                        total_recovered=sum(r.recovered_count for r in reports),
+                        total_failed=sum(r.failed_count for r in reports),
+                        component="startup",
+                    )
+                finally:
+                    db_session.close()
+        except Exception as exc:
+            logger.warning(
+                "orphan_recovery.startup_failed",
                 error=str(exc),
                 component="startup",
-                detail="Redis is unavailable. Rate limiting will fall back to in-memory. "
-                "This is acceptable for development but not for production.",
+                exc_info=True,
+                detail="Orphaned order recovery failed at startup. Continuing without recovery.",
             )
 
-    # Auto-create tables when backed by SQLite (dev / test).
-    # Production uses Alembic migrations against PostgreSQL.
-    db_url = str(engine.url)
-    if db_url.startswith("sqlite"):
-        Base.metadata.create_all(engine)
-        logger.info(
-            "db.tables_created",
-            component="startup",
-            detail="SQLite backend — auto-created tables from ORM metadata.",
-        )
-
-    # Initialize artifact storage backend (MinIO or local filesystem).
-    # In production with ARTIFACT_STORAGE_BACKEND=minio, this creates the
-    # required S3 buckets.  In dev/test with local backend, this creates the
-    # root directory.  Failures here are non-fatal: the application starts
-    # but artifact upload/download routes will return 503 until storage is
-    # available.  This is intentional — the API should serve non-artifact
-    # requests even when the storage backend is temporarily unreachable.
-    #
-    # Phase-wrapped so a MinIO misconfiguration surfaces as a structured
-    # startup.phase_failed event (with duration_ms and exc_info) before
-    # the degrade-to-None fallback kicks in. Without this wrap operators
-    # had to correlate "artifact_storage.initialization_failed" with
-    # whatever traceback happened to hit stderr to figure out which
-    # backend and which credential path were in play.
-    try:
-        with _startup_phase(
-            "artifact_storage_init",
-            backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
-        ):
-            from services.api.routes.artifacts import get_artifact_storage
-
-            artifact_storage = get_artifact_storage()
-            artifact_storage.initialize(correlation_id="startup")
-            app.state.artifact_storage = artifact_storage
-        logger.info(
-            "artifact_storage.initialized",
-            backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
-            component="startup",
-        )
-    except Exception as exc:
-        logger.warning(
-            "artifact_storage.initialization_failed",
-            error=str(exc),
-            backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
-            component="startup",
-            detail="Artifact storage unavailable — upload/download routes may fail.",
-        )
-        app.state.artifact_storage = None
-
-    # Build the lifecycle manager for coordinated shutdown.
-    # The broker registry is instantiated here — in production, adapters
-    # are registered by the deployment service during normal operation.
-    # The drain timeout is configurable via DRAIN_TIMEOUT_S env var.
-    broker_registry = BrokerAdapterRegistry()
-    drain_timeout_s = float(os.environ.get("DRAIN_TIMEOUT_S", "30"))
-
-    lifecycle_manager = GracefulLifecycleManager(
-        drain=_drain_middleware,
-        broker_registry=broker_registry,
-        engine=engine,
-        drain_timeout_s=drain_timeout_s,
-    )
-
-    # Store references on app.state so route handlers and tests
-    # can access the registry and lifecycle manager if needed.
-    app.state.broker_registry = broker_registry
-    app.state.lifecycle_manager = lifecycle_manager
-    app.state.drain = _drain_middleware
-
-    # Run startup reconciliation for any pre-registered adapters.
-    lifecycle_manager.startup_reconciliation()
-
-    # Run orphaned order recovery for all active live deployments.
-    # This detects orders that were submitted to brokers but not recorded
-    # internally due to crashes after submission but before acknowledgment.
-    #
-    # Phase-wrapped so operator logs carry an explicit
-    # startup.phase_failed event when recovery fails at startup. The
-    # except clause below still emits orphan_recovery.startup_failed for
-    # context-specific messaging.
-    try:
-        with _startup_phase("orphan_recovery"):
-            from services.api.db import SessionLocal
-            from services.api.services.orphaned_order_recovery_service import (
-                OrphanedOrderRecoveryService,
-            )
-
-            # Instantiate repositories for orphan recovery
-            db_session = SessionLocal()
-            try:
+        # Wire the LiveExecutionService for live trading endpoints.
+        # This instantiates all dependencies and registers the service with the
+        # live routes module so that /live/* endpoints have access to it.
+        #
+        # Phase-wrapped via _startup_phase so phase_begin / phase_complete /
+        # phase_failed events are emitted consistently with every other
+        # startup phase. On failure the except clause below preserves the
+        # long-standing "do not abort startup, degrade to 503 on /live/*"
+        # policy — but _startup_phase has already logged the structured
+        # phase_failed event with exc_info, so the live_execution.wiring_failed
+        # message is purely contextual.
+        try:
+            with _startup_phase("live_execution_wiring"):
+                from services.api.db import SessionLocal
                 from services.api.repositories.sql_deployment_repository import (
                     SqlDeploymentRepository,
                 )
                 from services.api.repositories.sql_execution_event_repository import (
                     SqlExecutionEventRepository,
                 )
+                from services.api.repositories.sql_kill_switch_event_repository import (
+                    SqlKillSwitchEventRepository,
+                )
+                from services.api.repositories.sql_order_repository import SqlOrderRepository
+                from services.api.repositories.sql_position_repository import (
+                    SqlPositionRepository,
+                )
+                from services.api.repositories.sql_risk_event_repository import (
+                    SqlRiskEventRepository,
+                )
+                from services.api.routes.live import set_live_execution_service
+                from services.api.services.kill_switch_service import KillSwitchService
+                from services.api.services.live_execution_service import LiveExecutionService
+                from services.api.services.risk_gate_service import RiskGateService
+
+                # Create a fresh session for LiveExecutionService wiring.
+                # This session is held for the lifetime of the app and used by the
+                # service for all order and position persistence.
+                db_session_live = SessionLocal()
+
+                # Instantiate repositories for live execution
+                deployment_repo = SqlDeploymentRepository(db=db_session_live)
+                order_repo = SqlOrderRepository(db=db_session_live)
+                position_repo = SqlPositionRepository(db=db_session_live)
+                execution_event_repo = SqlExecutionEventRepository(db=db_session_live)
+                risk_event_repo = SqlRiskEventRepository(db=db_session_live)
+                ks_event_repo = SqlKillSwitchEventRepository(db=db_session_live)
+
+                # Instantiate RiskGateService for pre-trade enforcement
+                risk_gate = RiskGateService(
+                    deployment_repo=deployment_repo,
+                    risk_event_repo=risk_event_repo,
+                )
+
+                # Instantiate KillSwitchService for halt enforcement
+                # Build a dict mapping deployment_id → BrokerAdapterInterface for the service.
+                # This is extracted from the broker registry's internal _registry dict.
+                adapter_registry_dict: dict[str, Any] = {}
+                with broker_registry._lock:
+                    for deployment_id, (adapter, _broker_type) in broker_registry._registry.items():
+                        adapter_registry_dict[deployment_id] = adapter
+
+                kill_switch_service = KillSwitchService(
+                    deployment_repo=deployment_repo,
+                    ks_event_repo=ks_event_repo,
+                    adapter_registry=adapter_registry_dict,
+                )
+
+                # Instantiate LiveExecutionService with all dependencies.
+                # The transaction_manager parameter is optional; when None, callers
+                # are responsible for transaction management at the request level.
+                live_execution_service = LiveExecutionService(
+                    deployment_repo=deployment_repo,
+                    order_repo=order_repo,
+                    position_repo=position_repo,
+                    execution_event_repo=execution_event_repo,
+                    risk_gate=risk_gate,
+                    broker_registry=broker_registry,
+                    kill_switch_service=kill_switch_service,
+                    transaction_manager=None,  # Optional: can be wired if explicit tx boundary is needed
+                )
+
+                # Register the service with the live routes module so endpoints can access it
+                set_live_execution_service(live_execution_service)
+
+                # Store session and service references on app.state for graceful shutdown
+                # if needed in the future
+                app.state.live_execution_db_session = db_session_live
+                app.state.live_execution_service = live_execution_service
+
+                logger.info(
+                    "live_execution.service_initialized",
+                    component="startup",
+                    detail="LiveExecutionService wired with all dependencies and registered with /live routes.",
+                )
+        except Exception as exc:
+            # _startup_phase already logged startup.phase_failed with exc_info
+            # and duration_ms. This critical log carries the degradation policy
+            # context so operators know the API is continuing without live
+            # trading rather than failing startup.
+            logger.critical(
+                "live_execution.wiring_failed",
+                error=str(exc),
+                component="startup",
+                detail="Failed to wire LiveExecutionService at startup. "
+                "Live trading endpoints will return 503 Service Unavailable.",
+            )
+            # Do not re-raise — allow the API to start without live execution.
+            # This permits other endpoints to function while live trading is unavailable.
+
+        # ---------------------------------------------------------------------
+        # Periodic broker-vs-internal reconciliation (M19 production hardening)
+        # ---------------------------------------------------------------------
+        # Startup-only reconciliation closes the crash-recovery window but a
+        # mid-day divergence between internal order/position state and broker
+        # state is only caught at the next restart. A periodic reconciliation
+        # bounds that divergence window to the configured interval.
+        #
+        # Wiring notes:
+        # - This block is INTENTIONALLY self-contained. It does NOT reference
+        #   any local variables from the LiveExecutionService wiring block
+        #   above (adapter_registry_dict, db_session_live, etc.) — if that
+        #   block raises, those names never get bound and any reference here
+        #   would NameError inside this try/except, producing a misleading
+        #   "periodic_reconciliation.wiring_failed" log whose real root cause
+        #   is in the LiveExecutionService block. Each wiring block builds
+        #   what it needs from the durable inputs (broker_registry + SessionLocal).
+        # - Each tick is given its own fresh SQLAlchemy Session via a factory,
+        #   because a single Session is NOT safe to share across threads
+        #   (SQLAlchemy docs). The factory constructs a session + repos +
+        #   ReconciliationService per tick.
+        # - The broker adapter registry is shared; adapter registration is
+        #   already guarded by BrokerAdapterRegistry's internal lock.
+        # - RECONCILIATION_INTERVAL_SECONDS controls the cadence (default 300s
+        #   = 5 min). Set to 0 to disable the periodic job entirely.
+        app.state.periodic_reconciliation_job = None
+        try:
+            with _startup_phase(
+                "periodic_reconciliation_wiring",
+                interval_s_env=os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"),
+            ):
+                from services.api.db import SessionLocal
+                from services.api.infrastructure.periodic_reconciliation_job import (
+                    PeriodicReconciliationJob,
+                )
+                from services.api.repositories.sql_deployment_repository import (
+                    SqlDeploymentRepository,
+                )
                 from services.api.repositories.sql_order_repository import (
                     SqlOrderRepository,
                 )
-
-                deployment_repo = SqlDeploymentRepository(db_session)
-                order_repo = SqlOrderRepository(db_session)
-                event_repo = SqlExecutionEventRepository(db_session)
-
-                recovery_service = OrphanedOrderRecoveryService(
-                    deployment_repo=deployment_repo,
-                    order_repo=order_repo,
-                    execution_event_repo=event_repo,
-                    broker_registry=broker_registry,
+                from services.api.repositories.sql_position_repository import (
+                    SqlPositionRepository,
+                )
+                from services.api.repositories.sql_reconciliation_repository import (
+                    SqlReconciliationRepository,
+                )
+                from services.api.routes.reconciliation import (
+                    set_reconciliation_service,
+                )
+                from services.api.services.reconciliation_service import (
+                    ReconciliationService,
                 )
 
-                # Run recovery for all active live deployments
-                reports = recovery_service.recover_all_deployments(
-                    correlation_id="startup-orphan-recovery"
-                )
+                # Per-tick factory: fresh session, fresh repos, fresh adapter
+                # snapshot, fresh service. A fresh Session per tick is required
+                # because SQLAlchemy Session instances are NOT thread-safe.
+                def _build_periodic_reconciliation_service() -> ReconciliationService:
+                    """
+                    Build a ReconciliationService wired with a fresh session.
 
-                logger.info(
-                    "orphan_recovery.startup_completed",
-                    deployments_recovered=len(reports),
-                    total_recovered=sum(r.recovered_count for r in reports),
-                    total_failed=sum(r.failed_count for r in reports),
-                    component="startup",
-                )
-            finally:
-                db_session.close()
-    except Exception as exc:
-        logger.warning(
-            "orphan_recovery.startup_failed",
-            error=str(exc),
-            component="startup",
-            exc_info=True,
-            detail="Orphaned order recovery failed at startup. Continuing without recovery.",
-        )
+                    The session is intentionally leaked to the GC (no explicit
+                    close in the factory) because SessionLocal()'s default
+                    sessionmaker returns regular Session objects — these are
+                    cheap to let fall out of scope. Production should move to
+                    a context-managed factory once scoped_session is introduced.
+                    """
+                    tick_session = SessionLocal()
+                    dep_repo = SqlDeploymentRepository(db=tick_session)
+                    order_repo_tick = SqlOrderRepository(db=tick_session)
+                    position_repo_tick = SqlPositionRepository(db=tick_session)
+                    recon_repo = SqlReconciliationRepository(db=tick_session)
 
-    # Wire the LiveExecutionService for live trading endpoints.
-    # This instantiates all dependencies and registers the service with the
-    # live routes module so that /live/* endpoints have access to it.
-    #
-    # Phase-wrapped via _startup_phase so phase_begin / phase_complete /
-    # phase_failed events are emitted consistently with every other
-    # startup phase. On failure the except clause below preserves the
-    # long-standing "do not abort startup, degrade to 503 on /live/*"
-    # policy — but _startup_phase has already logged the structured
-    # phase_failed event with exc_info, so the live_execution.wiring_failed
-    # message is purely contextual.
-    try:
-        with _startup_phase("live_execution_wiring"):
-            from services.api.db import SessionLocal
-            from services.api.repositories.sql_deployment_repository import (
-                SqlDeploymentRepository,
-            )
-            from services.api.repositories.sql_execution_event_repository import (
-                SqlExecutionEventRepository,
-            )
-            from services.api.repositories.sql_kill_switch_event_repository import (
-                SqlKillSwitchEventRepository,
-            )
-            from services.api.repositories.sql_order_repository import SqlOrderRepository
-            from services.api.repositories.sql_position_repository import (
-                SqlPositionRepository,
-            )
-            from services.api.repositories.sql_risk_event_repository import (
-                SqlRiskEventRepository,
-            )
-            from services.api.routes.live import set_live_execution_service
-            from services.api.services.kill_switch_service import KillSwitchService
-            from services.api.services.live_execution_service import LiveExecutionService
-            from services.api.services.risk_gate_service import RiskGateService
+                    # Build a per-tick adapter map from the shared broker
+                    # registry. The registry's internal lock makes this copy
+                    # safe. We rebuild on every tick so adapters registered
+                    # after startup are picked up automatically.
+                    tick_adapter_map: dict[str, Any] = {}
+                    with broker_registry._lock:
+                        for dep_id, (adapter, _btype) in broker_registry._registry.items():
+                            tick_adapter_map[dep_id] = adapter
 
-            # Create a fresh session for LiveExecutionService wiring.
-            # This session is held for the lifetime of the app and used by the
-            # service for all order and position persistence.
-            db_session_live = SessionLocal()
+                    return ReconciliationService(
+                        deployment_repo=dep_repo,
+                        reconciliation_repo=recon_repo,
+                        adapter_registry=tick_adapter_map,
+                        order_repo=order_repo_tick,
+                        position_repo=position_repo_tick,
+                    )
 
-            # Instantiate repositories for live execution
-            deployment_repo = SqlDeploymentRepository(db=db_session_live)
-            order_repo = SqlOrderRepository(db=db_session_live)
-            position_repo = SqlPositionRepository(db=db_session_live)
-            execution_event_repo = SqlExecutionEventRepository(db=db_session_live)
-            risk_event_repo = SqlRiskEventRepository(db=db_session_live)
-            ks_event_repo = SqlKillSwitchEventRepository(db=db_session_live)
+                # Separate session + repo for listing active deployments in
+                # the job's check_and_reconcile() — list_by_state is a
+                # single-shot read, safe to hold for the job's lifetime.
+                recon_list_session = SessionLocal()
+                app.state.periodic_reconciliation_session = recon_list_session
+                recon_deployment_repo = SqlDeploymentRepository(db=recon_list_session)
 
-            # Instantiate RiskGateService for pre-trade enforcement
-            risk_gate = RiskGateService(
-                deployment_repo=deployment_repo,
-                risk_event_repo=risk_event_repo,
-            )
-
-            # Instantiate KillSwitchService for halt enforcement
-            # Build a dict mapping deployment_id → BrokerAdapterInterface for the service.
-            # This is extracted from the broker registry's internal _registry dict.
-            adapter_registry_dict: dict[str, Any] = {}
-            with broker_registry._lock:
-                for deployment_id, (adapter, _broker_type) in broker_registry._registry.items():
-                    adapter_registry_dict[deployment_id] = adapter
-
-            kill_switch_service = KillSwitchService(
-                deployment_repo=deployment_repo,
-                ks_event_repo=ks_event_repo,
-                adapter_registry=adapter_registry_dict,
-            )
-
-            # Instantiate LiveExecutionService with all dependencies.
-            # The transaction_manager parameter is optional; when None, callers
-            # are responsible for transaction management at the request level.
-            live_execution_service = LiveExecutionService(
-                deployment_repo=deployment_repo,
-                order_repo=order_repo,
-                position_repo=position_repo,
-                execution_event_repo=execution_event_repo,
-                risk_gate=risk_gate,
-                broker_registry=broker_registry,
-                kill_switch_service=kill_switch_service,
-                transaction_manager=None,  # Optional: can be wired if explicit tx boundary is needed
-            )
-
-            # Register the service with the live routes module so endpoints can access it
-            set_live_execution_service(live_execution_service)
-
-            # Store session and service references on app.state for graceful shutdown
-            # if needed in the future
-            app.state.live_execution_db_session = db_session_live
-            app.state.live_execution_service = live_execution_service
-
-            logger.info(
-                "live_execution.service_initialized",
-                component="startup",
-                detail="LiveExecutionService wired with all dependencies and registered with /live routes.",
-            )
-    except Exception as exc:
-        # _startup_phase already logged startup.phase_failed with exc_info
-        # and duration_ms. This critical log carries the degradation policy
-        # context so operators know the API is continuing without live
-        # trading rather than failing startup.
-        logger.critical(
-            "live_execution.wiring_failed",
-            error=str(exc),
-            component="startup",
-            detail="Failed to wire LiveExecutionService at startup. "
-            "Live trading endpoints will return 503 Service Unavailable.",
-        )
-        # Do not re-raise — allow the API to start without live execution.
-        # This permits other endpoints to function while live trading is unavailable.
-
-    # ---------------------------------------------------------------------
-    # Periodic broker-vs-internal reconciliation (M19 production hardening)
-    # ---------------------------------------------------------------------
-    # Startup-only reconciliation closes the crash-recovery window but a
-    # mid-day divergence between internal order/position state and broker
-    # state is only caught at the next restart. A periodic reconciliation
-    # bounds that divergence window to the configured interval.
-    #
-    # Wiring notes:
-    # - This block is INTENTIONALLY self-contained. It does NOT reference
-    #   any local variables from the LiveExecutionService wiring block
-    #   above (adapter_registry_dict, db_session_live, etc.) — if that
-    #   block raises, those names never get bound and any reference here
-    #   would NameError inside this try/except, producing a misleading
-    #   "periodic_reconciliation.wiring_failed" log whose real root cause
-    #   is in the LiveExecutionService block. Each wiring block builds
-    #   what it needs from the durable inputs (broker_registry + SessionLocal).
-    # - Each tick is given its own fresh SQLAlchemy Session via a factory,
-    #   because a single Session is NOT safe to share across threads
-    #   (SQLAlchemy docs). The factory constructs a session + repos +
-    #   ReconciliationService per tick.
-    # - The broker adapter registry is shared; adapter registration is
-    #   already guarded by BrokerAdapterRegistry's internal lock.
-    # - RECONCILIATION_INTERVAL_SECONDS controls the cadence (default 300s
-    #   = 5 min). Set to 0 to disable the periodic job entirely.
-    app.state.periodic_reconciliation_job = None
-    try:
-        with _startup_phase(
-            "periodic_reconciliation_wiring",
-            interval_s_env=os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"),
-        ):
-            from services.api.db import SessionLocal
-            from services.api.infrastructure.periodic_reconciliation_job import (
-                PeriodicReconciliationJob,
-            )
-            from services.api.repositories.sql_deployment_repository import (
-                SqlDeploymentRepository,
-            )
-            from services.api.repositories.sql_order_repository import (
-                SqlOrderRepository,
-            )
-            from services.api.repositories.sql_position_repository import (
-                SqlPositionRepository,
-            )
-            from services.api.repositories.sql_reconciliation_repository import (
-                SqlReconciliationRepository,
-            )
-            from services.api.routes.reconciliation import (
-                set_reconciliation_service,
-            )
-            from services.api.services.reconciliation_service import (
-                ReconciliationService,
-            )
-
-            # Per-tick factory: fresh session, fresh repos, fresh adapter
-            # snapshot, fresh service. A fresh Session per tick is required
-            # because SQLAlchemy Session instances are NOT thread-safe.
-            def _build_periodic_reconciliation_service() -> ReconciliationService:
-                """
-                Build a ReconciliationService wired with a fresh session.
-
-                The session is intentionally leaked to the GC (no explicit
-                close in the factory) because SessionLocal()'s default
-                sessionmaker returns regular Session objects — these are
-                cheap to let fall out of scope. Production should move to
-                a context-managed factory once scoped_session is introduced.
-                """
-                tick_session = SessionLocal()
-                dep_repo = SqlDeploymentRepository(db=tick_session)
-                order_repo_tick = SqlOrderRepository(db=tick_session)
-                position_repo_tick = SqlPositionRepository(db=tick_session)
-                recon_repo = SqlReconciliationRepository(db=tick_session)
-
-                # Build a per-tick adapter map from the shared broker
-                # registry. The registry's internal lock makes this copy
-                # safe. We rebuild on every tick so adapters registered
-                # after startup are picked up automatically.
-                tick_adapter_map: dict[str, Any] = {}
+                # Also register a service with the /reconciliation routes so
+                # on-demand endpoints work. Build a SEPARATE long-lived
+                # session + adapter snapshot here rather than reusing anything
+                # from the LiveExecutionService block, so a failure there does
+                # not cascade to disable on-demand reconciliation here.
+                routes_session = SessionLocal()
+                app.state.periodic_reconciliation_routes_session = routes_session
+                routes_adapter_map: dict[str, Any] = {}
                 with broker_registry._lock:
                     for dep_id, (adapter, _btype) in broker_registry._registry.items():
-                        tick_adapter_map[dep_id] = adapter
-
-                return ReconciliationService(
-                    deployment_repo=dep_repo,
-                    reconciliation_repo=recon_repo,
-                    adapter_registry=tick_adapter_map,
-                    order_repo=order_repo_tick,
-                    position_repo=position_repo_tick,
+                        routes_adapter_map[dep_id] = adapter
+                set_reconciliation_service(
+                    ReconciliationService(
+                        deployment_repo=SqlDeploymentRepository(db=routes_session),
+                        reconciliation_repo=SqlReconciliationRepository(db=routes_session),
+                        adapter_registry=routes_adapter_map,
+                        order_repo=SqlOrderRepository(db=routes_session),
+                        position_repo=SqlPositionRepository(db=routes_session),
+                    )
                 )
 
-            # Separate session + repo for listing active deployments in
-            # the job's check_and_reconcile() — list_by_state is a
-            # single-shot read, safe to hold for the job's lifetime.
-            recon_list_session = SessionLocal()
-            app.state.periodic_reconciliation_session = recon_list_session
-            recon_deployment_repo = SqlDeploymentRepository(db=recon_list_session)
-
-            # Also register a service with the /reconciliation routes so
-            # on-demand endpoints work. Build a SEPARATE long-lived
-            # session + adapter snapshot here rather than reusing anything
-            # from the LiveExecutionService block, so a failure there does
-            # not cascade to disable on-demand reconciliation here.
-            routes_session = SessionLocal()
-            app.state.periodic_reconciliation_routes_session = routes_session
-            routes_adapter_map: dict[str, Any] = {}
-            with broker_registry._lock:
-                for dep_id, (adapter, _btype) in broker_registry._registry.items():
-                    routes_adapter_map[dep_id] = adapter
-            set_reconciliation_service(
-                ReconciliationService(
-                    deployment_repo=SqlDeploymentRepository(db=routes_session),
-                    reconciliation_repo=SqlReconciliationRepository(db=routes_session),
-                    adapter_registry=routes_adapter_map,
-                    order_repo=SqlOrderRepository(db=routes_session),
-                    position_repo=SqlPositionRepository(db=routes_session),
+                interval_s = float(os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"))
+                periodic_job = PeriodicReconciliationJob(
+                    reconciliation_service_factory=_build_periodic_reconciliation_service,
+                    deployment_repo=recon_deployment_repo,
+                    check_interval_seconds=interval_s,
                 )
-            )
-
-            interval_s = float(os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"))
-            periodic_job = PeriodicReconciliationJob(
-                reconciliation_service_factory=_build_periodic_reconciliation_service,
-                deployment_repo=recon_deployment_repo,
-                check_interval_seconds=interval_s,
-            )
-            periodic_job.start()
-            app.state.periodic_reconciliation_job = periodic_job
-            logger.info(
-                "periodic_reconciliation.wired",
+                periodic_job.start()
+                app.state.periodic_reconciliation_job = periodic_job
+                logger.info(
+                    "periodic_reconciliation.wired",
+                    component="startup",
+                    check_interval_seconds=interval_s,
+                    enabled=interval_s > 0,
+                )
+        except Exception:
+            # _startup_phase already logged startup.phase_failed with exc_info.
+            # This warning is the domain-specific follow-up explaining the
+            # operational impact so oncall knows the divergence-detection
+            # window has regressed to "next restart only".
+            logger.warning(
+                "periodic_reconciliation.wiring_failed",
                 component="startup",
-                check_interval_seconds=interval_s,
-                enabled=interval_s > 0,
+                detail=(
+                    "Periodic reconciliation job did not start. Startup "
+                    "reconciliation still ran; divergences introduced "
+                    "mid-process-life will only be caught at next restart "
+                    "until the periodic job is repaired. See the preceding "
+                    "startup.phase_failed log for the root-cause exception."
+                ),
             )
-    except Exception:
-        # _startup_phase already logged startup.phase_failed with exc_info.
-        # This warning is the domain-specific follow-up explaining the
-        # operational impact so oncall knows the divergence-detection
-        # window has regressed to "next restart only".
-        logger.warning(
-            "periodic_reconciliation.wiring_failed",
+
+        logger.info("api.startup", version="0.1.0")
+    except ConfigError as exc:
+        # Permanent configuration failure — do not let the orchestrator
+        # spin forever on the same defect. The preceding
+        # startup.phase_failed event already names the failed phase; this
+        # aborted event is the single, obvious marker that the process
+        # exited deterministically with code 3.
+        logger.critical(
+            "startup.aborted",
             component="startup",
+            reason="config_error",
+            error=str(exc),
+            exit_code=3,
+            exc_info=True,
             detail=(
-                "Periodic reconciliation job did not start. Startup "
-                "reconciliation still ran; divergences introduced "
-                "mid-process-life will only be caught at next restart "
-                "until the periodic job is repaired. See the preceding "
-                "startup.phase_failed log for the root-cause exception."
+                "API startup aborted due to a permanent configuration "
+                "error. The process will exit with code 3. Operators: do "
+                "not redeploy this configuration — retrying will hit the "
+                "same defect. See the preceding startup.phase_failed event "
+                "for the root-cause exception."
             ),
         )
-
-    logger.info("api.startup", version="0.1.0")
+        sys.exit(3)
     yield
 
     # Graceful shutdown: stop periodic job first so no new reconciliations

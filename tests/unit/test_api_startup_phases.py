@@ -476,3 +476,139 @@ class TestLogRuntimeVersions:
         with patch.dict("os.environ", {}, clear=True):
             # Must not raise even with empty env.
             _log_runtime_versions()
+
+
+# ---------------------------------------------------------------------------
+# D1 — Kill the uvicorn / orchestrator respawn loop on permanent errors.
+#
+# Contract: when a ConfigError propagates out of the startup phases, the
+# lifespan must:
+#   1. Log a structured startup.aborted event (so the operator sees a
+#      single, named failure rather than an interleaved traceback).
+#   2. Call sys.exit(3) — a distinctive exit code that the compose
+#      restart policy recognizes as "permanent, do not resurrect".
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanAbortOnConfigError:
+    """
+    Structural and runtime guards for the outer ConfigError handler.
+
+    Structural tests prove the handler is present even if a future refactor
+    moves code around. Runtime tests prove it actually fires when a
+    ConfigError is raised during startup.
+    """
+
+    def test_lifespan_has_outer_configerror_handler(self) -> None:
+        """
+        The lifespan source must contain an `except ConfigError` clause
+        that leads to a `sys.exit(3)` — regardless of what else is in
+        the handler body.
+        """
+        src = _main_source()
+        # Find an `except ConfigError` block followed (within 2000 chars) by
+        # sys.exit(3). This tolerant check survives reformatting.
+        match = re.search(r"except\s+ConfigError", src)
+        assert match is not None, (
+            "lifespan must catch ConfigError at the outermost scope. "
+            "See D1 in docs/remediation/2026-04-15-minitux-install-failure.md."
+        )
+        window = src[match.start() : match.start() + 2000]
+        assert "sys.exit(3)" in window, (
+            "The outer ConfigError handler must call sys.exit(3) to stop "
+            "uvicorn / orchestrator respawn. See D1 in the remediation plan."
+        )
+        assert "startup.aborted" in window, (
+            "The outer ConfigError handler must emit a 'startup.aborted' "
+            "structured log event before exiting — operators need a single "
+            "clear failure marker, not an interleaved traceback."
+        )
+
+    def test_lifespan_imports_sys_at_module_level(self) -> None:
+        """
+        sys.exit is used inside the lifespan; sys must be importable at
+        module scope (not lazy-imported inside the except block, which
+        would hide the dependency from static analysis).
+        """
+        src = _main_source()
+        assert re.search(r"^import sys\b", src, re.MULTILINE), (
+            "services/api/main.py must `import sys` at module scope for the "
+            "lifespan ConfigError handler (D1)."
+        )
+
+    def test_lifespan_aborts_on_configerror_emits_event_and_exits_3(self) -> None:
+        """
+        Runtime: drive a fake ConfigError through the lifespan startup and
+        assert sys.exit(3) is invoked and startup.aborted is logged.
+
+        We use the pydantic_core_check phase as the trigger point — it is
+        the first phase inside the lifespan and has no dependencies, so
+        monkeypatching _check_pydantic_core to raise ConfigError exercises
+        the outer handler without any prior side effects.
+        """
+        import asyncio
+
+        from libs.contracts.errors import ConfigError
+        from services.api import main as api_main
+
+        events: list[dict] = []
+
+        def capture(logger, method_name, event_dict):
+            events.append({"method": method_name, **event_dict})
+            # Returning None tells structlog to drop the event (do not pass
+            # further down the chain). Raising structlog.DropEvent would be
+            # equivalent; None avoids needing the import.
+            raise structlog.DropEvent
+
+        # Save/restore structlog config so this test does not leak into
+        # sibling tests in the same module.
+        structlog.reset_defaults()
+        structlog.configure(
+            processors=[capture],
+            wrapper_class=structlog.BoundLogger,
+        )
+
+        try:
+            def fake_check() -> None:
+                raise ConfigError("boom: synthetic pydantic_core failure for D1 test")
+
+            exit_code_holder: dict[str, int | None] = {"code": None}
+
+            def fake_exit(code: int) -> None:
+                exit_code_holder["code"] = code
+                # Raise SystemExit so the lifespan context manager unwinds
+                # exactly as it does in production.
+                raise SystemExit(code)
+
+            async def drive() -> None:
+                from fastapi import FastAPI
+
+                fake_app = FastAPI()
+                async with api_main.lifespan(fake_app):
+                    pass  # pragma: no cover — should never be reached
+
+            with patch.object(api_main, "_check_pydantic_core", fake_check), patch(
+                "services.api.main.sys.exit", fake_exit
+            ):
+                with pytest.raises(SystemExit) as excinfo:
+                    asyncio.run(drive())
+
+            assert excinfo.value.code == 3, (
+                f"Expected sys.exit(3); got sys.exit({excinfo.value.code}). "
+                "The exit code is the signal to orchestrators not to respawn."
+            )
+            assert exit_code_holder["code"] == 3
+
+            # startup.aborted must appear in the captured log events.
+            aborted = [e for e in events if e.get("event") == "startup.aborted"]
+            assert aborted, (
+                "Expected a 'startup.aborted' structured log event before "
+                f"sys.exit. Got events: {[e.get('event') for e in events]}"
+            )
+            entry = aborted[0]
+            assert entry.get("method") == "critical"
+            assert "reason" in entry
+            assert entry.get("reason") == "config_error"
+            assert entry.get("exit_code") == 3
+        finally:
+            structlog.reset_defaults()
