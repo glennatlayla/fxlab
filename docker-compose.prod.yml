@@ -134,11 +134,35 @@ services:
     container_name: fxlab-postgres
     expose:
       - "5432"
+    # N3 remediation (2026-04-15): the 2026-04-15 minitux install log
+    # contained the line::
+    #
+    #     WARNING: the locale "en_US.UTF-8" is not installed
+    #
+    # on every postgres boot. postgres:15-alpine ships with musl libc,
+    # which does not bundle the en_US.UTF-8 locale. initdb inherits
+    # LANG from the container; unset LANG falls back to a locale that
+    # is not installed, producing the warning on every boot.
+    #
+    # Fix:
+    #   LANG=C.UTF-8            — Alpine-available UTF-8 locale;
+    #                             initdb uses it by default.
+    #   --locale=C.UTF-8 in     — pins the locale in pg_database
+    #   POSTGRES_INITDB_ARGS      rather than relying on the process
+    #                             environment. Only read on first-run
+    #                             initdb; no-op on subsequent boots.
+    #
+    # C.UTF-8 provides byte-ordered collation and UTF-8 encoding.
+    # FXLab uses byte-ordered comparisons everywhere; locale-aware
+    # case-insensitive comparisons are NOT used, so C.UTF-8 has no
+    # behavioural cost. See
+    # tests/unit/test_postgres_locale_hygiene.py for the contract.
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-fxlab}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB:-fxlab}
-      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --locale=C.UTF-8
+      - LANG=C.UTF-8
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
