@@ -72,20 +72,37 @@ _FK_UPDATES: list[tuple[str, str, str, str]] = [
 ]
 
 
+def _pg_auto_fk_name(table: str, column: str) -> str:
+    """Return the PostgreSQL auto-generated FK constraint name.
+
+    When a ForeignKey is created inline (e.g. sa.ForeignKey("users.id"))
+    without an explicit constraint name, PostgreSQL names it
+    ``{table}_{column}_fkey``.  Migration 0001 created all initial FKs
+    this way, so we need this name to DROP the original constraints.
+    """
+    return f"{table}_{column}_fkey"
+
+
 def _fk_constraint_name(table: str, column: str) -> str:
-    """Generate the conventional FK constraint name."""
+    """Return our standardised FK constraint name for newly created FKs."""
     return f"fk_{table}_{column}"
 
 
 def upgrade() -> None:
-    """Replace default FK constraints with explicit ON DELETE actions."""
+    """Replace default FK constraints with explicit ON DELETE actions.
+
+    Drops the PostgreSQL auto-named constraints (``{table}_{column}_fkey``)
+    and recreates them with our naming convention (``fk_{table}_{column}``)
+    and explicit ON DELETE semantics.
+    """
     for table, column, referred_table, ondelete in _FK_UPDATES:
-        # Drop the existing unnamed/default FK
+        # Drop the existing auto-named FK constraint
         with op.batch_alter_table(table) as batch_op:
             batch_op.drop_constraint(
-                _fk_constraint_name(table, column),
+                _pg_auto_fk_name(table, column),
                 type_="foreignkey",
             )
+            # Recreate with our standard name and explicit ON DELETE
             batch_op.create_foreign_key(
                 _fk_constraint_name(table, column),
                 referred_table,
@@ -96,7 +113,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Revert FK constraints to default (no ON DELETE action)."""
+    """Revert FK constraints to default (no ON DELETE action).
+
+    Drops our named constraints and restores the original auto-generated
+    PostgreSQL naming convention so a full downgrade chain is clean.
+    """
     for table, column, referred_table, _ondelete in reversed(_FK_UPDATES):
         with op.batch_alter_table(table) as batch_op:
             batch_op.drop_constraint(
@@ -104,7 +125,7 @@ def downgrade() -> None:
                 type_="foreignkey",
             )
             batch_op.create_foreign_key(
-                _fk_constraint_name(table, column),
+                _pg_auto_fk_name(table, column),
                 referred_table,
                 [column],
                 ["id"],
