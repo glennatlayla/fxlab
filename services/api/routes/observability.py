@@ -44,10 +44,19 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from libs.contracts.alertmanager_webhook import AlertmanagerWebhookPayload
+from libs.contracts.interfaces.alert_ingest_service import (
+    AlertIngestServiceError,
+    AlertIngestServiceInterface,
+)
+from libs.contracts.interfaces.alert_notification_repository import (
+    AlertNotificationRepositoryInterface,
+)
 from libs.contracts.interfaces.dependency_health_repository import (
     DependencyHealthRepositoryInterface,
 )
@@ -103,6 +112,50 @@ def get_diagnostics_repository(db: Session = Depends(get_db)) -> DiagnosticsRepo
     from services.api.repositories.sql_diagnostics_repository import SqlDiagnosticsRepository
 
     return SqlDiagnosticsRepository(db=db)
+
+
+def get_alert_notification_repository(
+    db: Session = Depends(get_db),
+) -> AlertNotificationRepositoryInterface:
+    """
+    Provide an AlertNotificationRepositoryInterface implementation.
+
+    Returns the SQL-backed repository bound to the current request's
+    session. Import is local so that route imports stay cheap and circular
+    imports are avoided at module load.
+
+    Args:
+        db: SQLAlchemy session injected by FastAPI dependency injection.
+
+    Returns:
+        AlertNotificationRepositoryInterface (SQL-backed).
+    """
+    from services.api.repositories.sql_alert_notification_repository import (
+        SqlAlertNotificationRepository,
+    )
+
+    return SqlAlertNotificationRepository(db=db)
+
+
+def get_alert_ingest_service(
+    repo: AlertNotificationRepositoryInterface = Depends(get_alert_notification_repository),
+) -> AlertIngestServiceInterface:
+    """
+    Provide an AlertIngestServiceInterface implementation.
+
+    Wires the default ``AlertIngestService`` with the request-scoped
+    repository. ID and clock factories default to the production
+    implementations (ULID + UTC clock).
+
+    Args:
+        repo: Request-scoped alert notification repository.
+
+    Returns:
+        AlertIngestServiceInterface.
+    """
+    from services.api.services.alert_ingest_service import AlertIngestService
+
+    return AlertIngestService(repository=repo)
 
 
 # ---------------------------------------------------------------------------
@@ -271,3 +324,131 @@ def get_diagnostics(
         result="success",
     )
     return JSONResponse(content=body)
+
+
+# ---------------------------------------------------------------------------
+# Alertmanager webhook receiver
+# ---------------------------------------------------------------------------
+
+
+@router.post("/observability/alert-webhook", tags=["observability"])
+async def ingest_alertmanager_webhook(
+    request: Request,
+    x_correlation_id: str = Header(default="no-corr"),
+    service: AlertIngestServiceInterface = Depends(get_alert_ingest_service),
+) -> JSONResponse:
+    """
+    Receive an Alertmanager v4 webhook batch and persist every alert.
+
+    This endpoint is the target of Alertmanager's ``default_webhook`` and
+    ``critical_webhook`` receivers. It parses the batch, validates it
+    against the Alertmanager v4 schema, hands off to the ingest service
+    for persistence, and returns a small summary.
+
+    Security model:
+        The endpoint is unauthenticated because Alertmanager cannot be
+        configured with bearer tokens in the same way downstream
+        services can. The production deployment relies on network
+        isolation — Alertmanager is only reachable on the internal Docker
+        network (``fxlab-api:8000``) and the route is not exposed through
+        the ingress. The body size, rate limit, and correlation-ID
+        middleware defined in main.py still apply.
+
+    Args:
+        request: FastAPI request (used only to read the raw JSON body).
+        x_correlation_id: Request-scoped tracing ID from header. If
+            Alertmanager does not send one (it currently does not), the
+            default ``"no-corr"`` is used and surfaced in logs.
+        service: AlertIngestServiceInterface (injected).
+
+    Returns:
+        202 Accepted + JSON summary on success:
+            {"received": int, "persisted": int,
+             "correlation_id": str, "group_key": str}
+
+    Raises:
+        HTTPException(400): If the inbound JSON cannot be parsed or
+            fails Alertmanager v4 schema validation.
+        HTTPException(500): If persistence fails. The underlying cause
+            is logged with exc_info; clients should retry because
+            Alertmanager will re-send on non-2xx responses.
+
+    Example:
+        POST /observability/alert-webhook
+        { "version": "4", "groupKey": "...", "alerts": [...] }
+        → 202 {"received": 1, "persisted": 1, ...}
+    """
+    corr = x_correlation_id or "no-corr"
+    logger.info(
+        "alert_webhook.request_received",
+        operation="alert_webhook",
+        correlation_id=corr,
+        component="observability_router",
+    )
+
+    # Parse + validate body. We manually read the body so we can return a
+    # clean 400 on malformed JSON instead of a 422 with Pydantic's
+    # default envelope.
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        logger.warning(
+            "alert_webhook.invalid_json",
+            operation="alert_webhook",
+            correlation_id=corr,
+            component="observability_router",
+            error=str(exc),
+        )
+        raise HTTPException(status_code=400, detail="Request body is not valid JSON") from exc
+
+    try:
+        payload = AlertmanagerWebhookPayload.model_validate(body)
+    except ValidationError as exc:
+        logger.warning(
+            "alert_webhook.schema_violation",
+            operation="alert_webhook",
+            correlation_id=corr,
+            component="observability_router",
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Alertmanager payload failed schema validation: {exc.error_count()} error(s)",
+        ) from exc
+
+    try:
+        result = service.ingest(payload, correlation_id=corr)
+    except AlertIngestServiceError as exc:
+        # We log the full cause but do not leak it to the client.
+        logger.error(
+            "alert_webhook.persist_failed",
+            operation="alert_webhook",
+            correlation_id=corr,
+            component="observability_router",
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist alert notifications",
+        ) from exc
+
+    logger.info(
+        "alert_webhook.request_completed",
+        operation="alert_webhook",
+        correlation_id=corr,
+        component="observability_router",
+        received_count=result.received_count,
+        persisted_count=result.persisted_count,
+        group_key=result.group_key,
+        result="success",
+    )
+    return JSONResponse(
+        status_code=202,
+        content={
+            "received": result.received_count,
+            "persisted": result.persisted_count,
+            "correlation_id": result.correlation_id,
+            "group_key": result.group_key,
+        },
+    )
