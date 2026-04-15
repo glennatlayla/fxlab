@@ -267,6 +267,167 @@ def _log_runtime_versions() -> None:
 _PRODUCTION_SENTINEL = "/app/.production-build"
 
 
+# ---------------------------------------------------------------------------
+# libpq sslmode policy (C1 — 2026-04-15 remediation)
+# ---------------------------------------------------------------------------
+#
+# These tuples are module-level constants rather than function locals so
+# they can be imported by tests and by any future command-line helper
+# (e.g. a "validate deployment manifest" tool) without re-declaring the
+# security contract in two places.
+
+#: libpq sslmode values that guarantee an encrypted channel. Accepted
+#: in every environment, including production.
+_STRICT_POSTGRES_SSLMODES: frozenset[str] = frozenset(
+    {"require", "verify-ca", "verify-full"}
+)
+
+#: libpq sslmode values that do NOT guarantee an encrypted channel.
+#: Rejected when ``ENVIRONMENT=production``. Allowed in development,
+#: staging, and test so local workflows remain frictionless against a
+#: docker-compose Postgres on a private network.
+_WEAK_POSTGRES_SSLMODES: frozenset[str] = frozenset(
+    {"disable", "allow", "prefer"}
+)
+
+
+def _extract_sslmode(database_url: str) -> str | None:
+    """
+    Extract the sslmode value from a PostgreSQL DSN.
+
+    Handles both DSN styles libpq accepts:
+
+        postgresql://user:pass@host:5432/db?sslmode=require
+        postgresql://user:pass@host:5432/db?sslmode=require&application_name=fxlab
+
+    Args:
+        database_url: The full DATABASE_URL string. Callers should
+            pre-filter to URLs that begin with ``postgresql``;
+            non-postgres URLs return None here too but it is cleaner
+            not to invoke the function on them.
+
+    Returns:
+        The raw sslmode value (lower-cased) if present in the query
+        string, or ``None`` if the URL has no sslmode parameter. The
+        returned value is *not* validated against libpq's known set —
+        validation is the caller's job and happens in
+        ``_enforce_postgres_sslmode``.
+
+    Example:
+        >>> _extract_sslmode("postgresql://u:p@h/db?sslmode=require")
+        'require'
+        >>> _extract_sslmode("postgresql://u:p@h/db") is None
+        True
+    """
+    # Splitting on '?' is sufficient because libpq does not accept
+    # fragment identifiers in DSNs. We then split on '&' for multiple
+    # parameters.
+    if "?" not in database_url:
+        return None
+    query = database_url.split("?", 1)[1]
+    for pair in query.split("&"):
+        if "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        if key.lower() == "sslmode":
+            return value.strip().lower()
+    return None
+
+
+def _enforce_postgres_sslmode(database_url: str, environment: str) -> None:
+    """
+    Enforce the production sslmode policy on a PostgreSQL DATABASE_URL.
+
+    Behaviour matrix:
+
+        environment == "production"
+            sslmode missing  → RuntimeError (must be explicit)
+            sslmode weak     → RuntimeError (disable/allow/prefer)
+            sslmode strict   → pass (require/verify-ca/verify-full)
+            sslmode unknown  → RuntimeError (fail closed)
+
+        environment != "production"
+            any value        → pass (local dev must remain frictionless)
+            missing          → WARNING log (advisory only)
+
+    Args:
+        database_url: A DATABASE_URL that has already been confirmed to
+            begin with ``postgresql``. Behaviour is undefined for
+            non-postgres URLs.
+        environment: The current ``ENVIRONMENT`` value. Only the
+            literal string ``"production"`` triggers enforcement.
+
+    Raises:
+        RuntimeError: In production, when sslmode is missing, weak, or
+            unrecognised. The message names the offending value and
+            enumerates the allowed values so the operator can fix the
+            manifest in one edit.
+
+    Example:
+        >>> _enforce_postgres_sslmode(
+        ...     "postgresql://u:p@h/db?sslmode=require", "production"
+        ... )
+        # returns None, no exception
+        >>> _enforce_postgres_sslmode(
+        ...     "postgresql://u:p@h/db?sslmode=prefer", "production"
+        ... )
+        Traceback (most recent call last):
+            ...
+        RuntimeError: DATABASE_URL sslmode=prefer ...
+    """
+    sslmode = _extract_sslmode(database_url)
+    strict_list = ", ".join(sorted(_STRICT_POSTGRES_SSLMODES))
+
+    if environment != "production":
+        # Outside production, sslmode is advisory. A missing value still
+        # earns a WARNING because pre-prod parity matters, but it is
+        # not fatal.
+        if sslmode is None:
+            logger.warning(
+                "startup.db_ssl_not_configured",
+                warning=(
+                    "DATABASE_URL does not include sslmode parameter. "
+                    f"Production deployments will require one of: {strict_list}."
+                ),
+                component="startup",
+            )
+        return
+
+    # --- Production enforcement below ---------------------------------------
+
+    if sslmode is None:
+        raise RuntimeError(
+            "DATABASE_URL does not include sslmode parameter. "
+            "Production PostgreSQL connections MUST use one of: "
+            f"{strict_list}. "
+            "Without SSL, credentials and trading data travel in plaintext. "
+            "Add ?sslmode=require to your DATABASE_URL."
+        )
+
+    if sslmode in _WEAK_POSTGRES_SSLMODES:
+        raise RuntimeError(
+            f"DATABASE_URL sslmode={sslmode} is not permitted in production. "
+            f"libpq '{sslmode}' does not guarantee an encrypted connection "
+            "(it either disables SSL, tries it opportunistically, or "
+            "silently falls back to plaintext on negotiation failure). "
+            f"Production deployments MUST use one of: {strict_list}. "
+            "Update the DATABASE_URL in your secret manifest and redeploy."
+        )
+
+    if sslmode not in _STRICT_POSTGRES_SSLMODES:
+        # Unknown value — fail closed rather than assume it is safe.
+        # libpq itself would reject this at connect time, but we would
+        # prefer to fail at startup with a named error than produce a
+        # ConnectionRefused 30 s later.
+        raise RuntimeError(
+            f"DATABASE_URL sslmode={sslmode} is not a recognised libpq value. "
+            f"Production deployments MUST use one of: {strict_list}. "
+            "Check the DATABASE_URL in your secret manifest for typos."
+        )
+
+    # sslmode is in _STRICT_POSTGRES_SSLMODES — pass.
+
+
 def _validate_startup_secrets() -> None:
     """
     Validate that all required secrets are configured at startup.
@@ -302,24 +463,30 @@ def _validate_startup_secrets() -> None:
         )
         return  # Tests inject their own secrets via mocks
 
-    # --- SSL mode enforcement for PostgreSQL (INFRA-2 / H1.7) ----------------
+    # --- SSL mode enforcement for PostgreSQL (INFRA-2 / H1.7 / C1) -----------
+    #
+    # libpq defines six sslmode values. Three guarantee encryption
+    # ("require", "verify-ca", "verify-full") and are accepted in
+    # production. The other three are rejected in production:
+    #
+    #   - disable : no SSL at all — credentials travel in plaintext.
+    #   - allow   : SSL only if the server initiates — effectively disable
+    #               against a misconfigured server.
+    #   - prefer  : tries SSL but silently falls back to plaintext on
+    #               negotiation failure — indistinguishable from disable
+    #               when it matters most.
+    #
+    # The legacy H1.7 check only rejected DATABASE_URL strings that
+    # lacked sslmode entirely; an explicit-but-weak value slipped
+    # through. That gap was exercised in the 2026-04-15 minitux failure
+    # (DATABASE_URL contained "?sslmode=prefer"). C1 closes it.
+    #
+    # Non-production environments accept all six values so local dev
+    # (docker-compose, minitux) and integration tests are frictionless.
+    # Minitux is designated development per the environment policy.
     database_url = os.environ.get("DATABASE_URL", "")
-    if database_url.startswith("postgresql") and "sslmode=" not in database_url:
-        if env == "production":
-            raise RuntimeError(
-                "DATABASE_URL does not include sslmode parameter. "
-                "Production PostgreSQL connections MUST use sslmode=require or "
-                "sslmode=verify-full for encrypted connections. "
-                "Without SSL, credentials and trading data travel in plaintext. "
-                "Add ?sslmode=require to your DATABASE_URL."
-            )
-        logger.warning(
-            "startup.db_ssl_not_configured",
-            warning="DATABASE_URL does not include sslmode parameter. "
-            "Production deployments should use sslmode=require or "
-            "sslmode=verify-full for encrypted connections.",
-            component="startup",
-        )
+    if database_url.startswith("postgresql"):
+        _enforce_postgres_sslmode(database_url, env)
 
     from services.api.infrastructure.secret_provider_factory import get_provider
 
