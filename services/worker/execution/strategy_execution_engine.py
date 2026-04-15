@@ -92,6 +92,9 @@ if TYPE_CHECKING:
     )
     from libs.contracts.interfaces.signal_repository import SignalRepositoryInterface
     from libs.contracts.interfaces.signal_strategy import SignalStrategyInterface
+    from services.api.services.interfaces.live_execution_service_interface import (
+        LiveExecutionServiceInterface,
+    )
     from libs.contracts.market_data import Candle
     from libs.indicators.engine import IndicatorEngine
 
@@ -165,6 +168,7 @@ class StrategyExecutionEngine(ExecutionLoopInterface):
         signal_repository: SignalRepositoryInterface,
         data_freshness_gate: DataFreshnessGateInterface | None = None,
         data_freshness_policy: DataFreshnessPolicy | None = None,
+        live_execution_service: "LiveExecutionServiceInterface | None" = None,
     ) -> None:
         """
         Initialize the execution engine with all required dependencies.
@@ -205,6 +209,12 @@ class StrategyExecutionEngine(ExecutionLoopInterface):
         self._signal_repository = signal_repository
         self._data_freshness_gate = data_freshness_gate
         self._data_freshness_policy = data_freshness_policy
+        # Optional: when provided, LIVE-mode orders are delegated to this
+        # pre-persisting service instead of being submitted directly to the
+        # broker adapter.  When None, LIVE-mode configs are rejected at
+        # start() to prevent silent bypass of order persistence. See
+        # start() docstring for the full safety rationale.
+        self._live_execution_service = live_execution_service
 
         # State management.
         self._lock = threading.Lock()
@@ -239,16 +249,50 @@ class StrategyExecutionEngine(ExecutionLoopInterface):
 
         Validates state transition, stores config, and transitions to RUNNING.
 
+        Safety guard — real-money trading:
+            This engine submits orders directly through its injected
+            broker adapter and does NOT persist orders to durable
+            storage before broker submission.  The production-grade
+            real-money path is ``services.api.services.LiveExecutionService``,
+            which pre-persists orders under a lock + transaction commit.
+
+            To prevent a future integration from silently wiring this
+            engine against a live broker and bypassing the pre-persistence
+            discipline (which would produce orphaned broker-side orders
+            on any crash between submit and ack), this method REJECTS
+            ``ExecutionMode.LIVE`` unless a ``live_execution_service``
+            dependency was explicitly injected.  PAPER and SHADOW modes
+            are unaffected — they do not move real money.
+
         Args:
             config: Complete loop configuration.
 
         Raises:
             InvalidStateTransitionError: If not in INITIALIZING state.
+            RuntimeError: If ``config.execution_mode == ExecutionMode.LIVE``
+                and no ``live_execution_service`` was injected.  The message
+                points operators at the correct production path.
 
         Example:
             engine.start(config)
             assert engine.state == LoopState.RUNNING
         """
+        # Safety guard: refuse LIVE mode without a pre-persisting service.
+        # Kept OUTSIDE the lock so we fail before any state mutation.
+        if config.execution_mode == ExecutionMode.LIVE and self._live_execution_service is None:
+            raise RuntimeError(
+                "StrategyExecutionEngine refuses to start in ExecutionMode.LIVE "
+                "without a LiveExecutionServiceInterface dependency. "
+                "Live (real-money) orders MUST go through "
+                "services.api.services.LiveExecutionService, which persists "
+                "orders to durable storage before broker submission. "
+                "Direct broker submission from this engine would create "
+                "orphaned orders on crash. Use PAPER or SHADOW modes for "
+                "the engine's direct-submission path, or inject a "
+                "LiveExecutionServiceInterface to route LIVE orders through "
+                "the production-grade service."
+            )
+
         with self._lock:
             validate_transition(self._state, LoopState.RUNNING)
             self._config = config

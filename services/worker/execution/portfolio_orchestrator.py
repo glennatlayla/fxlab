@@ -142,41 +142,58 @@ class PortfolioOrchestrator(PortfolioOrchestratorInterface):
         # Build performance lookup
         perf_map = {p.strategy_id: p for p in performances}
 
-        # Compute total current equity
-        total_equity = sum(float(p.current_equity) for p in performances)
+        # Compute total current equity in Decimal — money math must never
+        # round-trip through float64 (silent precision loss on fractional
+        # cents, non-USD quote precision, and odd-lot share prices).
+        total_equity: Decimal = Decimal("0")
+        for p in performances:
+            total_equity += p.current_equity
 
-        # Compute per-strategy drift
+        # Compute per-strategy drift. Weights are dimensionless ratios,
+        # constrained to [0,1] by the StrategyDrift contract; we compute
+        # them as Decimal ratios and only convert to float at the output
+        # boundary. max_drift is accumulated as Decimal to avoid introducing
+        # float error into the should_rebalance decision.
         drifts: list[StrategyDrift] = []
-        max_drift = 0.0
+        max_drift_d: Decimal = Decimal("0")
 
         for alloc in allocation_result.allocations:
             perf = perf_map.get(alloc.strategy_id)
-            current_weight = (
-                float(perf.current_equity) / total_equity if perf and total_equity > 0 else 0.0
+            if perf and total_equity > 0:
+                current_weight_d = perf.current_equity / total_equity
+            else:
+                current_weight_d = Decimal("0")
+            target_weight_d = Decimal(str(alloc.target_weight))
+            drift_d = current_weight_d - target_weight_d
+            drift_abs_d = abs(drift_d)
+            drift_pct_d = (
+                drift_abs_d / target_weight_d if target_weight_d > 0 else Decimal("0")
             )
-            target_weight = alloc.target_weight
-            drift_abs = abs(current_weight - target_weight)
-            drift_pct = drift_abs / target_weight if target_weight > 0 else 0.0
 
             drifts.append(
                 StrategyDrift(
                     strategy_id=alloc.strategy_id,
-                    target_weight=round(target_weight, 10),
-                    current_weight=round(current_weight, 10),
-                    drift=round(current_weight - target_weight, 10),
-                    drift_pct=round(drift_pct, 10),
+                    target_weight=round(float(target_weight_d), 10),
+                    current_weight=round(float(current_weight_d), 10),
+                    drift=round(float(drift_d), 10),
+                    drift_pct=round(float(drift_pct_d), 10),
                 )
             )
-            max_drift = max(max_drift, drift_abs)
+            if drift_abs_d > max_drift_d:
+                max_drift_d = drift_abs_d
+
+        # Convert to float only for the threshold comparison; the threshold
+        # itself is a float contract field.
+        max_drift_f = float(max_drift_d)
 
         # Decide whether to rebalance
         should_rebalance = self._should_rebalance(
             trigger,
-            max_drift,
+            max_drift_f,
             config.rebalance_threshold,
         )
 
-        # Build current allocations from performance data
+        # Build current allocations from performance data (Decimal equity in)
         current_allocations = self._build_current_allocations(
             config,
             perf_map,
@@ -186,7 +203,7 @@ class PortfolioOrchestrator(PortfolioOrchestratorInterface):
         logger.info(
             "Rebalance evaluation complete",
             portfolio_id=config.portfolio_id,
-            max_drift=round(max_drift, 6),
+            max_drift=round(max_drift_f, 6),
             should_rebalance=should_rebalance,
         )
 
@@ -197,7 +214,7 @@ class PortfolioOrchestrator(PortfolioOrchestratorInterface):
             drifts=drifts,
             current_allocations=current_allocations,
             target_allocations=allocation_result.allocations,
-            max_drift=round(max_drift, 10),
+            max_drift=round(max_drift_f, 10),
         )
 
     def execute_rebalance(
@@ -234,18 +251,23 @@ class PortfolioOrchestrator(PortfolioOrchestratorInterface):
         # Build performance lookup
         perf_map = {p.strategy_id: p for p in performances}
 
-        # Compute capital movements
+        # Compute capital movements in pure Decimal arithmetic. Casting
+        # current_equity or capital_allocated to float here would silently
+        # drop precision — dollars or fractional units can drift by up to
+        # half an ULP per conversion, and summing many such deltas
+        # accumulates visible error on large portfolios. Keep Decimal.
+        min_adjustment = Decimal("0.01")  # $0.01 — below this, treat as no-op
         total_capital_moved = Decimal("0")
         strategies_adjusted = 0
 
         for target_alloc in decision.target_allocations:
             perf = perf_map.get(target_alloc.strategy_id)
-            current_capital = float(perf.current_equity) if perf else 0.0
-            target_capital = float(target_alloc.capital_allocated)
-            delta = abs(target_capital - current_capital)
+            current_capital: Decimal = perf.current_equity if perf else Decimal("0")
+            target_capital: Decimal = target_alloc.capital_allocated
+            delta: Decimal = abs(target_capital - current_capital)
 
-            if delta > 0.01:  # Minimum $0.01 to count as an adjustment
-                total_capital_moved += Decimal(str(round(delta, 2)))
+            if delta > min_adjustment:
+                total_capital_moved += delta
                 strategies_adjusted += 1
 
         completed_at = datetime.now(timezone.utc)
@@ -298,20 +320,28 @@ class PortfolioOrchestrator(PortfolioOrchestratorInterface):
         for p in performances:
             total_equity += p.current_equity
 
-        # Compute max drift by evaluating allocations
+        # Compute max drift by evaluating allocations — Decimal throughout
+        # to match the precision guarantees of evaluate_rebalance(). We
+        # convert to float only at the output boundary where the
+        # OrchestratorDiagnostics contract demands float.
         allocation_result = self._allocation_engine.compute_allocations(
             config,
             performances,
         )
         perf_map = {p.strategy_id: p for p in performances}
-        total_eq_float = float(total_equity) if total_equity > 0 else 1.0
 
-        max_drift = 0.0
+        max_drift_d: Decimal = Decimal("0")
         for alloc in allocation_result.allocations:
             perf = perf_map.get(alloc.strategy_id)
-            current_weight = float(perf.current_equity) / total_eq_float if perf else 0.0
-            drift_abs = abs(current_weight - alloc.target_weight)
-            max_drift = max(max_drift, drift_abs)
+            if perf and total_equity > 0:
+                current_weight_d = perf.current_equity / total_equity
+            else:
+                current_weight_d = Decimal("0")
+            target_weight_d = Decimal(str(alloc.target_weight))
+            drift_abs_d = abs(current_weight_d - target_weight_d)
+            if drift_abs_d > max_drift_d:
+                max_drift_d = drift_abs_d
+        max_drift = float(max_drift_d)
 
         with self._lock:
             rebalances = self._rebalances_executed
@@ -367,28 +397,43 @@ class PortfolioOrchestrator(PortfolioOrchestratorInterface):
     def _build_current_allocations(
         config: PortfolioConfig,
         perf_map: dict[str, StrategyPerformanceInput],
-        total_equity: float,
+        total_equity: Decimal,
     ) -> list:
         """
         Build current StrategyAllocation list from performance data.
 
+        Monetary values (capital_allocated) are preserved as the exact
+        Decimal supplied by the caller — no float round-trip, no rounding
+        to cents. The StrategyAllocation contract stores capital_allocated
+        as Decimal precisely so downstream risk and reconciliation math
+        can be exact.
+
+        Weight fields on the contract are typed as float and must be in
+        [0, 1]; we compute the ratio as Decimal and convert to float only
+        at this single boundary.
+
         Args:
             config: Portfolio configuration.
             perf_map: Performance data keyed by strategy_id.
-            total_equity: Total portfolio equity.
+            total_equity: Total portfolio equity (Decimal).
 
         Returns:
-            List of StrategyAllocation with current weights.
+            List of StrategyAllocation with current weights and exact capital.
         """
         from libs.contracts.portfolio import StrategyAllocation
 
         allocations = []
         for sc in config.strategy_configs:
             perf = perf_map.get(sc.strategy_id)
-            current_weight = (
-                float(perf.current_equity) / total_equity if perf and total_equity > 0 else 0.0
-            )
-            capital = Decimal(str(round(float(perf.current_equity), 2))) if perf else Decimal("0")
+            if perf and total_equity > 0:
+                current_weight_d = perf.current_equity / total_equity
+                current_weight = float(current_weight_d)
+            else:
+                current_weight = 0.0
+            # Preserve equity exactly — real-money math should not round
+            # silently to cents here. The repository / broker adapter
+            # layer is responsible for venue-appropriate rounding.
+            capital: Decimal = perf.current_equity if perf else Decimal("0")
 
             allocations.append(
                 StrategyAllocation(

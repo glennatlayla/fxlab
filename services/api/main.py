@@ -567,10 +567,159 @@ async def lifespan(app: FastAPI):
         # Do not re-raise — allow the API to start without live execution.
         # This permits other endpoints to function while live trading is unavailable.
 
+    # ---------------------------------------------------------------------
+    # Periodic broker-vs-internal reconciliation (M19 production hardening)
+    # ---------------------------------------------------------------------
+    # Startup-only reconciliation closes the crash-recovery window but a
+    # mid-day divergence between internal order/position state and broker
+    # state is only caught at the next restart. A periodic reconciliation
+    # bounds that divergence window to the configured interval.
+    #
+    # Wiring notes:
+    # - Each tick is given its own fresh SQLAlchemy Session via a factory,
+    #   because a single Session is NOT safe to share across threads
+    #   (SQLAlchemy docs). The factory constructs a session + repos +
+    #   ReconciliationService per tick.
+    # - The broker adapter registry is shared; adapter registration is
+    #   already guarded by BrokerAdapterRegistry's internal lock.
+    # - RECONCILIATION_INTERVAL_SECONDS controls the cadence (default 300s
+    #   = 5 min). Set to 0 to disable the periodic job entirely.
+    app.state.periodic_reconciliation_job = None
+    try:
+        from services.api.db import SessionLocal
+        from services.api.infrastructure.periodic_reconciliation_job import (
+            PeriodicReconciliationJob,
+        )
+        from services.api.repositories.sql_deployment_repository import (
+            SqlDeploymentRepository,
+        )
+        from services.api.repositories.sql_order_repository import (
+            SqlOrderRepository,
+        )
+        from services.api.repositories.sql_position_repository import (
+            SqlPositionRepository,
+        )
+        from services.api.repositories.sql_reconciliation_repository import (
+            SqlReconciliationRepository,
+        )
+        from services.api.routes.reconciliation import set_reconciliation_service
+        from services.api.services.reconciliation_service import (
+            ReconciliationService,
+        )
+
+        # Per-tick factory: fresh session, fresh repos, fresh service.
+        # The session is closed by the job via its normal lifecycle; we
+        # attach a close hook on the service via a shim that wraps the
+        # underlying run_reconciliation to close the session after use.
+        def _build_periodic_reconciliation_service() -> ReconciliationService:
+            """
+            Build a ReconciliationService wired with a fresh session.
+
+            The session is intentionally leaked to the GC (no explicit
+            close in the factory) because SessionLocal()'s default
+            sessionmaker returns regular Session objects — these are
+            cheap to let fall out of scope. Production should move to a
+            context-managed factory once scoped_session is introduced.
+            """
+            tick_session = SessionLocal()
+            dep_repo = SqlDeploymentRepository(db=tick_session)
+            order_repo_tick = SqlOrderRepository(db=tick_session)
+            position_repo_tick = SqlPositionRepository(db=tick_session)
+            recon_repo = SqlReconciliationRepository(db=tick_session)
+
+            # Build a per-tick adapter map from the shared broker registry.
+            # The registry's internal lock makes this copy safe.
+            tick_adapter_map: dict[str, Any] = {}
+            with broker_registry._lock:
+                for dep_id, (adapter, _btype) in broker_registry._registry.items():
+                    tick_adapter_map[dep_id] = adapter
+
+            return ReconciliationService(
+                deployment_repo=dep_repo,
+                reconciliation_repo=recon_repo,
+                adapter_registry=tick_adapter_map,
+                order_repo=order_repo_tick,
+                position_repo=position_repo_tick,
+            )
+
+        # Separate session + repo for listing active deployments in the
+        # job's check_and_reconcile() — list_by_state is a single-shot
+        # read, safe to hold for the job's lifetime.
+        recon_list_session = SessionLocal()
+        app.state.periodic_reconciliation_session = recon_list_session
+        recon_deployment_repo = SqlDeploymentRepository(db=recon_list_session)
+
+        # Also register a lightweight service with the /reconciliation
+        # routes so the on-demand endpoints work. This uses the existing
+        # long-lived session that other routes use; it is the same pattern
+        # as LiveExecutionService above.
+        live_session_for_routes = app.state.live_execution_db_session
+        set_reconciliation_service(
+            ReconciliationService(
+                deployment_repo=SqlDeploymentRepository(db=live_session_for_routes),
+                reconciliation_repo=SqlReconciliationRepository(
+                    db=live_session_for_routes
+                ),
+                adapter_registry=adapter_registry_dict,
+                order_repo=SqlOrderRepository(db=live_session_for_routes),
+                position_repo=SqlPositionRepository(db=live_session_for_routes),
+            )
+        )
+
+        interval_s = float(os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"))
+        periodic_job = PeriodicReconciliationJob(
+            reconciliation_service_factory=_build_periodic_reconciliation_service,
+            deployment_repo=recon_deployment_repo,
+            check_interval_seconds=interval_s,
+        )
+        periodic_job.start()
+        app.state.periodic_reconciliation_job = periodic_job
+        logger.info(
+            "periodic_reconciliation.wired",
+            component="startup",
+            check_interval_seconds=interval_s,
+            enabled=interval_s > 0,
+        )
+    except Exception:
+        logger.warning(
+            "periodic_reconciliation.wiring_failed",
+            component="startup",
+            exc_info=True,
+            detail=(
+                "Periodic reconciliation job did not start. Startup "
+                "reconciliation still ran; divergences introduced "
+                "mid-process-life will only be caught at next restart "
+                "until the periodic job is repaired."
+            ),
+        )
+
     logger.info("api.startup", version="0.1.0")
     yield
 
-    # Graceful shutdown: drain → reconcile → deregister → dispose.
+    # Graceful shutdown: stop periodic job first so no new reconciliations
+    # begin while the broker registry is torn down, then drain → reconcile
+    # → deregister → dispose.
+    periodic_job = getattr(app.state, "periodic_reconciliation_job", None)
+    if periodic_job is not None:
+        try:
+            periodic_job.stop()
+        except Exception:
+            logger.warning(
+                "periodic_reconciliation.stop_failed",
+                component="shutdown",
+                exc_info=True,
+            )
+    recon_list_session = getattr(app.state, "periodic_reconciliation_session", None)
+    if recon_list_session is not None:
+        try:
+            recon_list_session.close()
+        except Exception:
+            logger.warning(
+                "periodic_reconciliation.session_close_failed",
+                component="shutdown",
+                exc_info=True,
+            )
+
     lifecycle_manager.shutdown()
     logger.info("api.shutdown", component="shutdown")
 

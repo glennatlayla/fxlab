@@ -678,3 +678,87 @@ class TestEdgeCases:
             assert diag.uptime_seconds > 0
         finally:
             engine.stop()
+
+
+# ---------------------------------------------------------------------------
+# Safety: LIVE execution mode must never reach the raw broker adapter.
+# ---------------------------------------------------------------------------
+#
+# The StrategyExecutionEngine submits orders directly via its injected
+# broker adapter and does NOT persist the order to durable storage before
+# calling the broker.  The production-grade path for real-money trading
+# is services.api.services.LiveExecutionService, which pre-persists every
+# order under a lock + transaction commit before submitting to the broker.
+#
+# Without a guard here, a future integration that wires this engine with
+# a live broker adapter (e.g. AlpacaBrokerAdapter in LIVE mode) would
+# silently bypass the pre-persistence discipline and create orphaned
+# broker-side orders on any crash between submit and ack.  CLAUDE.md §0
+# treats this as a first-class bug, not tech debt.
+#
+# These tests enforce the invariant: the engine REJECTS a LIVE-mode
+# config at start() time unless it was explicitly constructed with a
+# LiveExecutionServiceInterface (a dependency the engine will delegate
+# to instead of calling the broker directly).  PAPER and SHADOW modes
+# are unaffected — they do not move real money.
+
+
+class TestLiveModeSafetyGuard:
+    """Guards against the engine submitting real-money orders without
+    going through the pre-persisting LiveExecutionService."""
+
+    def test_start_raises_when_live_mode_and_no_live_execution_service(self) -> None:
+        """LIVE config + no live_execution_service injected → start() raises.
+
+        This is the core safety property: the engine must refuse to
+        run in LIVE mode through its direct-broker-submission code path.
+        """
+        engine = _build_engine()  # no live_execution_service injected
+        live_config = _make_config(execution_mode=ExecutionMode.LIVE)
+
+        with pytest.raises(RuntimeError, match="LIVE"):
+            engine.start(live_config)
+
+    def test_start_raises_before_state_transitions_to_running(self) -> None:
+        """The guard must fire before any state mutation, so the engine
+        stays in INITIALIZING and can be safely discarded."""
+        engine = _build_engine()
+        live_config = _make_config(execution_mode=ExecutionMode.LIVE)
+
+        with pytest.raises(RuntimeError):
+            engine.start(live_config)
+
+        # No state leak: the failed start must not leave the engine RUNNING.
+        assert engine.state == LoopState.INITIALIZING
+
+    def test_paper_mode_still_starts_normally(self) -> None:
+        """PAPER mode must continue to work — the guard is scoped to LIVE."""
+        engine = _build_engine()
+        engine.start(_make_config(execution_mode=ExecutionMode.PAPER))
+        try:
+            assert engine.state == LoopState.RUNNING
+        finally:
+            engine.stop()
+
+    def test_shadow_mode_still_starts_normally(self) -> None:
+        """SHADOW mode must continue to work — the guard is scoped to LIVE."""
+        engine = _build_engine()
+        engine.start(_make_config(execution_mode=ExecutionMode.SHADOW))
+        try:
+            assert engine.state == LoopState.RUNNING
+        finally:
+            engine.stop()
+
+    def test_guard_error_message_points_operator_at_live_execution_service(self) -> None:
+        """The exception message must name the correct production path,
+        so an operator hitting this error knows where to go."""
+        engine = _build_engine()
+        live_config = _make_config(execution_mode=ExecutionMode.LIVE)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            engine.start(live_config)
+
+        msg = str(exc_info.value)
+        assert "LiveExecutionService" in msg, (
+            f"Error message must point operator at LiveExecutionService. Got: {msg!r}"
+        )

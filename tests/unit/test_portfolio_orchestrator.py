@@ -508,3 +508,153 @@ class TestEdgeCases:
         )
 
         assert len(decision.target_allocations) == 2
+
+
+# ===========================================================================
+# Test: Decimal Precision (money math MUST NOT round-trip through float)
+# ===========================================================================
+
+
+class TestDecimalPrecision:
+    """
+    Verify that monetary values survive end-to-end with no precision loss.
+
+    Rationale:
+    Rounding equity through float / round(.., 2) causes silent drift on
+    fractional cents, unusual share prices, and non-USD quote precision.
+    For real-money trading the orchestrator must preserve the exact Decimal
+    supplied by the caller. Only dimensionless weights (bounded [0,1]) are
+    converted to float at the contract boundary.
+    """
+
+    def test_build_current_allocations_preserves_equity_precision_exactly(self) -> None:
+        """
+        current_allocations[i].capital_allocated == performances[i].current_equity.
+
+        Uses Decimals with more precision than float64 can represent to prove
+        no float cast occurred anywhere in the allocation build path.
+        """
+        configs = [
+            _make_strategy_config("s1", "d1"),
+            _make_strategy_config("s2", "d2"),
+        ]
+        eq1 = Decimal("500000.123456789012345")
+        eq2 = Decimal("499999.876543210987654")
+        config = _make_portfolio_config(strategy_configs=configs)
+        performances = [
+            _make_performance("s1", "d1", current_equity=eq1),
+            _make_performance("s2", "d2", current_equity=eq2),
+        ]
+
+        orchestrator = _build_orchestrator()
+        decision = orchestrator.evaluate_rebalance(
+            config,
+            performances,
+            RebalanceTrigger.MANUAL,
+        )
+
+        cap_by_id = {a.strategy_id: a.capital_allocated for a in decision.current_allocations}
+        assert cap_by_id["s1"] == eq1, (
+            "capital_allocated lost precision — money math went through float"
+        )
+        assert cap_by_id["s2"] == eq2, (
+            "capital_allocated lost precision — money math went through float"
+        )
+
+    def test_execute_rebalance_total_capital_moved_is_decimal_exact(self) -> None:
+        """
+        total_capital_moved is the exact Decimal sum of per-strategy deltas.
+
+        If any leg goes through float, the sum of two Decimal deltas whose
+        binary-float representation is not exact will drift away from the
+        exact Decimal result. This test uses amounts that float64 cannot
+        represent exactly.
+        """
+        configs = [
+            _make_strategy_config("s1", "d1"),
+            _make_strategy_config("s2", "d2"),
+        ]
+        # 0.1 + 0.2 != 0.3 in float. These Decimals pick up that class of
+        # drift if the orchestrator casts to float anywhere.
+        eq1 = Decimal("500000.10")
+        eq2 = Decimal("499999.20")
+        config = _make_portfolio_config(strategy_configs=configs)
+        performances = [
+            _make_performance("s1", "d1", current_equity=eq1),
+            _make_performance("s2", "d2", current_equity=eq2),
+        ]
+
+        orchestrator = _build_orchestrator()
+        decision = orchestrator.evaluate_rebalance(
+            config,
+            performances,
+            RebalanceTrigger.MANUAL,
+        )
+        result = orchestrator.execute_rebalance(config, performances, decision)
+
+        # Recompute the exact expected sum from target_allocations
+        perf_map = {p.strategy_id: p for p in performances}
+        expected = Decimal("0")
+        for ta in decision.target_allocations:
+            perf = perf_map.get(ta.strategy_id)
+            curr = perf.current_equity if perf else Decimal("0")
+            delta = abs(ta.capital_allocated - curr)
+            if delta > Decimal("0.01"):
+                expected += delta
+
+        assert result.total_capital_moved == expected, (
+            f"total_capital_moved drifted: got {result.total_capital_moved}, "
+            f"expected exact Decimal {expected}"
+        )
+
+    def test_diagnostics_total_equity_preserves_precision(self) -> None:
+        """
+        diagnostics.total_equity equals the exact Decimal sum of inputs.
+        """
+        configs = [
+            _make_strategy_config("s1", "d1"),
+            _make_strategy_config("s2", "d2"),
+        ]
+        eq1 = Decimal("333333.333333333")
+        eq2 = Decimal("666666.666666667")
+        config = _make_portfolio_config(strategy_configs=configs)
+        performances = [
+            _make_performance("s1", "d1", current_equity=eq1),
+            _make_performance("s2", "d2", current_equity=eq2),
+        ]
+
+        orchestrator = _build_orchestrator()
+        diag = orchestrator.get_diagnostics(config, performances)
+
+        assert diag.total_equity == eq1 + eq2
+
+    def test_no_float_cast_on_decimal_money_source(self) -> None:
+        """
+        Production code under services/worker/execution/portfolio_orchestrator.py
+        must not contain float() casts on known monetary attributes.
+
+        This is a lint-style guard that prevents reintroduction of the
+        pattern we just removed. If you need to convert to float for a
+        contract boundary, do so on a *ratio* (weight), not on an equity /
+        capital value.
+        """
+        import re
+        from pathlib import Path
+
+        source_path = (
+            Path(__file__).resolve().parents[2]
+            / "services/worker/execution/portfolio_orchestrator.py"
+        )
+        source = source_path.read_text()
+
+        # Strip comments/docstrings for a fair scan: keep only code lines,
+        # but the monetary-attr regex below is specific enough that a
+        # mention inside a docstring would also be a real code smell.
+        forbidden = re.compile(
+            r"float\(\s*[A-Za-z_][A-Za-z0-9_.\[\]'\"]*\.(current_equity|capital_allocated|total_capital|total_capital_moved)\b"
+        )
+        matches = forbidden.findall(source)
+        assert not matches, (
+            "portfolio_orchestrator.py casts a monetary attribute to float — "
+            f"money math must remain Decimal. Found: {matches}"
+        )
