@@ -24,7 +24,14 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Force reinstall pydantic-core for the container platform (Linux x86_64/aarch64).
 # Prevents macOS wheel from leaking into Linux containers via cached layers.
-RUN pip install --no-cache-dir --prefix=/install --force-reinstall pydantic-core
+#
+# IMPORTANT: pydantic-core MUST be pinned to the exact version that pydantic==2.5.3
+# requires (pydantic-core==2.14.6). Leaving this unversioned caused a production
+# outage when pip resolved the latest pydantic-core (2.25+), which removed the
+# `validate_core_schema` symbol that pydantic 2.5.3 still imports — producing
+# `ImportError: cannot import name 'validate_core_schema' from 'pydantic_core'`
+# at container start.
+RUN pip install --no-cache-dir --prefix=/install --force-reinstall pydantic-core==2.14.6
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime
