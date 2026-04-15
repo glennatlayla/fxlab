@@ -9,6 +9,7 @@ Naming convention: test_<unit>_<scenario>_<expected_outcome>
 
 from __future__ import annotations
 
+import errno
 import socket
 import sys
 from unittest.mock import MagicMock, patch
@@ -19,10 +20,27 @@ from libs.contracts.errors import ConfigError
 from services.api.infrastructure.redis_health import (
     _build_keepalive_options,
     _classify_connection_error,
+    _compute_backoff_seconds,
     _parse_redis_version,
     _strip_credentials,
     verify_redis_connection,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep_during_redis_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Replace time.sleep used by the redis_health retry loop with a no-op
+    so the unit-test suite does not incur the (1s + 2s + 4s + 8s) backoff
+    for each transient-failure test path.
+
+    Tests that want to assert on the actual sleep schedule pass their own
+    ``sleep=...`` callable, which takes precedence over this monkeypatch.
+    """
+    monkeypatch.setattr(
+        "services.api.infrastructure.redis_health.time.sleep",
+        lambda _seconds: None,
+    )
 
 # ---------------------------------------------------------------------------
 # _parse_redis_version() tests
@@ -742,3 +760,193 @@ class TestVerifyRedisConnectionClassifiedErrorMessages:
         assert "refused" in message or "running" in message
         # And it must NOT misclassify as client-side.
         assert "client-side" not in message
+
+
+# ---------------------------------------------------------------------------
+# _compute_backoff_seconds() tests (B2 — transient-failure retry)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeBackoffSeconds:
+    """
+    Exponential backoff with upper clamp.
+
+    The backoff schedule is 1s, 2s, 4s, 8s, 16s (doubling) with a hard
+    ceiling so a misconfigured max_retries cannot produce a multi-minute
+    sleep that makes startup appear hung.
+    """
+
+    def test_attempt_1_returns_initial_backoff(self) -> None:
+        assert _compute_backoff_seconds(attempt=1, initial=1.0, cap=30.0) == 1.0
+
+    def test_attempt_2_doubles(self) -> None:
+        assert _compute_backoff_seconds(attempt=2, initial=1.0, cap=30.0) == 2.0
+
+    def test_attempt_3_quadruples(self) -> None:
+        assert _compute_backoff_seconds(attempt=3, initial=1.0, cap=30.0) == 4.0
+
+    def test_attempt_5_is_16_seconds(self) -> None:
+        assert _compute_backoff_seconds(attempt=5, initial=1.0, cap=30.0) == 16.0
+
+    def test_cap_prevents_runaway_backoff(self) -> None:
+        """High attempt number must not exceed the cap."""
+        assert _compute_backoff_seconds(attempt=20, initial=1.0, cap=30.0) == 30.0
+
+    def test_custom_initial_scales_correctly(self) -> None:
+        """A 0.5s initial backoff should give 0.5, 1, 2, 4, 8 ..."""
+        assert _compute_backoff_seconds(attempt=1, initial=0.5, cap=30.0) == 0.5
+        assert _compute_backoff_seconds(attempt=4, initial=0.5, cap=30.0) == 4.0
+
+
+# ---------------------------------------------------------------------------
+# verify_redis_connection retry tests (B2)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyRedisConnectionRetry:
+    """
+    Transient-failure retry inside verify_redis_connection.
+
+    Contract:
+      * Transient failures (TimeoutError, network-category ConnectionError)
+        retry up to max_retries with exponential backoff.
+      * Permanent failures (auth, client_socket_option, tls) do NOT retry —
+        they fail fast so the operator sees the real root cause immediately.
+      * The sleep callable is injectable so tests run instantly.
+      * Each retry emits a structured redis.ping_retry log with attempt
+        number, delay, and category.
+    """
+
+    def test_transient_timeout_retries_and_succeeds(self) -> None:
+        """Two transient timeouts followed by success → no exception raised."""
+        import redis
+
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = [
+            redis.TimeoutError("transient 1"),
+            redis.TimeoutError("transient 2"),
+            True,
+        ]
+        mock_client.info.return_value = {"redis_version": "7.0.0"}
+        mock_client.config_get.return_value = {"maxmemory-policy": "allkeys-lru"}
+
+        sleep_calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        with patch("redis.Redis.from_url", return_value=mock_client):
+            verify_redis_connection(
+                "redis://localhost:6379/0",
+                max_retries=3,
+                initial_backoff_seconds=1.0,
+                sleep=fake_sleep,
+            )
+
+        assert mock_client.ping.call_count == 3
+        # After attempt 1 and 2, one sleep each: 1s, 2s.
+        assert sleep_calls == [1.0, 2.0]
+
+    def test_auth_failure_does_not_retry(self) -> None:
+        """
+        Authentication errors are permanent — retrying will never succeed
+        and delays operator visibility into the real problem.
+        """
+        import redis
+
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = redis.AuthenticationError("wrong password")
+
+        sleep_calls: list[float] = []
+
+        with patch("redis.Redis.from_url", return_value=mock_client):
+            with pytest.raises(ConfigError) as excinfo:
+                verify_redis_connection(
+                    "redis://bad:creds@localhost:6379/0",
+                    max_retries=5,
+                    initial_backoff_seconds=1.0,
+                    sleep=sleep_calls.append,
+                )
+
+        # Only a single attempt — no retries.
+        assert mock_client.ping.call_count == 1
+        assert sleep_calls == []
+        message = str(excinfo.value).lower()
+        assert "auth" in message
+
+    def test_client_socket_option_defect_does_not_retry(self) -> None:
+        """
+        EINVAL from setsockopt is a permanent client-side bug. Retrying
+        will just loop forever with the same kernel rejection.
+        """
+        import redis
+
+        root = OSError(errno.EINVAL, "Invalid argument")
+        wrapped = redis.ConnectionError("socket option setting failed")
+        wrapped.__cause__ = root
+
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = wrapped
+
+        sleep_calls: list[float] = []
+
+        with patch("redis.Redis.from_url", return_value=mock_client):
+            with pytest.raises(ConfigError) as excinfo:
+                verify_redis_connection(
+                    "redis://localhost:6379/0",
+                    max_retries=5,
+                    initial_backoff_seconds=1.0,
+                    sleep=sleep_calls.append,
+                )
+
+        assert mock_client.ping.call_count == 1
+        assert sleep_calls == []
+        assert "client-side" in str(excinfo.value).lower()
+
+    def test_transient_failures_exhaust_retry_budget(self) -> None:
+        """
+        If every attempt fails with a transient error, we raise after
+        max_retries attempts with a message that names attempt count.
+        """
+        import redis
+
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = redis.TimeoutError("always times out")
+
+        sleep_calls: list[float] = []
+
+        with patch("redis.Redis.from_url", return_value=mock_client):
+            with pytest.raises(ConfigError) as excinfo:
+                verify_redis_connection(
+                    "redis://localhost:6379/0",
+                    max_retries=3,
+                    initial_backoff_seconds=1.0,
+                    sleep=sleep_calls.append,
+                )
+
+        assert mock_client.ping.call_count == 3
+        # Retries happen between attempts, so two sleeps for three attempts.
+        assert sleep_calls == [1.0, 2.0]
+        message = str(excinfo.value).lower()
+        assert "3 attempts" in message or "after" in message
+
+    def test_max_retries_one_means_no_retry(self) -> None:
+        """max_retries=1 is the baseline 'try once' behaviour (no retries)."""
+        import redis
+
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = redis.TimeoutError("one-shot")
+
+        sleep_calls: list[float] = []
+
+        with patch("redis.Redis.from_url", return_value=mock_client):
+            with pytest.raises(ConfigError):
+                verify_redis_connection(
+                    "redis://localhost:6379/0",
+                    max_retries=1,
+                    sleep=sleep_calls.append,
+                )
+
+        assert mock_client.ping.call_count == 1
+        assert sleep_calls == []
+

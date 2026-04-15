@@ -46,7 +46,8 @@ import errno
 import re
 import socket
 import ssl
-from typing import Any
+import time
+from typing import Any, Callable
 
 import structlog
 
@@ -219,12 +220,77 @@ def _classify_connection_error(exc: BaseException) -> tuple[str, str]:
     )
 
 
-def verify_redis_connection(redis_url: str, timeout_seconds: float = 5.0) -> None:
+# ---------------------------------------------------------------------------
+# Retry budget for transient Redis health-check failures (B2).
+#
+# Rationale:
+#   * A brief network hiccup or Redis server GC pause should not abort API
+#     startup — retrying a few times with backoff is appropriate.
+#   * A permanent error (auth failure, client-side socket option defect,
+#     TLS mismatch) MUST NOT retry. Retries just delay operator visibility
+#     into the real root cause; see D2 for the classification logic.
+#   * The schedule is 1s, 2s, 4s, 8s, 16s (doubling) with a hard upper
+#     cap so a misconfigured max_retries cannot produce a multi-minute
+#     sleep that makes the API startup appear hung.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MAX_RETRIES: int = 5
+_DEFAULT_INITIAL_BACKOFF_SECONDS: float = 1.0
+_BACKOFF_CAP_SECONDS: float = 30.0
+
+# Categories that must NOT be retried (see _classify_connection_error).
+# Retrying these only delays operator visibility into the real defect.
+_NON_RETRYABLE_CATEGORIES: frozenset[str] = frozenset(
+    {"client_socket_option", "tls", "auth"}
+)
+
+
+def _compute_backoff_seconds(attempt: int, initial: float, cap: float) -> float:
+    """
+    Compute the exponential backoff delay for a given retry attempt.
+
+    Formula: ``min(initial * 2**(attempt-1), cap)``.
+
+    Args:
+        attempt: 1-based attempt number (1 for the first retry after the
+                 initial try, 2 for the second retry, and so on).
+        initial: Base delay in seconds for attempt=1 (typically 1.0).
+        cap: Maximum delay in seconds. Prevents runaway backoff when
+             max_retries is large.
+
+    Returns:
+        The delay in seconds to wait before the next attempt.
+
+    Example:
+        >>> _compute_backoff_seconds(attempt=1, initial=1.0, cap=30.0)
+        1.0
+        >>> _compute_backoff_seconds(attempt=4, initial=1.0, cap=30.0)
+        8.0
+        >>> _compute_backoff_seconds(attempt=20, initial=1.0, cap=30.0)
+        30.0
+    """
+    if attempt < 1:
+        raise ValueError(f"attempt must be >= 1, got {attempt}")
+    delay = initial * (2 ** (attempt - 1))
+    return min(delay, cap)
+
+
+def verify_redis_connection(
+    redis_url: str,
+    timeout_seconds: float = 5.0,
+    max_retries: int = _DEFAULT_MAX_RETRIES,
+    initial_backoff_seconds: float = _DEFAULT_INITIAL_BACKOFF_SECONDS,
+    sleep: Callable[[float], None] | None = None,
+) -> None:
     """
     Verify Redis is available and meets production requirements.
 
     Performs the following checks:
-    1. Connection: Attempts PING and verifies Redis responds.
+    1. Connection: Attempts PING and verifies Redis responds. Transient
+       failures (timeout, network) retry with exponential backoff up to
+       ``max_retries`` attempts. Permanent failures (auth, client-side
+       socket-option defects, TLS handshake failure) fail fast without
+       retry — retrying them just hides the real root cause.
     2. Version: Verifies Redis >= 6.0 (for ACL support and stability).
     3. Configuration: Checks maxmemory-policy is set (warns if missing).
     4. Cleanup: Properly closes connection after verification.
@@ -236,20 +302,32 @@ def verify_redis_connection(redis_url: str, timeout_seconds: float = 5.0) -> Non
         redis_url: Redis connection URL (e.g., redis://redis:6379/0).
                    Supports TLS (rediss://), authentication, and DB selection.
         timeout_seconds: Maximum time to wait for each operation (default: 5.0).
+        max_retries: Maximum number of PING attempts for transient failures
+                     (default: 5). 1 means "no retries". Auth errors and
+                     client-side defects never retry regardless of this value.
+        initial_backoff_seconds: Base delay before the first retry
+                     (default: 1.0). Each subsequent retry doubles the delay,
+                     capped at 30 seconds.
+        sleep: Injectable sleep callable for tests. Defaults to ``time.sleep``
+               when None. Signature: ``sleep(seconds: float) -> None``.
 
     Returns:
         None on success.
 
     Raises:
-        ConfigError: If Redis is unreachable, version is too old,
-                     or any required configuration is missing.
+        ConfigError: If Redis is unreachable after exhausting retries,
+                     version is too old, any required configuration is
+                     missing, or a permanent (non-retryable) error occurred.
         ImportError: If redis library is not installed (should be caught
                      at container build time).
 
     Example:
         verify_redis_connection("redis://redis-cluster:6379/0", timeout_seconds=3.0)
-        # Raises ConfigError if Redis is unavailable
+        # Raises ConfigError if Redis is unavailable after 5 retries
     """
+    if max_retries < 1:
+        raise ValueError(f"max_retries must be >= 1, got {max_retries}")
+    _sleep: Callable[[float], None] = sleep if sleep is not None else time.sleep
     try:
         import redis
     except ImportError as exc:
@@ -272,72 +350,188 @@ def verify_redis_connection(redis_url: str, timeout_seconds: float = 5.0) -> Non
             socket_keepalive_options=_build_keepalive_options(),
         )
 
-        # Check 1: Connectivity via PING
-        try:
-            pong = client.ping()
-            if pong is not True:
-                raise ConfigError(f"Redis PING failed: expected True, got {pong}")
-            logger.debug(
-                "redis.ping_success",
-                component="redis_health",
-            )
-        except ConfigError:
-            # Re-raise our ConfigError as-is
-            raise
-        except (redis.ConnectionError, redis.TimeoutError) as exc:
-            # Handle redis-specific exceptions. TimeoutError is always a
-            # server-side / network-side availability concern: the socket
-            # was set up, redis-py tried PING, and no reply came back in
-            # the configured window. We do not classify it — the hint is
-            # unambiguous.
-            if isinstance(exc, redis.TimeoutError):
-                logger.warning(
-                    "redis.ping_timeout",
+        # Check 1: Connectivity via PING — with transient-failure retry (B2).
+        #
+        # Loop invariant: exactly one PING is attempted per loop iteration.
+        # On success the loop breaks. On a permanent failure (auth, client
+        # socket option defect, TLS) we raise immediately. On a transient
+        # failure we either sleep and retry, or (if the retry budget is
+        # exhausted) raise with a message naming the attempt count.
+        last_category: str = "unknown"
+        last_diagnostic: str = ""
+        last_exc: BaseException | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                pong = client.ping()
+                if pong is not True:
+                    raise ConfigError(
+                        f"Redis PING failed: expected True, got {pong}"
+                    )
+                logger.debug(
+                    "redis.ping_success",
                     component="redis_health",
-                    category="timeout",
+                    attempt=attempt,
+                )
+                break  # Success — exit retry loop.
+            except ConfigError:
+                # Re-raise our ConfigError (bad PING response) — this is not
+                # a transient condition; the server is responding with the
+                # wrong value and retries will not help.
+                raise
+            except redis.AuthenticationError as exc:
+                # Permanent: credentials are wrong. Do not retry.
+                logger.warning(
+                    "redis.auth_failed",
+                    component="redis_health",
+                    category="auth",
                     redis_url=_strip_credentials(redis_url),
-                    timeout_seconds=timeout_seconds,
+                    underlying_error=str(exc),
+                    attempt=attempt,
                 )
                 raise ConfigError(
-                    f"Redis connection timed out after {timeout_seconds}s at "
-                    f"{_strip_credentials(redis_url)}. "
-                    f"Error: {str(exc)}. "
-                    f"Increase timeout_seconds or check Redis availability."
+                    f"Redis authentication failed at {_strip_credentials(redis_url)}. "
+                    f"Category: auth. "
+                    f"Underlying error: {exc!s}. "
+                    "Verify the credentials in REDIS_URL and any Redis ACL "
+                    "configuration on the server. This error is not retried."
                 ) from exc
-            # Classify ConnectionError so client-side defects (e.g. EINVAL
-            # from setsockopt) do not masquerade as server-availability
-            # problems. See D2 in docs/remediation/2026-04-15-minitux-install-failure.md.
-            category, diagnostic = _classify_connection_error(exc)
-            logger.warning(
-                "redis.ping_failed",
-                component="redis_health",
-                category=category,
-                redis_url=_strip_credentials(redis_url),
-                underlying_error=str(exc),
-            )
+            except (redis.ConnectionError, redis.TimeoutError) as exc:
+                # Redis-library errors. Classify to decide retry vs fail-fast.
+                if isinstance(exc, redis.TimeoutError):
+                    category, diagnostic = (
+                        "timeout",
+                        (
+                            f"Redis PING timed out after {timeout_seconds}s. "
+                            "The socket connected but the server did not reply "
+                            "in time. Increase timeout_seconds or check Redis "
+                            "load and availability."
+                        ),
+                    )
+                else:
+                    category, diagnostic = _classify_connection_error(exc)
+                last_category, last_diagnostic, last_exc = category, diagnostic, exc
+
+                if category in _NON_RETRYABLE_CATEGORIES:
+                    logger.warning(
+                        "redis.ping_failed_permanent",
+                        component="redis_health",
+                        category=category,
+                        redis_url=_strip_credentials(redis_url),
+                        underlying_error=str(exc),
+                        attempt=attempt,
+                    )
+                    raise ConfigError(
+                        f"Redis health check failed at {_strip_credentials(redis_url)}. "
+                        f"Category: {category}. "
+                        f"Underlying error: {exc!s}. "
+                        f"{diagnostic} "
+                        "This error is not retried."
+                    ) from exc
+
+                # Transient — retry if we have budget left.
+                if attempt < max_retries:
+                    delay = _compute_backoff_seconds(
+                        attempt=attempt,
+                        initial=initial_backoff_seconds,
+                        cap=_BACKOFF_CAP_SECONDS,
+                    )
+                    logger.warning(
+                        "redis.ping_retry",
+                        component="redis_health",
+                        category=category,
+                        redis_url=_strip_credentials(redis_url),
+                        underlying_error=str(exc),
+                        attempt=attempt,
+                        max_retries=max_retries,
+                        delay_seconds=delay,
+                    )
+                    _sleep(delay)
+                    continue
+                # Retry budget exhausted.
+                logger.warning(
+                    "redis.ping_exhausted",
+                    component="redis_health",
+                    category=category,
+                    redis_url=_strip_credentials(redis_url),
+                    underlying_error=str(exc),
+                    attempts=attempt,
+                )
+                raise ConfigError(
+                    f"Redis health check failed at {_strip_credentials(redis_url)} "
+                    f"after {attempt} attempts. "
+                    f"Category: {category}. "
+                    f"Underlying error: {exc!s}. "
+                    f"{diagnostic}"
+                ) from exc
+            except Exception as exc:
+                # Any other exception — classify so socket-option defects
+                # raised as plain OSError are still diagnosed correctly.
+                category, diagnostic = _classify_connection_error(exc)
+                last_category, last_diagnostic, last_exc = category, diagnostic, exc
+
+                if category in _NON_RETRYABLE_CATEGORIES:
+                    logger.warning(
+                        "redis.ping_failed_permanent",
+                        component="redis_health",
+                        category=category,
+                        redis_url=_strip_credentials(redis_url),
+                        underlying_error=str(exc),
+                        attempt=attempt,
+                    )
+                    raise ConfigError(
+                        f"Redis health check failed at {_strip_credentials(redis_url)}. "
+                        f"Category: {category}. "
+                        f"Underlying error: {exc!s}. "
+                        f"{diagnostic} "
+                        "This error is not retried."
+                    ) from exc
+
+                if attempt < max_retries:
+                    delay = _compute_backoff_seconds(
+                        attempt=attempt,
+                        initial=initial_backoff_seconds,
+                        cap=_BACKOFF_CAP_SECONDS,
+                    )
+                    logger.warning(
+                        "redis.ping_retry",
+                        component="redis_health",
+                        category=category,
+                        redis_url=_strip_credentials(redis_url),
+                        underlying_error=str(exc),
+                        attempt=attempt,
+                        max_retries=max_retries,
+                        delay_seconds=delay,
+                    )
+                    _sleep(delay)
+                    continue
+                logger.warning(
+                    "redis.ping_exhausted",
+                    component="redis_health",
+                    category=category,
+                    redis_url=_strip_credentials(redis_url),
+                    underlying_error=str(exc),
+                    attempts=attempt,
+                )
+                raise ConfigError(
+                    f"Redis health check failed at {_strip_credentials(redis_url)} "
+                    f"after {attempt} attempts. "
+                    f"Category: {category}. "
+                    f"Underlying error: {exc!s}. "
+                    f"{diagnostic}"
+                ) from exc
+        else:
+            # for-else runs when the loop completes without break — i.e. we
+            # never succeeded. Defensive: this path should be unreachable
+            # because the final attempt's exception handler raises. Kept as
+            # a safety net so we never fall through silently into Check 2
+            # with an un-PINGed client.
             raise ConfigError(
-                f"Redis health check failed at {_strip_credentials(redis_url)}. "
-                f"Category: {category}. "
-                f"Underlying error: {exc!s}. "
-                f"{diagnostic}"
-            ) from exc
-        except Exception as exc:
-            # Any other exception during PING — classify so socket-option
-            # defects raised as plain OSError are still diagnosed correctly.
-            category, diagnostic = _classify_connection_error(exc)
-            logger.warning(
-                "redis.ping_failed",
-                component="redis_health",
-                category=category,
-                redis_url=_strip_credentials(redis_url),
-                underlying_error=str(exc),
+                f"Redis health check failed at {_strip_credentials(redis_url)} "
+                f"after {max_retries} attempts. "
+                f"Category: {last_category}. "
+                f"Underlying error: {last_exc!s}. "
+                f"{last_diagnostic}"
             )
-            raise ConfigError(
-                f"Redis health check failed at {_strip_credentials(redis_url)}. "
-                f"Category: {category}. "
-                f"Underlying error: {exc!s}. "
-                f"{diagnostic}"
-            ) from exc
 
         # Check 2: Version >= 6.0 (ACL support required)
         try:
