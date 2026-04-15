@@ -106,7 +106,7 @@ def upgrade() -> None:
             "format", sa.String(10), nullable=False, server_default="json"
         ),
         sa.Column(
-            "compressed", sa.Boolean, nullable=False, server_default=sa.text("0")
+            "compressed", sa.Boolean, nullable=False, server_default=sa.false()
         ),
         sa.Column("created_by", sa.String(255), nullable=False, server_default=""),
         sa.Column("error_message", sa.Text, nullable=False, server_default=""),

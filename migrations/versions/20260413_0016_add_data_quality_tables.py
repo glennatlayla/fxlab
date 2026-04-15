@@ -43,7 +43,7 @@ def upgrade() -> None:
         sa.Column("detected_at", sa.DateTime, nullable=False, index=True),
         sa.Column("bar_timestamp", sa.DateTime, nullable=True),
         sa.Column("details", sa.JSON, nullable=False, server_default="{}"),
-        sa.Column("resolved", sa.Boolean, nullable=False, server_default="0"),
+        sa.Column("resolved", sa.Boolean, nullable=False, server_default=sa.false()),
         sa.Column("resolved_at", sa.DateTime, nullable=True),
         sa.CheckConstraint(
             "severity IN ('info', 'warning', 'critical')",
