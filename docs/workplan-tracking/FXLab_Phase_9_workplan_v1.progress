@@ -1,0 +1,95 @@
+# FXLab Phase 9 — Progress Tracking
+# Source: FXLab_Phase_9_workplan_v1.md
+# Seeded: 2026-04-13
+# Source milestone count: 14
+# Source milestone IDs: M0, M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13
+
+## Milestone Status
+
+### Track: Research Pipeline
+
+M0 — Research Run Contracts, Interfaces & Storage Schema
+Status: DONE
+Completed: 2026-04-13
+Notes: Contracts (ResearchRunConfig, ResearchRunRecord, ResearchRunResult, DTOs), interface (ResearchRunRepositoryInterface, ResearchRunServiceInterface), mock repository, ORM model, migration 0018, 50 unit tests all passing.
+
+M1 — Research Run Repository (SQL)
+Status: DONE
+Completed: 2026-04-13
+Notes: SqlResearchRunRepository with full ORM↔domain serialisation, 21 integration tests (in-memory SQLite with SAVEPOINT isolation), all passing. Full suite: 4341 passed, 0 failed.
+
+M2 — Research Run Service
+Status: DONE
+Completed: 2026-04-13
+Notes: ResearchRunService implementing full interface (submit_run, get_run, cancel_run, list_runs, get_run_result). 21 unit tests passing. ULID generation, PENDING→QUEUED transition, structured logging.
+
+M3 — Research Run API Routes
+Status: DONE
+Completed: 2026-04-13
+Notes: 5 endpoints (POST/GET/GET-detail/GET-result/DELETE) on /research/runs. Module-level DI pattern. 16 unit tests covering happy paths, auth, validation, 404, 409.
+
+M4 — Research Pipeline Integration
+Status: DONE
+Completed: 2026-04-13
+Notes: 6 integration tests — API round-trip (submit→get→cancel), SQL lifecycle (PENDING→QUEUED→RUNNING→COMPLETED with result), listing, result retrieval. Full suite: 4384 passed, 0 failed, 87.04% coverage.
+
+### Track: Data Export
+
+M5 — Export Job Contracts & Repository
+Status: DONE
+Completed: 2026-04-13
+Notes: ExportRepositoryInterface, MockExportRepository (thread-safe), ExportJob ORM model, migration 0019, SqlExportRepository. 31 unit + 23 integration tests passing.
+
+M6 — Export Service
+Status: DONE
+Completed: 2026-04-13
+Notes: ExportServiceInterface + ExportService implementation. State machine PENDING→PROCESSING→COMPLETE/FAILED. In-memory zip bundle generation (metadata.json, README.txt, type-specific data). 26 unit tests passing.
+
+M7 — Export API Routes
+Status: DONE
+Completed: 2026-04-13
+Notes: 4 endpoints (POST/GET-list/GET-detail/GET-download) on /exports. Binary streaming download with Content-Disposition. 12 unit tests passing. Full suite: 4476 passed, 0 failed, 87.15% coverage.
+
+### Track: Platform Consolidation
+
+M8 — Pydantic V2 Deprecation Cleanup
+Status: DONE
+Completed: 2026-04-13
+Notes: All 15 Pydantic class Config → model_config = ConfigDict(...) across 11 contract files. Zero deprecation warnings.
+
+M9 — SQLAlchemy Legacy API Cleanup
+Status: DONE
+Completed: 2026-04-13
+Notes: Replaced Query.get() with Session.get() in sql_kill_switch_event_repository.py and sql_reconciliation_repository.py. Zero SQLAlchemy deprecation warnings.
+
+M10 — HTTP Status Code Deprecation Cleanup
+Status: DONE
+Completed: 2026-04-13
+Notes: Replaced HTTP_422_UNPROCESSABLE_ENTITY with HTTP_422_UNPROCESSABLE_CONTENT in live.py (3 occurrences) and strategies.py (1 occurrence). Zero HTTP deprecation warnings.
+
+M11 — Test Isolation Hardening
+Status: DONE
+Completed: 2026-04-13
+Notes: Fixed OpenTelemetry/FastAPI isinstance test failure (MRO-based check). Validated with 3 consecutive random orderings via pytest-randomly. Full suite: 4476 passed, 0 failed.
+
+M12 — Coverage Uplift & Dead Code Removal
+Status: DONE
+Completed: 2026-04-13
+Notes: 75 new tests across 7 files targeting 0% coverage modules. Coverage improved 87.15% → 87.81%. Full suite: 4551 passed, 0 failed.
+
+### Track: Acceptance
+
+M13 — Phase 9 Acceptance Test Pack
+Status: DONE
+Completed: 2026-04-13
+Notes: 10 acceptance tests in tests/acceptance/test_phase9_acceptance.py covering all 9 AC scenarios. Full suite: 4561 passed, 0 failed, 87.81% coverage.
+
+---
+
+## Reconciliation
+
+Source milestone count: 14
+Done count: 14
+Open count: 0
+Assertion: 14 == 14 + 0 ✓
+Phase status: COMPLETE

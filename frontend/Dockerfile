@@ -13,9 +13,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy lock files first for better layer caching
+# Copy lock files first for better layer caching.
+# package-lock.json* glob allows the COPY to succeed even if the lockfile
+# is missing. npm ci requires a lockfile; fall back to npm install if absent.
 COPY package.json package-lock.json* ./
-RUN npm ci --prefer-offline
+RUN if [ -f package-lock.json ]; then npm ci --prefer-offline; else npm install --prefer-offline; fi
 
 # Copy source and build
 COPY . .

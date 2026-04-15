@@ -1,0 +1,17 @@
+# ---------------------------------------------------------------------------
+# FXLab — Namespace
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Create the fxlab namespace for all FXLab resources. Apply this first
+#   before any other manifests.
+#
+# Usage:
+#   kubectl apply -f infra/k8s/namespace.yaml
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fxlab
+  labels:
+    app: fxlab
+    part-of: fxlab

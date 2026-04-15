@@ -1,0 +1,149 @@
+# ---------------------------------------------------------------------------
+# FXLab API — Kubernetes Deployment
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Deploy the FXLab API service with production-ready configuration including
+#   health probes, resource limits, rolling updates, and environment injection.
+#
+# Rolling update strategy:
+#   maxSurge=1, maxUnavailable=0 ensures zero-downtime deploys by creating
+#   a new pod before terminating an old one.
+#
+# Probes:
+#   - Liveness (/health): Checks database connectivity. Failure triggers pod
+#     restart after 3 consecutive failures (30s total).
+#   - Readiness (/ready): Comprehensive dependency check. Failure removes
+#     pod from load balancer without restarting.
+#   - Startup: Allows 120s for initial startup (migrations, connection pool).
+#
+# Resource limits:
+#   CPU 500m request / 1000m limit, Memory 256Mi request / 512Mi limit.
+#   Prevents unbounded resource consumption per pod.
+#
+# Environment:
+#   Non-secret config from ConfigMap (api-config), secrets from Secret
+#   (api-secrets). Both must exist before deploying.
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-deployment.yaml
+#   kubectl rollout status deployment/fxlab-api -n fxlab
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fxlab-api
+  namespace: fxlab
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: fxlab-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Create a new pod before terminating old ones — zero-downtime deploys.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: fxlab-api
+        component: api
+        part-of: fxlab
+    spec:
+      serviceAccountName: fxlab-api
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: fxlab-api
+          image: fxlab-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          # -----------------------------------------------------------
+          # Startup probe — allows up to 120s for initial boot
+          # (migrations, connection pool warmup, broker connect).
+          # Once startup succeeds, liveness/readiness take over.
+          # -----------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 3
+          # -----------------------------------------------------------
+          # Liveness — lightweight DB check. Failure = restart pod.
+          # -----------------------------------------------------------
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          # -----------------------------------------------------------
+          # Readiness — comprehensive dependency check (DB + Redis +
+          # brokers). Failure = remove from Service endpoints (no
+          # traffic routed), but pod is NOT restarted.
+          # -----------------------------------------------------------
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 2
+            successThreshold: 1
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          envFrom:
+            - configMapRef:
+                name: api-config
+            - secretRef:
+                name: api-secrets
+          env:
+            # Override ENVIRONMENT so the app knows it's running in
+            # production — disables test bypass tokens, enables strict
+            # secret validation, etc.
+            - name: ENVIRONMENT
+              value: production
+            # Pod identity for structured logging and diagnostics.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          # Graceful shutdown: SIGTERM → drain middleware stops accepting
+          # → in-flight requests complete → lifecycle manager reconciles
+          # → process exits. terminationGracePeriodSeconds (45s) must
+          # exceed DRAIN_TIMEOUT_S (default 30s).
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+      # Spread pods across nodes for fault tolerance.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: fxlab-api

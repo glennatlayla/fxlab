@@ -1,0 +1,132 @@
+# ---------------------------------------------------------------------------
+# FXLab API — Staging Deployment
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Deploy the FXLab API to the staging environment with MinIO artifact
+#   storage backend, relaxed resource limits, and staging-specific config.
+#
+# Differences from production (api-deployment-production.yaml):
+#   - Single replica (cost reduction, acceptable for staging).
+#   - Lower resource limits (256m CPU / 256Mi memory).
+#   - ENVIRONMENT=staging enables debug logging and test bypass tokens.
+#   - ARTIFACT_STORAGE_BACKEND=minio wired to staging MinIO instance.
+#   - No topology spread constraints (single replica).
+#
+# MinIO dependency:
+#   Staging MinIO must be deployed and accessible at the endpoint specified
+#   in the staging ConfigMap. See infra/compose/docker-compose.staging.yaml.
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-deployment-staging.yaml
+#   kubectl rollout status deployment/fxlab-api -n fxlab-staging
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fxlab-api
+  namespace: fxlab-staging
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+    environment: staging
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: fxlab-api
+      environment: staging
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: fxlab-api
+        component: api
+        part-of: fxlab
+        environment: staging
+    spec:
+      serviceAccountName: fxlab-api
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: fxlab-api
+          image: fxlab-api:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          # -----------------------------------------------------------
+          # Startup probe — allows up to 60s for initial boot.
+          # Staging is more lenient than production.
+          # -----------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 5
+          # -----------------------------------------------------------
+          # Liveness — lightweight DB check. Failure = restart pod.
+          # -----------------------------------------------------------
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          # -----------------------------------------------------------
+          # Readiness — comprehensive dependency check.
+          # -----------------------------------------------------------
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          envFrom:
+            - configMapRef:
+                name: api-config-staging
+            - secretRef:
+                name: api-secrets-staging
+          env:
+            - name: ENVIRONMENT
+              value: staging
+            # -- Artifact storage: MinIO backend for staging --
+            - name: ARTIFACT_STORAGE_BACKEND
+              value: minio
+            - name: MINIO_ENDPOINT
+              value: minio.fxlab-staging.svc.cluster.local:9000
+            - name: MINIO_SECURE
+              value: "false"
+            # MINIO_ACCESS_KEY and MINIO_SECRET_KEY come from api-secrets-staging
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 3"]

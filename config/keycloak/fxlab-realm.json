@@ -1,0 +1,294 @@
+{
+  "realm": "fxlab",
+  "enabled": true,
+  "displayName": "FXLab Trading Platform",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "accessCodeLifespan": 60,
+  "accessCodeLifespanUserAction": 300,
+  "accessCodeLifespanLogin": 1800,
+  "defaultSignatureAlgorithm": "RS256",
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Full platform access — strategy management, approvals, overrides, audit, secret rotation",
+        "composite": false
+      },
+      {
+        "name": "operator",
+        "description": "Strategy and run management — submit promotions, request overrides, view feeds/exports",
+        "composite": false
+      },
+      {
+        "name": "reviewer",
+        "description": "Approval authority — approve promotions and overrides, view feeds/exports/audit",
+        "composite": false
+      },
+      {
+        "name": "viewer",
+        "description": "Read-only access — exports, feeds, operator dashboard, audit log",
+        "composite": false
+      }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "strategies:write",
+      "description": "Create and update strategy definitions",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Create and update strategies"
+      },
+      "protocolMappers": [
+        {
+          "name": "strategies:write-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": {
+            "claim.name": "scope",
+            "claim.value": "strategies:write",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "runs:write",
+      "description": "Submit and manage backtest/optimization runs",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Submit and manage runs"
+      }
+    },
+    {
+      "name": "promotions:request",
+      "description": "Submit promotion requests for strategy candidates",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Request strategy promotions"
+      }
+    },
+    {
+      "name": "approvals:write",
+      "description": "Approve or reject promotion and governance requests",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Approve or reject requests"
+      }
+    },
+    {
+      "name": "overrides:request",
+      "description": "Submit governance override requests",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Request governance overrides"
+      }
+    },
+    {
+      "name": "overrides:approve",
+      "description": "Approve governance override requests",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Approve governance overrides"
+      }
+    },
+    {
+      "name": "exports:read",
+      "description": "View and download data exports",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "View data exports"
+      }
+    },
+    {
+      "name": "feeds:read",
+      "description": "View market data feed status and health",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "View feed status"
+      }
+    },
+    {
+      "name": "operator:read",
+      "description": "View operator dashboard and system metrics",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "View operator dashboard"
+      }
+    },
+    {
+      "name": "audit:read",
+      "description": "View audit log and compliance records",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "View audit log"
+      }
+    },
+    {
+      "name": "admin:manage",
+      "description": "Admin panel access — secret rotation, user management",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Manage admin panel"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "fxlab-api",
+      "name": "FXLab API (Confidential)",
+      "description": "Backend API service — validates tokens and proxies admin requests to Keycloak",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "strategies:write",
+        "runs:write",
+        "promotions:request",
+        "approvals:write",
+        "overrides:request",
+        "overrides:approve",
+        "exports:read",
+        "feeds:read",
+        "operator:read",
+        "audit:read",
+        "admin:manage"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "fxlab-web",
+      "name": "FXLab Web (Public PKCE)",
+      "description": "Frontend SPA — uses Authorization Code flow with PKCE",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "rootUrl": "http://localhost:3000",
+      "baseUrl": "/",
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "https://app.fxlab.io/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "https://app.fxlab.io"
+      ],
+      "defaultClientScopes": [
+        "strategies:write",
+        "runs:write",
+        "promotions:request",
+        "approvals:write",
+        "overrides:request",
+        "overrides:approve",
+        "exports:read",
+        "feeds:read",
+        "operator:read",
+        "audit:read"
+      ],
+      "optionalClientScopes": [
+        "admin:manage"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*##https://app.fxlab.io/*"
+      }
+    }
+  ],
+  "scopeMappings": [
+    {
+      "clientScope": "strategies:write",
+      "roles": ["admin", "operator"]
+    },
+    {
+      "clientScope": "runs:write",
+      "roles": ["admin", "operator"]
+    },
+    {
+      "clientScope": "promotions:request",
+      "roles": ["admin", "operator"]
+    },
+    {
+      "clientScope": "approvals:write",
+      "roles": ["admin", "reviewer"]
+    },
+    {
+      "clientScope": "overrides:request",
+      "roles": ["admin", "operator"]
+    },
+    {
+      "clientScope": "overrides:approve",
+      "roles": ["admin", "reviewer"]
+    },
+    {
+      "clientScope": "exports:read",
+      "roles": ["admin", "operator", "reviewer", "viewer"]
+    },
+    {
+      "clientScope": "feeds:read",
+      "roles": ["admin", "operator", "reviewer", "viewer"]
+    },
+    {
+      "clientScope": "operator:read",
+      "roles": ["admin", "operator", "reviewer", "viewer"]
+    },
+    {
+      "clientScope": "audit:read",
+      "roles": ["admin", "operator", "reviewer", "viewer"]
+    },
+    {
+      "clientScope": "admin:manage",
+      "roles": ["admin"]
+    }
+  ],
+  "users": []
+}

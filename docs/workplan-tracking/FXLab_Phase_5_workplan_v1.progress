@@ -1,0 +1,376 @@
+# FXLab Phase 5 — Progress Tracking
+# Source: FXLab_Phase_5_workplan_v1.md
+# Seeded: 2026-04-11
+# Source milestone count: 18
+# Source milestone IDs: M0, M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14, M15, M16, M17
+
+## Milestone Status
+
+### Track: Execution Persistence
+
+M0 — Order, Fill, and Position SQL Repositories
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-02, F-09. Prerequisite for all other tracks.
+Deliverables:
+  - 3 interfaces: OrderRepositoryInterface, OrderFillRepositoryInterface, PositionRepositoryInterface
+  - 3 SQL repositories: SqlOrderRepository, SqlOrderFillRepository, SqlPositionRepository
+  - 3 mock repositories: MockOrderRepository, MockOrderFillRepository, MockPositionRepository
+  - 37 unit tests (all passing)
+  - 10 integration tests (all passing, SAVEPOINT isolation)
+  - §0 compliance verified, lint/format clean
+
+M1 — Execution Event, Kill Switch Event, and Reconciliation SQL Repositories
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-02. Depends on M0 patterns.
+Deliverables:
+  - 2 new interfaces: ExecutionEventRepositoryInterface, KillSwitchEventRepositoryInterface
+  - 4 SQL repositories: SqlExecutionEventRepository, SqlKillSwitchEventRepository, SqlReconciliationRepository, SqlRiskEventRepository
+  - 2 new mock repositories: MockExecutionEventRepository, MockKillSwitchEventRepository
+  - 1 migration: 20260411_0011_add_risk_events_table.py (RiskEvent ORM model added to models.py)
+  - 32 unit tests (all passing)
+  - 8 integration tests (all passing, SAVEPOINT isolation)
+  - §0 compliance verified, lint/format clean
+
+M2 — Service Layer Persistence Refactor
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-02, F-03. Depends on M0, M1. Refactors all 7 services.
+Deliverables:
+  - risk_gate_service: DB-backed limits via DeploymentRepository.update_risk_limits()
+  - kill_switch_service: DB-backed state via KillSwitchEventRepository (prev session)
+  - paper_execution_service: threading.Lock on adapter registry
+  - shadow_execution_service: threading.Lock on adapter registry
+  - execution_analysis_service: threading.Lock + optional ExecutionEventRepository
+  - drill_service: threading.Lock + optional ExecutionEventRepository
+  - reconciliation_service: threading.Lock + optional Order/Position repos
+  - DeploymentRepositoryInterface.update_risk_limits() added to interface, SQL repo, mock
+  - All acceptance tests updated for new constructor signatures
+  - 2080 tests passing, 14 pre-existing failures (M12/M13), coverage 84.43%
+  - §0 compliance verified: zero unprotected durable-state dicts
+
+M3 — Redis-Backed Login Tracking and Session State
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-13. Can parallel with M2.
+Deliverables:
+  - RedisLoginAttemptTracker: already existed, verified correct (sorted sets, fail-closed)
+  - Factory _create_login_tracker: hardened for production (RuntimeError if Redis unavailable)
+  - Factory mirrors rate_limit._create_backend pattern: REDIS_URL required in production
+  - Stale docstring updated to reflect Redis backend availability
+  - 25 new unit tests: tracker operations, fail-closed, factory, multi-worker sharing
+  - Rate limiter middleware verified: RedisRateLimitBackend auto-selects when REDIS_URL configured
+  - 2105 tests passing, 14 pre-existing failures (M12/M13), coverage 84.74%
+  - §0 compliance: login_attempt_tracker._store protected by Lock (in-memory), Redis ops atomic (Redis)
+
+### Track: Broker Integration
+
+M4 — Broker Adapter Registry and Timeout Infrastructure
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-06. Depends on M0-M3. Prerequisite for M5, M6.
+Deliverables:
+  - BrokerTimeoutConfig: frozen dataclass with from_env(), 5 timeout params, env var overrides
+  - BrokerAdapterInterface: extended with connect(), disconnect(), get_timeout_config()
+  - BrokerAdapterRegistry: thread-safe register/deregister/get/list, lifecycle hooks
+  - MockBrokerAdapter: updated with lifecycle methods + timeout_config param
+  - PaperBrokerAdapter: updated with lifecycle methods + timeout_config param
+  - ShadowBrokerAdapter: updated with lifecycle methods + timeout_config param
+  - 22 timeout config tests, 23 registry tests (incl. thread safety, lifecycle)
+  - 2150 tests passing, 14 pre-existing failures (M12/M13), coverage 84.79%
+  - Lint clean, all M4 files formatted
+
+M5 — Alpaca Broker Adapter (REST)
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-01. Depends on M4. First real broker.
+Deliverables:
+  - AlpacaConfig: Pydantic model with paper/live factories, URL properties, auth_headers
+  - AlpacaBrokerAdapter: full BrokerAdapterInterface implementation (12 methods)
+    - httpx.Client with BrokerTimeoutConfig-driven timeouts
+    - Retry on 429/5xx with exponential backoff (TaskRetryConfig)
+    - Error mapping: 401/403→AuthError, 404→NotFoundError, 429/5xx→TransientError
+    - Alpaca status mapping: 17 Alpaca states → 7 OrderStatus values
+    - connect() validates via GET /v2/clock, disconnect() closes httpx client
+    - Thread-safe diagnostics tracking (error_count_1h, last_error, orders_submitted/filled)
+  - 46 unit tests (all passing, httpx.MockTransport — no real API calls)
+  - 7 integration tests (skipped unless ALPACA_API_KEY set, paper trading only)
+  - Python 3.10 ISO 8601 'Z' suffix compatibility fix in _parse_timestamp()
+  - §0 compliance verified, lint/format clean
+
+M6 — Real-Time Market Data and Order Update Streaming
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-08. Depends on M5.
+Deliverables:
+  - PriceUpdate contract added to libs/contracts/execution.py
+  - MarketStreamInterface: abstract interface for market data streams
+  - OrderStreamInterface: abstract interface for order update streams
+  - AlpacaMarketStream: WebSocket client for wss://stream.data.alpaca.markets
+    - Daemon thread, auth, subscribe/unsubscribe, callback dispatch
+    - Exponential backoff reconnect (1s → 16s), heartbeat monitoring
+    - PriceUpdate normalization, thread-safe state (Lock on all shared data)
+  - AlpacaOrderStream: WebSocket client for wss://paper-api.alpaca.markets/stream
+    - Daemon thread, auth, trade_updates listener
+    - OrderEvent mapping with ULID event_id, callback dispatch
+    - Exponential backoff reconnect, thread-safe state
+  - StreamManager: thread-safe lifecycle manager for streams per deployment
+    - register/start/stop/stop_all, price/order callbacks, diagnostics
+  - AlpacaConfig extended with data_feed, market_data_stream_url, trade_updates_stream_url
+  - 83 unit tests (43 market stream, 21 order stream, 19 stream manager + 4 integration)
+  - 4 integration tests (skipped unless ALPACA_API_KEY set)
+  - §0 compliance verified, lint/format clean
+
+### Track: Safety Hardening
+
+M7 — Circuit Breaker for External Service Calls
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-05. Depends on M0-M3.
+Deliverables:
+  - CircuitOpenError added to libs/contracts/errors.py (subclass of ExternalServiceError)
+  - CircuitBreaker: thread-safe state machine (CLOSED/OPEN/HALF_OPEN)
+    - Configurable thresholds (failure_threshold, recovery_timeout_s, half_open_max_calls)
+    - Optional Redis-backed state persistence with graceful fallback
+    - Error classification: TransientError/ExternalServiceError counted, AuthError/NotFoundError pass-through
+    - Metrics: trip_count, recovery_count, current_state, failure_count
+  - ResilientBrokerAdapter: decorator wrapping any BrokerAdapterInterface
+    - Trading methods go through circuit breaker, lifecycle methods bypass
+    - Diagnostics merge inner adapter + circuit breaker metrics
+  - 32 circuit breaker unit tests + 24 resilient adapter unit tests (all passing)
+  - §0 compliance verified, lint/format clean
+
+M8 — Kill Switch Retry, Verification, and Escalation
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-04. Depends on M2 (persisted kill switch).
+Deliverables:
+  - CancellationResult / FlattenResult dataclasses for structured outcome tracking
+  - _cancel_open_orders(): retry with exponential backoff (3 attempts), post-cancel verification
+  - _flatten_positions(): submit close orders, poll every 1s for up to 10s, CRITICAL log on timeout
+  - activate_kill_switch(): persists to DB BEFORE cancellation, escalation on failure
+  - verify_halt(): checks residual orders, positions, and exposure
+  - KillSwitchServiceInterface extended with verify_halt() abstract method
+  - 18 unit tests (all passing): retry, permanent error, exhaustion, verification, escalation, flatten polling/timeout, verify_halt, fail-closed persistence, full workflow, partial failure
+  - 2087 tests passing, 8 pre-existing failures (M12/M13), coverage 83.43%
+  - §0 compliance verified, lint/format clean
+
+M9 — Emergency Posture Verification Loop
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-07. Depends on M8.
+Deliverables:
+  - EmergencyPostureVerification contract in libs/contracts/safety.py
+    - verified, positions_closed, positions_failed, residual_exposure_usd, timeout_s, verification_duration_ms
+  - EmergencyPostureDecision extended with optional verification field
+  - KillSwitchService._verify_posture_execution(): post-execution verification loop
+    - flatten_all: polls positions every 1s for up to verification_timeout_s (default 30s)
+    - cancel_open: polls open orders every 1s until none remain
+    - Calculates residual_exposure_usd = sum(abs(market_value)) for failed positions
+    - Logs CRITICAL with operation=emergency_posture_residual_exposure on residual
+  - KillSwitchService.__init__ extended with verification_timeout_s parameter (default 30)
+  - KillSwitchServiceInterface docstring updated with verification behavior
+  - 13 unit tests (all passing): all-close success, cancel-open verification, partial close, residual exposure calc, CRITICAL log, configurable timeout, default timeout, hold/custom skip, contract frozen/defaults/data, duration tracking
+  - 2100 tests passing, 8 pre-existing failures (M12/M13), coverage 83.46%
+  - §0 compliance verified, lint/format clean
+
+M10 — Structural Risk Gate Enforcement
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-10. Depends on M2 (risk limits in DB).
+Deliverables:
+  - RiskGateRejectionError: ValidationError subclass with check_name, severity, reason, deployment_id, order_client_id, current_value, limit_value
+  - RiskGateInterface.enforce_order(): abstract method — raises RiskGateRejectionError on failure, returns silently on success
+  - RiskGateService.enforce_order(): calls check_order(), persists RiskEvent for both pass/fail, raises on failure
+  - PaperExecutionService: risk_gate now mandatory (not optional), uses enforce_order() instead of check_order()
+  - ShadowExecutionService: risk_gate now mandatory (not optional), uses enforce_order() instead of check_order()
+  - check_order() preserved for backward compatibility (returns result, does not raise)
+  - 13 new M10 unit tests (all passing): error class contract, enforce_order success/failure/details/persistence, paper/shadow integration, backward compat
+  - 6 existing test files updated with mandatory risk_gate fixtures
+  - 2 test_risk_gate_integration.py assertions fixed for new error message format
+  - 2379 tests passing, 14 pre-existing failures (M12/M13), coverage 84.67%
+  - §0 compliance verified, lint/format clean
+
+### Track: Operational Maturity
+
+M11 — Graceful Shutdown and Startup Recovery
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-11. Depends on M2 (persisted state), M4 (adapter lifecycle).
+Deliverables:
+  - DrainMiddleware: ASGI middleware for graceful request draining
+    - Atomic in-flight request counter (_AtomicCounter, Lock-protected)
+    - stop_accepting() → 503 for new requests (Retry-After: 5)
+    - Health endpoint (/health) exempt from drain (load balancer probes)
+    - wait_for_drain(timeout_s) blocks until count=0 or timeout
+    - resume_accepting() for testing/cancellation
+    - Thread-safe: concurrent increment/decrement verified
+  - GracefulLifecycleManager: orchestrates shutdown and startup recovery
+    - Shutdown: drain → reconcile → deregister_all → dispose engine
+    - Startup: reconcile registered deployments, log discrepancies
+    - Partial failure tolerance: individual recon/adapter errors caught and logged
+    - SQLite in-memory dispose skip (preserves test data)
+    - Configurable drain timeout via DRAIN_TIMEOUT_S env var (default 30s)
+  - main.py lifespan enhanced:
+    - Module-level _drain_middleware shared between lifespan and middleware stack
+    - BrokerAdapterRegistry and GracefulLifecycleManager created in lifespan
+    - app.state.broker_registry, lifecycle_manager, drain exposed for route access
+    - Shutdown delegates to lifecycle_manager.shutdown()
+    - Startup runs lifecycle_manager.startup_reconciliation()
+    - DrainMiddleware registered as outermost middleware (before CorrelationID)
+  - 12 drain middleware unit tests (all passing)
+  - 15 lifecycle manager unit tests (all passing)
+  - 2406 tests passing, 14 pre-existing failures (M12/M13), coverage 84.78%
+  - §0 compliance verified, lint/format clean
+
+M12 — PostgreSQL Integration Tests and Pre-Existing Test Fixes
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-12, F-18. Can start after M0.
+Deliverables:
+  - Fixed all 14 pre-existing test failures (0 failures remaining):
+    - Root cause: SQLite file-based DB had stale schema missing row_version column
+    - Fix: session-scoped autouse fixture in conftest.py drops and recreates all tables
+    - test_m12_acceptance_pack.py: added Run record seeding in client fixture
+  - docker-compose.test.yml: PostgreSQL 15-alpine + Redis 7-alpine
+    - PG on port 5433 (avoids local conflicts), Redis on 6380
+    - tmpfs for PG data (ephemeral, fast), healthchecks for readiness
+  - scripts/test-pg.sh: convenience script for CI and local PostgreSQL testing
+    - Starts compose, runs pytest with DATABASE_URL, tears down
+    - Configurable ports via TEST_PG_PORT / TEST_REDIS_PORT env vars
+  - 2420 tests passing, 0 failures, coverage 84.79%
+  - §0 compliance verified, lint/format clean
+
+M13 — Centralized Configuration and Readiness Probe
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-14, F-16. Can start after M0.
+Deliverables:
+  - AppSettings: top-level Pydantic BaseSettings aggregating 5 nested config groups
+  - DatabaseSettings: DB_ prefixed env vars (url, pool_size, pool_overflow, pool_timeout, statement_timeout_ms, sql_echo)
+  - RedisSettings: REDIS_ prefixed env vars (url)
+  - AuthSettings: JWT and Keycloak config (jwt_secret_key, jwt_expiration_minutes, jwt_audience, jwt_issuer, jwt_max_token_bytes, keycloak_*)
+  - RateLimitSettings: RATE_LIMIT_ prefixed env vars (governance_limit, auth_limit, default_limit, backend)
+  - ObservabilitySettings: log_level, environment, cors_allowed_origins, drain_timeout_s, max_request_body_bytes
+  - get_settings(): @lru_cache singleton accessor
+  - GET /ready readiness probe: database + Redis + broker checks, 200/503 status
+  - GET /health liveness probe: unchanged, Redis status added (non-critical)
+  - 9 config unit tests (defaults, env override, singleton caching)
+  - 7 readiness probe unit tests (200/503, component status, exception handling, unauthenticated)
+  - 2436 tests passing, 0 failures, coverage 84.87%
+  - §0 compliance verified, lint/format clean
+
+M14 — Kubernetes Manifests and Database DR Procedures
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-15, F-17. Can start after M13.
+Deliverables:
+  - infra/k8s/namespace.yaml: fxlab namespace
+  - infra/k8s/api-deployment.yaml: 2 replicas, rolling update (maxSurge=1, maxUnavailable=0), liveness/readiness/startup probes, CPU 500m/1000m, Memory 256Mi/512Mi, envFrom ConfigMap+Secret, topology spread, preStop hook
+  - infra/k8s/api-service.yaml: ClusterIP service on port 80 → 8000
+  - infra/k8s/api-hpa.yaml: autoscale 2–8 replicas at 70% CPU, conservative scale-down
+  - infra/k8s/api-pdb.yaml: minAvailable=1 for disruption protection
+  - infra/k8s/api-configmap.yaml: non-secret config (pool sizes, rate limits, CORS, drain timeout)
+  - infra/k8s/api-secret.yaml: secret template with placeholder values (DB_URL, JWT_SECRET_KEY, REDIS_URL)
+  - infra/k8s/api-networkpolicy.yaml: ingress from ingress-nginx+prometheus only, egress to postgres+redis+broker APIs only
+  - infra/k8s/api-serviceaccount.yaml: dedicated SA with IAM annotation stubs
+  - docs/runbooks/database-backup-restore.md: pg_basebackup daily, WAL archiving, logical backup weekly, 30-day retention, full restore procedure, verification steps
+  - docs/runbooks/point-in-time-recovery.md: PITR vs full restore decision matrix, recovery_target_time config, pause+verify workflow, post-recovery actions
+  - docs/runbooks/migration-rollback.md: alembic downgrade procedure, pre-rollback checklist, K8s one-off pod rollback, escalation matrix
+  - All 9 manifests validated (valid YAML, correct apiVersion/kind/metadata)
+  - 2436 tests passing, 0 failures, coverage 84.87%
+
+### Track: Observability & Performance
+
+M15 — Execution Metrics and Business SLOs
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses part of F-19. Depends on M2 (services instrumented).
+Deliverables:
+  - metrics.py extended with 12 execution metrics:
+    - 7 Counters: orders_submitted_total, orders_filled_total, orders_rejected_total, kill_switch_activations_total, reconciliation_runs_total, reconciliation_discrepancies_total, risk_gate_checks_total
+    - 3 Histograms: order_latency_seconds, kill_switch_mtth_seconds, broker_request_duration_seconds (custom bucket boundaries for trading latency)
+    - 2 Gauges: circuit_breaker_state, positions_total
+  - 6 services instrumented at decision points:
+    - PaperExecutionService: order latency, submission count, rejection on risk gate failure
+    - ShadowExecutionService: order latency, submission count, rejection on risk gate failure
+    - KillSwitchService: activation counter by scope, MTTH histogram
+    - ReconciliationService: run counter by trigger/status, discrepancy counter by type
+    - RiskGateService: check counter by check_name/result (pass/fail)
+    - ResilientBrokerAdapter: broker_request_duration_seconds for all 8 trading methods
+  - Grafana dashboard JSON: infra/observability/grafana-execution-dashboard.json (10 panels)
+  - SLO definitions documented: docs/slo-definitions.md
+    - SLO-1: Order submission P99 < 500ms (paper/shadow), < 2s (live)
+    - SLO-2: Kill switch MTTH P99 < 5s
+    - SLO-3: Reconciliation discrepancy rate < 0.1%
+    - SLO-4: API availability > 99.9%
+  - 25 unit tests (all passing): metric definitions, operations, /metrics endpoint
+  - 2461 tests passing, 0 failures, coverage 84.89%
+  - §0 compliance verified, lint/format clean
+
+M16 — Distributed Tracing (OpenTelemetry)
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-20. Can parallel with M15.
+Deliverables:
+  - services/api/infrastructure/tracing.py: OpenTelemetry SDK setup
+    - setup_tracing(): configurable OTLP gRPC exporter, opt-in via OTEL_EXPORTER_OTLP_ENDPOINT
+    - get_tracer(): returns real or no-op tracer for manual span creation
+    - shutdown_tracing(): flush/shutdown for graceful lifecycle
+    - Auto-instrumentation: FastAPI, SQLAlchemy, httpx (each best-effort, independent failure)
+    - Configurable sampling rate via OTEL_TRACES_SAMPLER_ARG (default 1.0)
+    - Service resource: name, version, environment
+  - docker-compose.yml extended with Jaeger all-in-one service
+    - UI on port 16686, OTLP gRPC on 4317, OTLP HTTP on 4318
+    - API service receives OTEL env vars
+  - .env.example updated with OpenTelemetry configuration variables
+  - 11 unit tests (all passing): disabled mode, enabled mode, fault tolerance, sampling config
+  - 2472 tests passing, 0 failures, coverage 84.89%
+  - §0 compliance verified, lint/format clean
+
+M17 — Load Testing and Secret Rotation
+Status: DONE
+Completed: 2026-04-11
+Notes: Addresses F-19, F-21. Final milestone. Depends on M0-M10.
+Deliverables:
+  - tests/load/locustfile.py: Locust load test suite with 4 scenarios
+    - OrderSubmissionUser (weight 3): high-throughput paper order submission
+    - MixedWorkloadUser (weight 5): 70% reads / 30% writes across full API surface
+    - ReconciliationUser (weight 1): concurrent reconciliation trigger
+    - KillSwitchUser (weight 1): kill switch cycle (activate + deactivate)
+    - Auth via LOAD_TEST_TOKEN or TEST_TOKEN, 10-symbol random universe
+  - tests/load/docker-compose.load.yml: distributed load test infrastructure
+    - API with 4 workers (WEB_CONCURRENCY=4), PostgreSQL 15-alpine (max_conn=100, shared_buffers=256MB), Redis 7-alpine
+    - Locust master (port 8089) + scalable workers, healthcheck-gated startup
+  - services/api/infrastructure/env_secret_provider.py: enhanced with rotation support
+    - rotate_secret(): _NEW suffix convention — reads KEY_NEW, validates match, swaps current→OLD, new→current
+    - list_expiring(threshold_days): reports secrets approaching rotation deadline
+    - Thread-safe: Lock on all mutable state (_rotated_values, _old_values, _rotation_timestamps)
+    - Both old and new values accessible during rotation window (KEY, KEY_OLD)
+  - services/api/infrastructure/secret_rotation_job.py: background rotation daemon
+    - check_and_rotate(): scans _KNOWN_SECRET_KEYS for _NEW env vars, executes rotation
+    - start()/stop(): daemon thread lifecycle with interruptible sleep (Event.wait)
+    - Individual rotation failures logged and skipped (other keys still rotate)
+    - Thread-safe: Lock on _running, _stop_event, _thread
+  - services/api/routes/admin.py: rotate endpoint updated with KeyError/ValueError handling
+  - docs/runbooks/secret-rotation.md: comprehensive rotation procedures
+    - JWT key rotation (zero-downtime, old tokens valid during window)
+    - Database credential rotation (connection pool drain, pre-rotation checklist)
+    - Broker API key rotation (circuit breaker handles transient 401s)
+    - Redis password rotation
+    - Monitoring, alerts, escalation matrix, rotation schedule
+  - 21 new unit tests (all passing): rotation, list_expiring, rotation job lifecycle
+  - 1 existing test updated (admin rotate endpoint behavior change)
+  - 2221 tests passing, 0 failures, coverage 83.83%
+  - §0 compliance verified, lint/format clean
+
+---
+
+## Reconciliation
+
+Source milestone count: 18
+Done count: 18
+Open count: 0
+Assertion: 18 == 18 + 0 ✓
+Phase status: COMPLETE

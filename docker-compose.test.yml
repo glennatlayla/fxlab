@@ -1,0 +1,48 @@
+# docker-compose.test.yml — Test infrastructure for PostgreSQL integration tests.
+#
+# Purpose:
+#   Provides a PostgreSQL 15 instance and Redis for running the full test suite
+#   against real databases instead of SQLite. No Keycloak (mocked in tests).
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   TEST_DATABASE_URL="postgresql://fxlab_test:fxlab_test@localhost:5433/fxlab_test" \
+#       pytest tests/ -q
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Or use the convenience script:
+#   ./scripts/test-pg.sh
+#
+# Notes:
+#   - PostgreSQL runs on port 5433 (not 5432) to avoid conflicts with local installs.
+#   - Redis runs on port 6380 (not 6379) to avoid conflicts.
+#   - Volumes are ephemeral — `down -v` removes all data.
+
+version: "3.9"
+
+services:
+  postgres-test:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: fxlab_test
+      POSTGRES_USER: fxlab_test
+      POSTGRES_PASSWORD: fxlab_test
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fxlab_test -d fxlab_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data  # Ephemeral — faster, no disk I/O
+
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 10

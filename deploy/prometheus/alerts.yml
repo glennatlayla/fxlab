@@ -1,0 +1,935 @@
+# FXLab Trading Platform — Prometheus Alert Rules
+#
+# Purpose:
+#   Define alert conditions for trading safety, API health, and infrastructure
+#   covering kill switch activation latency, order execution, broker connectivity,
+#   reconciliation, API performance, database stability, and host resources.
+#
+# Structure:
+#   - Groups ordered by criticality and domain (trading safety first)
+#   - Each alert includes severity (critical/warning/info), team ownership, and
+#     runbook URL for on-call responses
+#   - Template variables in descriptions enable context-aware notifications
+#
+# Alert severity convention:
+#   - critical: Page on-call immediately (5-min SLA response)
+#   - warning: Create ticket, notify team (30-min response)
+#   - info: Log event, no immediate action
+#
+# On-call runbook URLs:
+#   Base: https://docs.internal.fxlab.ai/runbooks/
+#   Construct: <runbook_base>/<component>/<alert_name>/
+#
+# Maintenance:
+#   Metrics and thresholds must be reviewed quarterly against production
+#   performance baselines. Adjust 'for' duration to reduce flapping while
+#   maintaining sensitivity to genuine failures.
+
+groups:
+  # =========================================================================
+  # GROUP 1: TRADING SAFETY ALERTS (CRITICAL — page immediately)
+  # =========================================================================
+  # These alerts protect the financial integrity of the platform:
+  # - Kill switch responsiveness (must halt within hard limits)
+  # - Order submission reliability (critical business path)
+  # - Broker connectivity (prerequisite for any order execution)
+  # - Reconciliation (detect lost/orphaned orders)
+  # - State consistency (kill switch state must never diverge from reality)
+
+  - name: trading_safety_alerts
+    interval: 15s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # Kill switch activation latency (p99 > 500ms)
+      # -----------------------------------------------------------------------
+      # Kill switch MTTH (mean time to halt) p99 must be < 500ms.
+      # This is the latency from activation trigger to verified halt across
+      # all open positions. Breaches indicate:
+      # - Overloaded broker adapters or broker latency
+      # - Queuing in order cancellation pipeline
+      # - Race conditions in state synchronization
+      #
+      # Runbook: address broker latency, review queuing, validate state sync.
+      - alert: KillSwitchActivationSlow
+        expr: |
+          histogram_quantile(0.99, rate(kill_switch_mtth_seconds_bucket[5m])) > 0.5
+        for: 1m
+        labels:
+          severity: critical
+          team: trading
+          component: kill_switch
+        annotations:
+          summary: "Kill switch p99 latency > 500ms ({{ $value | humanizeDuration }})"
+          description: |
+            Kill switch activation p99 latency exceeded 500ms safety threshold.
+            p99 latency: {{ $value | humanizeDuration }}
+            Current time: {{ $timestamp }}
+            This indicates the platform is too slow to halt positions in an emergency.
+            Investigate broker adapter latency, network delays, and order cancellation
+            queuing. Check kill_switch_mtth_seconds histogram in Prometheus.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/kill_switch/activation_slow/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/kill_switch/activation_slow/
+
+      # -----------------------------------------------------------------------
+      # Kill switch state inconsistency
+      # -----------------------------------------------------------------------
+      # Kill switch state can diverge from broker reality if:
+      # - State persisted to Redis but broker rejection occurred
+      # - Broker confirmation lost due to network partition
+      # - State recovery after pod restart failed
+      # - Concurrent activation/deactivation race condition
+      #
+      # Metric: count of unresolved state inconsistencies detected by
+      # health checks or audit runs. Any value > 0 is an emergency.
+      #
+      # Runbook: investigate state database, trigger manual state audit,
+      # consider pause-and-audit posture.
+      - alert: KillSwitchStateLost
+        expr: |
+          kill_switch_state_inconsistencies_detected > 0
+        for: 30s
+        labels:
+          severity: critical
+          team: trading
+          component: kill_switch
+        annotations:
+          summary: "Kill switch state inconsistency detected"
+          description: |
+            Kill switch state is inconsistent with broker reality.
+            Inconsistencies detected: {{ $value | humanize }}
+            This is a critical integrity failure: the system believes positions are
+            halted but they may still be open on the broker. Immediate action required.
+            1. Pause all trading operations
+            2. Trigger manual reconciliation (POST /api/admin/reconcile)
+            3. Verify all positions on each broker manually
+            4. Contact trading ops and legal
+            Runbook: https://docs.internal.fxlab.ai/runbooks/kill_switch/state_lost/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/kill_switch/state_lost/
+
+      # -----------------------------------------------------------------------
+      # Order submission latency (p95 > 2s)
+      # -----------------------------------------------------------------------
+      # Order submission is the critical business path. p95 > 2s indicates:
+      # - API backend is overloaded (check API concurrency)
+      # - Risk gate evaluation is too slow
+      # - Broker adapter is slow or rate-limited
+      # - Network issues between FXLab and broker
+      #
+      # Runbook: check API concurrency, broker adapter metrics, rate limits.
+      - alert: OrderSubmissionSlow
+        expr: |
+          histogram_quantile(0.95, rate(order_latency_seconds_bucket[5m])) > 2.0
+        for: 2m
+        labels:
+          severity: critical
+          team: trading
+          component: order_execution
+        annotations:
+          summary: "Order submission p95 > 2s ({{ $value | humanizeDuration }})"
+          description: |
+            Order submission p95 latency exceeded 2-second threshold.
+            p95 latency: {{ $value | humanizeDuration }}
+            This impacts trade execution velocity and slippage.
+            Investigate:
+            - API backend load (check api_http_active_connections)
+            - Broker adapter latency (check broker_request_duration_seconds)
+            - Risk gate evaluation time
+            - Network latency to broker
+            If sustained, consider reducing trading signal frequency or
+            increasing broker adapter pool size.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/order_execution/submission_slow/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/order_execution/submission_slow/
+
+      # -----------------------------------------------------------------------
+      # Order error rate high (> 5% for 5m)
+      # -----------------------------------------------------------------------
+      # High order rejection rate indicates:
+      # - Risk gate configuration is too conservative
+      # - Broker is rejecting orders (bad requests, rate limits, auth)
+      # - Network issues preventing delivery
+      # - Insufficient capital / account restrictions
+      #
+      # Runbook: check reject reasons, verify broker account limits,
+      # review risk gate configuration.
+      - alert: OrderErrorRateHigh
+        expr: |
+          (
+            rate(orders_rejected_total[5m])
+            /
+            (rate(orders_submitted_total[5m]) + rate(orders_rejected_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: trading
+          component: order_execution
+        annotations:
+          summary: "Order error rate > 5% (current: {{ $value | humanizePercentage }})"
+          description: |
+            Order rejection rate exceeded 5% over 5 minutes.
+            Current error rate: {{ $value | humanizePercentage }}
+            This indicates a systematic failure in order submission.
+            Check:
+            - orders_rejected_total counter by reason label
+            - Risk gate configuration (may be overly conservative)
+            - Broker connectivity and account status
+            - API error logs for validation/auth failures
+            If rejections are expected (e.g., intended risk gate), update alert threshold.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/order_execution/error_rate_high/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/order_execution/error_rate_high/
+
+      # -----------------------------------------------------------------------
+      # Broker connectivity lost
+      # -----------------------------------------------------------------------
+      # Broker health check failing for 30 seconds indicates:
+      # - Network partition between FXLab and broker
+      # - Broker API is down or degraded
+      # - Broker adapter process crashed or hung
+      # - Auth credentials expired or revoked
+      #
+      # Metric: broker_adapter_health_status (0=down, 1=up)
+      #
+      # Runbook: verify broker status, test connectivity, restart adapter,
+      # escalate to broker support if needed.
+      - alert: BrokerDisconnected
+        expr: |
+          broker_adapter_health_status == 0
+        for: 30s
+        labels:
+          severity: critical
+          team: trading
+          component: broker_adapter
+        annotations:
+          summary: "Broker adapter disconnected: {{ $labels.adapter }}"
+          description: |
+            Broker adapter health check failing for 30 seconds.
+            Adapter: {{ $labels.adapter }}
+            The platform cannot submit or cancel orders. Immediate action required.
+            Steps:
+            1. Check broker status page (status.alpaca.markets or schwab.com)
+            2. Verify network connectivity from FXLab to broker
+            3. Check broker adapter logs for auth/SSL errors
+            4. Verify API credentials are not expired/revoked
+            5. If all else fails, restart broker adapter pod/service
+            Runbook: https://docs.internal.fxlab.ai/runbooks/broker_adapter/disconnected/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/broker_adapter/disconnected/
+
+      # -----------------------------------------------------------------------
+      # Reconciliation discrepancy (unresolved > 0 for 10m)
+      # -----------------------------------------------------------------------
+      # Unresolved reconciliation discrepancies indicate:
+      # - Orders missing from broker (likely lost in network)
+      # - Orders in broker but not in FXLab (broker-side duplicates)
+      # - Position counts diverged
+      # - Cash balance mismatched
+      #
+      # Any unresolved discrepancy is a data integrity risk.
+      # Must be manually reviewed and reconciled.
+      #
+      # Runbook: access admin UI, review discrepancies, file manual trades,
+      # escalate to ops and compliance.
+      - alert: ReconciliationDiscrepancy
+        expr: |
+          reconciliation_discrepancies_unresolved > 0
+        for: 10m
+        labels:
+          severity: critical
+          team: trading
+          component: reconciliation
+        annotations:
+          summary: "Unresolved reconciliation discrepancies: {{ $value }}"
+          description: |
+            Reconciliation has detected unresolved discrepancies between FXLab
+            and broker state that have persisted for 10 minutes.
+            Unresolved discrepancies: {{ $value | humanize }}
+            This indicates a loss of sync between FXLab and the broker.
+            Action required:
+            1. Access admin UI: https://admin.fxlab.ai/reconciliation/
+            2. Review each discrepancy (type, size, symbol, age)
+            3. For missing orders: file manual trades to broker
+            4. For extra positions: file manual close trades to broker
+            5. Once resolved, mark reconciliation as complete in UI
+            6. File incident with operations and compliance
+            Runbook: https://docs.internal.fxlab.ai/runbooks/reconciliation/discrepancy_unresolved/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/reconciliation/discrepancy_unresolved/
+
+      # -----------------------------------------------------------------------
+      # Orphaned orders detected
+      # -----------------------------------------------------------------------
+      # Orphaned orders are:
+      # - Submitted to broker and confirmed
+      # - But corresponding FXLab order record was lost (DB write failed)
+      # - Or order record exists but is in wrong state (out of sync)
+      #
+      # Metric: orphaned_orders_detected (gauge, incremented when discovered)
+      #
+      # Runbook: access admin UI, locate orphaned orders by broker ID,
+      # manually close them, file incident.
+      - alert: OrphanedOrdersDetected
+        expr: |
+          orphaned_orders_detected > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: trading
+          component: order_execution
+        annotations:
+          summary: "Orphaned orders detected: {{ $value }}"
+          description: |
+            Orphaned orders have been detected (orders in broker but missing or
+            mismatched in FXLab database).
+            Orphaned order count: {{ $value | humanize }}
+            These orders will not be tracked, closed, or reconciled properly.
+            Immediate action required:
+            1. Access admin UI: https://admin.fxlab.ai/orders/orphaned/
+            2. Review each orphaned order (symbol, size, side, filled qty)
+            3. For partially filled orders: file manual close trades for filled qty
+            4. For fully filled orders: verify in P&L, file cancellation if open
+            5. Create incident with operations
+            6. Review order submission and DB write logic for root cause
+            Runbook: https://docs.internal.fxlab.ai/runbooks/order_execution/orphaned_orders/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/order_execution/orphaned_orders/
+
+
+  # =========================================================================
+  # GROUP 2: API HEALTH ALERTS (WARNING — create ticket)
+  # =========================================================================
+  # These alerts indicate degraded API performance that impacts user experience
+  # but is not an immediate safety threat. They should trigger ticket creation
+  # and investigation but not page on-call.
+
+  - name: api_health_alerts
+    interval: 30s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # API high latency (p95 > 1s for 5m)
+      # -----------------------------------------------------------------------
+      # Elevated p95 latency indicates:
+      # - Increased load (check active connections)
+      # - Slow database queries (check PG query latency)
+      # - External API calls timing out
+      # - Resource contention (CPU, memory)
+      #
+      # Less critical than order submission latency but still impacts
+      # dashboard responsiveness and decision-making speed.
+      - alert: APIHighLatency
+        expr: |
+          histogram_quantile(0.95, rate(api_http_request_duration_seconds_bucket[5m])) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: api_gateway
+        annotations:
+          summary: "API p95 latency > 1s ({{ $value | humanizeDuration }})"
+          description: |
+            API response latency p95 exceeded 1 second for 5 minutes.
+            p95 latency: {{ $value | humanizeDuration }}
+            Investigate:
+            - Active HTTP connections (check api_http_active_connections gauge)
+            - Database query latency (check pg_slow_queries)
+            - Cache hit rate (check chart_cache_hits_total vs misses)
+            - CPU and memory usage on API pods
+            Create ticket to review slow endpoints and optimize queries.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/api/latency_high/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/api/latency_high/
+
+      # -----------------------------------------------------------------------
+      # API 5xx error rate high (> 1% for 5m)
+      # -----------------------------------------------------------------------
+      # 5xx errors indicate internal failures:
+      # - Unhandled exceptions in API handlers
+      # - Database connection exhaustion
+      # - External service failures (broker, market data provider)
+      # - Resource exhaustion
+      #
+      # Runbook: check API error logs, review recent deployments,
+      # investigate external service health.
+      - alert: APIErrorRate
+        expr: |
+          (
+            rate(api_http_requests_total{status=~"5.."}[5m])
+            /
+            rate(api_http_requests_total[5m])
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: api_gateway
+        annotations:
+          summary: "API 5xx error rate > 1% ({{ $value | humanizePercentage }})"
+          description: |
+            API 5xx error rate exceeded 1% for 5 minutes.
+            Current 5xx rate: {{ $value | humanizePercentage }}
+            Investigate:
+            - API error logs for exception patterns (grep ERROR in logs)
+            - Database connection pool status
+            - External service health (broker APIs, market data providers)
+            - Recent deployments or configuration changes
+            If errors persist, escalate to platform on-call.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/api/error_rate_high/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/api/error_rate_high/
+
+      # -----------------------------------------------------------------------
+      # API high concurrency (> 80% connection limit)
+      # -----------------------------------------------------------------------
+      # Connection limit exhaustion will cause request rejections.
+      # Indicates:
+      # - Legitimate traffic spike
+      # - Slow endpoint holding connections open
+      # - Connection leaks in SDK or client
+      #
+      # Threshold: 80% triggers early warning before exhaustion.
+      - alert: APIHighConcurrency
+        expr: |
+          (
+            api_http_active_connections
+            /
+            api_http_max_connections
+          ) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: api_gateway
+        annotations:
+          summary: "API connections {{ $value | humanizePercentage }} of max"
+          description: |
+            API concurrency is at {{ $value | humanizePercentage }} of connection limit.
+            Active connections: {{ $value | humanize }}
+            If this reaches 100%, new requests will be rejected (503).
+            Investigate:
+            - Is traffic legitimately high? Check dashboard user count.
+            - Are any endpoints responding slowly? Check p95 latency.
+            - Are clients properly closing connections? Check connection age.
+            Consider:
+            - Increasing connection pool size
+            - Deploying additional API replicas
+            - Enabling connection rate limiting on slow endpoints
+            Runbook: https://docs.internal.fxlab.ai/runbooks/api/high_concurrency/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/api/high_concurrency/
+
+      # -----------------------------------------------------------------------
+      # Rate limit rejections (> 100/min for 5m)
+      # -----------------------------------------------------------------------
+      # Rate limit rejections indicate:
+      # - Legitimate user traffic exceeding configured limits
+      # - Buggy client(s) hammering endpoints
+      # - DDoS attack (unlikely but monitor)
+      #
+      # Runbook: review rate limit configuration, identify misbehaving clients,
+      # consider increasing limit for legitimate high-volume users.
+      - alert: RateLimitExhaustion
+        expr: |
+          rate(api_http_requests_total{status="429"}[1m]) > (100 / 60)
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: api_gateway
+        annotations:
+          summary: "Rate limit rejections > 100/min ({{ $value | humanize }}/s)"
+          description: |
+            Rate limit rejections exceeded 100 requests per minute for 5 minutes.
+            Current rejection rate: {{ $value | humanize }}/s
+            This causes legitimate requests to fail with 429 Too Many Requests.
+            Investigate:
+            - Check request logs by client IP/API key to identify source
+            - Review rate limit configuration (Redis-backed limits)
+            - Check for bot traffic or DDoS patterns
+            - If legitimate high-volume user, request limit increase
+            Runbook: https://docs.internal.fxlab.ai/runbooks/api/rate_limit_exhaustion/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/api/rate_limit_exhaustion/
+
+
+  # =========================================================================
+  # GROUP 3: DATABASE ALERTS (CRITICAL/WARNING)
+  # =========================================================================
+  # PostgreSQL is a critical dependency for order, position, and reconciliation
+  # state. Any issue here cascades to trading operations.
+
+  - name: database_alerts
+    interval: 30s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # PostgreSQL down (pg_up == 0 for 30s) — CRITICAL
+      # -----------------------------------------------------------------------
+      # Database is unreachable. Orders cannot be persisted, queries will fail.
+      # Investigate immediately.
+      - alert: PostgresDown
+        expr: |
+          pg_up == 0
+        for: 30s
+        labels:
+          severity: critical
+          team: infrastructure
+          component: postgresql
+        annotations:
+          summary: "PostgreSQL instance is down"
+          description: |
+            PostgreSQL instance is not responding to health checks.
+            The database is unavailable. All orders and state writes will fail.
+            Immediate action required:
+            1. Check PostgreSQL pod status: kubectl get pods -l app=postgres
+            2. Check pod logs: kubectl logs <postgres-pod> | tail -100
+            3. Verify PVC is mounted: kubectl get pvc
+            4. Check storage status if PVC is pending
+            5. If recoverable, attempt pod restart (last resort)
+            6. If unrecoverable, failover to standby (if configured)
+            7. Contact DBA and ops on-call
+            Runbook: https://docs.internal.fxlab.ai/runbooks/postgresql/down/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/postgresql/down/
+
+      # -----------------------------------------------------------------------
+      # PostgreSQL high connection count (> 80% max) — WARNING
+      # -----------------------------------------------------------------------
+      # Connection pool exhaustion risk. New connections will queue and
+      # eventually timeout.
+      - alert: PostgresHighConnections
+        expr: |
+          (
+            sum(pg_stat_activity_count)
+            /
+            pg_settings_max_connections
+          ) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: postgresql
+        annotations:
+          summary: "PostgreSQL connections {{ $value | humanizePercentage }} of max"
+          description: |
+            PostgreSQL connection count is at {{ $value | humanizePercentage }} of max.
+            Current connections: {{ $value | humanize }}
+            Investigate:
+            - Are API pods leaking connections? Check pg_stat_activity for idle connections
+            - Are there long-running queries holding connections? Check pg_stat_activity
+            - Is a data import or background job in progress? Check pg_locks
+            Action items:
+            - Review and close idle connections: SELECT pg_terminate_backend(pid) ...
+            - Optimize slow queries if visible in pg_stat_statements
+            - Consider increasing max_connections if legitimate high load
+            - Scale API replicas if connection usage correlates with API load
+            Runbook: https://docs.internal.fxlab.ai/runbooks/postgresql/high_connections/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/postgresql/high_connections/
+
+      # -----------------------------------------------------------------------
+      # PostgreSQL replication lag (> 30s for 2m) — CRITICAL
+      # -----------------------------------------------------------------------
+      # Replication lag indicates standby is falling behind primary.
+      # If primary fails, standby may have lost recent data.
+      - alert: PostgresReplicationLag
+        expr: |
+          pg_replication_lag_seconds > 30
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+          component: postgresql
+        annotations:
+          summary: "PostgreSQL replication lag > 30s ({{ $value | humanizeDuration }})"
+          description: |
+            PostgreSQL standby is falling behind primary.
+            Replication lag: {{ $value | humanizeDuration }}
+            Investigate:
+            - Check standby pod status and logs
+            - Review primary WAL archiving rate (check pg_stat_replication)
+            - Check network connectivity between primary and standby
+            - If standby is slow (high CPU/disk), scale up resources
+            - If lag persists, consider resyncing standby (pg_rewind)
+            This is critical because if the primary fails now, the standby
+            may lose {{ $value }} of data (orders, positions, etc).
+            Runbook: https://docs.internal.fxlab.ai/runbooks/postgresql/replication_lag/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/postgresql/replication_lag/
+
+      # -----------------------------------------------------------------------
+      # PostgreSQL disk usage warning (> 80%) — WARNING
+      # -----------------------------------------------------------------------
+      - alert: PostgresDiskUsageWarning
+        expr: |
+          (
+            pg_disk_usage_bytes
+            /
+            pg_disk_capacity_bytes
+          ) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: postgresql
+        annotations:
+          summary: "PostgreSQL disk usage > 80% ({{ $value | humanizePercentage }})"
+          description: |
+            PostgreSQL data directory is {{ $value | humanizePercentage }} full.
+            Disk space: {{ $value | humanize }} of capacity
+            At current growth rate, you have hours to days of capacity remaining.
+            Action items:
+            - Run VACUUM FULL to reclaim bloat: vacuumdb -d fxlab -f
+            - Archive and delete old reconciliation records if applicable
+            - Review table sizes: SELECT schemaname, tablename, pg_size_pretty(pg_total_relation_size(...))
+            - Increase PVC size if growth is expected
+            - Monitor pg_stat_user_tables.dead_tups for bloat
+            Runbook: https://docs.internal.fxlab.ai/runbooks/postgresql/disk_usage_warning/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/postgresql/disk_usage_warning/
+
+      # -----------------------------------------------------------------------
+      # PostgreSQL disk usage critical (> 90%) — CRITICAL
+      # -----------------------------------------------------------------------
+      - alert: PostgresDiskUsageCritical
+        expr: |
+          (
+            pg_disk_usage_bytes
+            /
+            pg_disk_capacity_bytes
+          ) > 0.9
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+          component: postgresql
+        annotations:
+          summary: "PostgreSQL disk usage > 90% ({{ $value | humanizePercentage }})"
+          description: |
+            PostgreSQL data directory is critically full ({{ $value | humanizePercentage }}).
+            Writes may fail or corrupt data. Immediate action required.
+            Steps:
+            1. Pause all write operations if possible (stop traders, API writes)
+            2. Run emergency VACUUM: vacuumdb -d fxlab -f
+            3. Archive and remove old logs if present in data directory
+            4. Increase PVC size immediately
+            5. If no space to even run VACUUM, contact DBA — may require
+               stopping PostgreSQL temporarily to add emergency storage
+            Do NOT ignore this — full disk can corrupt the database and cause
+            data loss of all recent trading state.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/postgresql/disk_usage_critical/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/postgresql/disk_usage_critical/
+
+
+  # =========================================================================
+  # GROUP 4: REDIS ALERTS (CRITICAL/WARNING)
+  # =========================================================================
+  # Redis is used for rate limiting and caching (optional but important for
+  # performance). Loss of Redis degrades performance but not safety
+  # (data is not durable in Redis).
+
+  - name: redis_alerts
+    interval: 30s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # Redis down (redis_up == 0 for 30s) — CRITICAL
+      # -----------------------------------------------------------------------
+      # Redis is unreachable. Rate limiting will fail open (requests may not
+      # be rejected). Cache will be empty (all hits become misses).
+      - alert: RedisDown
+        expr: |
+          redis_up == 0
+        for: 30s
+        labels:
+          severity: critical
+          team: infrastructure
+          component: redis
+        annotations:
+          summary: "Redis instance is down"
+          description: |
+            Redis instance is not responding to health checks.
+            Rate limiting may fail open, cache is unavailable.
+            Investigate:
+            1. Check Redis pod: kubectl get pods -l app=redis
+            2. Check Redis logs: kubectl logs <redis-pod> | tail -100
+            3. Check connectivity: redis-cli -h redis.default ping
+            4. If pod is running but not responding, restart: kubectl delete pod <redis-pod>
+            5. Check Redis config for issues (memory limit, maxmemory-policy, etc)
+            6. If loss persists, may need to rebuild from backup
+            Note: Requests will continue (rate limiting fails open) but with reduced safety.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/redis/down/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/redis/down/
+
+      # -----------------------------------------------------------------------
+      # Redis memory high (> 80% of maxmemory) — WARNING
+      # -----------------------------------------------------------------------
+      # Memory pressure will trigger evictions. Evictions cause cache misses
+      # and rate limit counters may be dropped.
+      - alert: RedisMemoryHigh
+        expr: |
+          (
+            redis_memory_used_bytes
+            /
+            redis_maxmemory
+          ) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: redis
+        annotations:
+          summary: "Redis memory {{ $value | humanizePercentage }} of maxmemory"
+          description: |
+            Redis memory is {{ $value | humanizePercentage }} of maxmemory limit.
+            Current memory: {{ $value | humanize }}
+            Evictions may begin soon, causing cache misses and data loss.
+            Investigate:
+            - What keys are consuming memory? Check redis_key_memory_bytes or use MEMORY DOCTOR
+            - Are there memory leaks in cached data? Review data retention policies
+            - Is maxmemory set correctly for the Redis instance?
+            Action items:
+            - Increase maxmemory if available (scale up Redis instance)
+            - Implement LRU eviction if not already set (maxmemory-policy allkeys-lru)
+            - Review cache TTL — are cached items living too long?
+            - Consider dedicated Redis for rate limiting vs caching
+            Runbook: https://docs.internal.fxlab.ai/runbooks/redis/memory_high/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/redis/memory_high/
+
+      # -----------------------------------------------------------------------
+      # Redis evictions high (> 100/s for 5m) — WARNING
+      # -----------------------------------------------------------------------
+      # High eviction rate indicates either:
+      # - Maxmemory is too small for the workload
+      # - TTLs are set too long
+      # - Keys are being created but not cleaned up
+      - alert: RedisEvictions
+        expr: |
+          rate(redis_evicted_keys_total[1m]) > (100 / 60)
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: redis
+        annotations:
+          summary: "Redis evictions {{ $value | humanize }}/s"
+          description: |
+            Redis is evicting keys at {{ $value | humanize }}/s (> 1.67/sec for 5min).
+            This indicates memory pressure and data loss in cache.
+            Investigate:
+            - Check redis_memory_used_bytes vs maxmemory
+            - Review eviction policy: CONFIG GET maxmemory-policy
+            - Check rate of new key creation: redis_keys_total rate
+            - Identify long-lived keys consuming memory
+            Action items:
+            - Increase maxmemory if capacity is available
+            - Implement or adjust LRU eviction policy
+            - Reduce cache TTL for less critical data
+            - Consider separate Redis instances for rate limiting and caching
+            Runbook: https://docs.internal.fxlab.ai/runbooks/redis/evictions_high/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/redis/evictions_high/
+
+
+  # =========================================================================
+  # GROUP 5: HOST / CONTAINER ALERTS (CRITICAL/WARNING)
+  # =========================================================================
+  # Host-level resource alerts for CPU, memory, and disk across all nodes.
+
+  - name: host_alerts
+    interval: 30s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # CPU usage high (> 80% for 5m) — WARNING
+      # -----------------------------------------------------------------------
+      - alert: HighCPU
+        expr: |
+          rate(node_cpu_seconds_total{mode!="idle"}[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: host
+        annotations:
+          summary: "CPU usage > 80% on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: |
+            CPU usage on {{ $labels.instance }} is {{ $value | humanizePercentage }} for 5 minutes.
+            Investigate:
+            - Check which process is consuming CPU: top, htop, or kubectl top pods
+            - Is it API processing, database, or system services?
+            - Is this expected (e.g., scheduled batch job)?
+            If CPU remains high and no batch job is running:
+            - Scale up the deployment (more replicas)
+            - Review slow queries or algorithms
+            - Check for CPU throttling (check metrics in Prometheus)
+            Runbook: https://docs.internal.fxlab.ai/runbooks/host/cpu_high/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/host/cpu_high/
+
+      # -----------------------------------------------------------------------
+      # CPU usage critical (> 95% for 2m) — CRITICAL
+      # -----------------------------------------------------------------------
+      - alert: HighCPUCritical
+        expr: |
+          rate(node_cpu_seconds_total{mode!="idle"}[5m]) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+          component: host
+        annotations:
+          summary: "CPU usage > 95% on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: |
+            CPU usage on {{ $labels.instance }} is critically high at {{ $value | humanizePercentage }}.
+            System is likely experiencing latency and timeouts.
+            Immediate action required:
+            1. Identify the offending process (top, ps, kubectl top)
+            2. If it's API: scale up replicas and/or investigate slow endpoints
+            3. If it's database: investigate slow queries, consider connection killing
+            4. If it's a background job: kill or throttle it
+            5. Monitor for recovery; escalate to on-call if unresolved
+            Runbook: https://docs.internal.fxlab.ai/runbooks/host/cpu_critical/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/host/cpu_critical/
+
+      # -----------------------------------------------------------------------
+      # Memory usage high (> 80% for 5m) — WARNING
+      # -----------------------------------------------------------------------
+      - alert: HighMemory
+        expr: |
+          (
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+          ) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: host
+        annotations:
+          summary: "Memory usage > 80% on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: |
+            Memory usage on {{ $labels.instance }} is {{ $value | humanizePercentage }} for 5 minutes.
+            Investigate:
+            - Check which container is consuming memory: kubectl top pods
+            - Check for memory leaks (is memory usage increasing over time?)
+            - Is this expected high load?
+            Action items:
+            - If API pod: increase memory request/limit and scale replicas
+            - If database: check for query memory bloat (sorts, hash joins)
+            - Check OOM event logs: kubectl describe node <node-name>
+            Runbook: https://docs.internal.fxlab.ai/runbooks/host/memory_high/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/host/memory_high/
+
+      # -----------------------------------------------------------------------
+      # Memory usage critical (> 95% for 2m) — CRITICAL
+      # -----------------------------------------------------------------------
+      - alert: HighMemoryCritical
+        expr: |
+          (
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+          ) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+          component: host
+        annotations:
+          summary: "Memory usage > 95% on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: |
+            Memory usage on {{ $labels.instance }} is critically high at {{ $value | humanizePercentage }}.
+            OOM killer may trigger soon, terminating processes.
+            Immediate action required:
+            1. Identify memory hog: kubectl top pods --all-namespaces
+            2. If OOM imminent, manually kill or evict the offending pod
+            3. Restart or scale up the pod with more memory
+            4. Investigate root cause (memory leak, unexpected traffic)
+            5. Monitor node for recovery
+            Runbook: https://docs.internal.fxlab.ai/runbooks/host/memory_critical/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/host/memory_critical/
+
+      # -----------------------------------------------------------------------
+      # Disk usage warning (> 85%) — WARNING
+      # -----------------------------------------------------------------------
+      - alert: DiskUsageWarning
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!="tmpfs"}
+            /
+            node_filesystem_size_bytes{fstype!="tmpfs"}
+          ) < 0.15
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: host
+        annotations:
+          summary: "Disk usage > 85% on {{ $labels.instance }} ({{ $value | humanizePercentage }} free)"
+          description: |
+            Disk {{ $labels.device }} on {{ $labels.instance }} is {{ $value | humanizePercentage }} full.
+            You have limited time before disk full errors occur.
+            Investigate:
+            - What is consuming disk? du -sh / or check by mountpoint
+            - Are there large log files? Check /var/log/
+            - Are there temporary files (cache, /tmp)? Clean them up
+            - Is this expected (database growth)? Check PVC allocation
+            Action items:
+            - Archive or delete old logs
+            - Clean cache/temp directories
+            - If PVC: increase size, or schedule data cleanup
+            - Monitor growth rate to predict when full disk will occur
+            Runbook: https://docs.internal.fxlab.ai/runbooks/host/disk_usage_warning/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/host/disk_usage_warning/
+
+      # -----------------------------------------------------------------------
+      # Disk usage critical (> 95%) — CRITICAL
+      # -----------------------------------------------------------------------
+      - alert: DiskUsageCritical
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!="tmpfs"}
+            /
+            node_filesystem_size_bytes{fstype!="tmpfs"}
+          ) < 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+          component: host
+        annotations:
+          summary: "Disk usage > 95% on {{ $labels.instance }} ({{ $value | humanizePercentage }} free)"
+          description: |
+            Disk {{ $labels.device }} on {{ $labels.instance }} is critically full ({{ $value | humanizePercentage }} free).
+            Write operations may fail or corrupt data. Immediate action required.
+            Steps:
+            1. Identify what is consuming space: du -sh /* (on mounted filesystem)
+            2. Delete or archive non-critical files:
+               - Old logs: rm /var/log/old-*.log
+               - Cache: rm -rf /tmp/*
+               - Temporary build artifacts
+            3. If no deletable files, add emergency storage or increase PVC
+            4. For databases: stop database, add disk, restart
+            5. Monitor recovery and growth rates
+            This is critical because full disk can cause data corruption and system failure.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/host/disk_usage_critical/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/host/disk_usage_critical/
+
+      # -----------------------------------------------------------------------
+      # Container restarting frequently (> 3 restarts in 15m) — WARNING
+      # -----------------------------------------------------------------------
+      # Frequent restarts indicate:
+      # - Crash loop (likely OOM, panic, or unhandled exception)
+      # - Kubernetes eviction (node pressure, resource limits)
+      # - Liveness probe too aggressive
+      - alert: ContainerRestarting
+        expr: |
+          rate(kube_pod_container_status_restarts_total[15m]) > (3 / 900)
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+          component: kubernetes
+        annotations:
+          summary: "Container {{ $labels.pod }} restarting frequently ({{ $value | humanize }} restarts/sec)"
+          description: |
+            Container {{ $labels.pod }} in namespace {{ $labels.namespace }} is restarting frequently.
+            Restart rate: {{ $value | humanize }} per second
+            This indicates the container is crashing or being evicted repeatedly.
+            Investigate:
+            - Check pod logs: kubectl logs -f <pod> --previous (to see last crash)
+            - Check pod events: kubectl describe pod <pod> (shows evictions, OOM, etc)
+            - Review deployment resource limits (may be too low)
+            - Check for recent code deployments
+            Action items:
+            - If OOM: increase memory limit in deployment
+            - If crash: fix the bug in code and redeploy
+            - If eviction: check node pressure (kubectl describe node)
+            - Adjust liveness probe timeout if false positives
+            Runbook: https://docs.internal.fxlab.ai/runbooks/kubernetes/pod_restarting/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/kubernetes/pod_restarting/

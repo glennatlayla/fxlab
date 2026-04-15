@@ -1,0 +1,408 @@
+# FXLab Phase 8 — Progress Tracking
+# Source: FXLab_Phase_8_workplan_v1.md
+# Seeded: 2026-04-13
+# Source milestone count: 16
+# Source milestone IDs: M0, M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14, M15
+
+## Milestone Status
+
+### Track: Data Quality
+
+M0 — Data Quality Contracts, Interfaces & Storage Schema
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/data_quality.py: DataQualityDimension (5 values), AnomalyType (7 values),
+    AnomalySeverity (3 levels), QualityGrade (5 grades), DataAnomaly (frozen, symbol normalized),
+    QualityScore (frozen, window validation), QualityPolicy, SymbolReadiness,
+    QualityReadinessResult, assign_grade(), DEFAULT_QUALITY_POLICIES (3 modes),
+    DEFAULT_QUALITY_WEIGHTS (4 dimensions, sum to 1.0)
+  - libs/contracts/interfaces/data_quality_repository.py: DataQualityRepositoryInterface
+    (7 methods: save_anomaly, save_anomalies, save_quality_score, find_anomalies,
+    get_latest_score, get_score_history, count_anomalies, resolve_anomaly)
+  - libs/contracts/interfaces/data_quality_service.py: DataQualityServiceInterface
+    (3 methods: evaluate_quality, detect_anomalies, check_trading_readiness)
+  - libs/contracts/mocks/mock_data_quality_repository.py: full mock with introspection
+    (anomaly_count, score_count, get_all_anomalies, get_all_scores, clear)
+  - libs/contracts/models.py: DataAnomalyRecord, QualityScoreRecord ORM models
+  - migrations/versions/20260413_0016_add_data_quality_tables.py: Alembic migration
+    (data_anomalies + quality_scores tables with indexes and constraints)
+  - tests/unit/test_data_quality_contracts.py: 56 tests (enums, models, grade, policies, weights)
+  - tests/unit/test_data_quality_repository.py: 27 tests (save, find, filter, resolve, history, introspection)
+  - Total: 83 M0 tests passing, ruff clean
+
+M1 — Data Quality Engine & Anomaly Detection
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - services/api/services/data_quality_service.py: DataQualityService
+    (detect_anomalies: 6 check types — OHLCV, zero volume, price spike,
+    volume anomaly, timestamp gap, duplicate bar; evaluate_quality: 4 dimension
+    scores + composite + grade + persistence; check_trading_readiness:
+    per-symbol policy evaluation with blocking reasons)
+  - services/api/repositories/sql_data_quality_repository.py: SqlDataQualityRepository
+    (implements DataQualityRepositoryInterface with SQLAlchemy; save_anomaly,
+    save_anomalies, find_anomalies, count_anomalies, resolve_anomaly,
+    save_quality_score with upsert, get_latest_score, get_score_history;
+    UTC timezone normalization for SQLite compatibility)
+  - tests/unit/test_data_quality_service.py: 32 tests (OHLCV 5, price spike 3,
+    volume 2, timestamp gap 2, duplicates 2, scoring 8, readiness 6, edge cases 4)
+  - tests/integration/test_sql_data_quality_repository.py: 24 tests (save/find 10,
+    resolve 3, score save/retrieve 7, score history 4; SAVEPOINT isolation)
+  - Total: 56 M1 tests passing (32 unit + 24 integration), ruff clean
+
+M2 — Data Quality API, Dashboard & Alerting Integration
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - services/api/routes/data_quality.py: 6 REST endpoints
+    (GET /score/{symbol}, GET /score/{symbol}/history,
+    GET /anomalies/{symbol}, POST /evaluate, GET /readiness,
+    GET /summary) with auth enforcement, scope checks (operator:write
+    for evaluate), input validation, structured logging
+  - services/api/services/data_quality_service.py: added read-through
+    delegation methods (get_latest_score, get_score_history, find_anomalies)
+    so controllers go through service layer per onion arch
+  - services/api/main.py: router wired with data_quality import and
+    app.include_router(data_quality.router)
+  - tests/unit/test_data_quality_routes.py: 15 tests (score 3, history 2,
+    anomalies 3, evaluate 3, readiness 2, summary 2; auth + validation
+    + serialization + error paths)
+  - Total: 15 M2 tests passing, ruff clean
+
+### Track: Signal Framework
+
+M3 — Signal Contracts & Evaluation Types
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/signal.py: SignalDirection (3 values), SignalStrength (3),
+    SignalType (5), Signal (frozen, symbol normalized, confidence [0,1]),
+    RiskGateResult (frozen), SignalEvaluation (frozen), SignalStats
+  - libs/contracts/interfaces/signal_strategy.py: SignalStrategyInterface ABC
+    (evaluate, required_indicators, strategy_id, name, supported_symbols)
+  - libs/contracts/interfaces/signal_repository.py: SignalRepositoryInterface ABC
+    (save_signal, save_evaluation, find_signals, find_evaluations, get_signal_stats)
+  - libs/contracts/mocks/mock_signal_repository.py: full mock with introspection
+    (signal_count, evaluation_count, get_all_signals, get_all_evaluations, clear)
+  - libs/contracts/models.py: SignalRecord, SignalEvaluationRecord ORM models
+  - migrations/versions/20260413_0017_add_signal_tables.py: Alembic migration
+    (signals + signal_evaluations tables with indexes, FK, check constraints)
+  - tests/unit/test_signal_contracts.py: 30 tests (enums, models, validation)
+  - tests/unit/test_signal_repository.py: 17 tests (save, find, stats, introspection)
+  - Total: 47 M3 tests passing, ruff clean
+
+M4 — Built-In Signal Strategies
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - services/worker/strategies/registry.py: SignalStrategyRegistry with
+    thread-safe register/get/unregister/list_available/count, custom exceptions
+    (StrategyAlreadyRegisteredError, StrategyNotFoundError)
+  - services/worker/strategies/moving_average_crossover.py: MovingAverageCrossoverStrategy
+    (SMA/EMA configurable, golden/death cross detection, spread-based strength,
+    position-aware EXIT signals, NaN-safe)
+  - services/worker/strategies/rsi_mean_reversion.py: RSIMeanReversionStrategy
+    (oversold/overbought crossover detection, swing magnitude strength,
+    configurable thresholds, position-aware EXIT signals)
+  - services/worker/strategies/macd_momentum.py: MACDMomentumStrategy
+    (histogram zero-crossing detection, magnitude-based strength,
+    multi-output MACD component extraction)
+  - services/worker/strategies/bollinger_breakout.py: BollingerBandBreakoutStrategy
+    (upper/lower band breakout, volume confirmation with configurable multiplier,
+    band-distance strength and confidence)
+  - services/worker/strategies/stochastic_momentum.py: StochasticMomentumStrategy
+    (%K/%D crossover in oversold/overbought zones, RSI confirmation filter,
+    K-D divergence strength)
+  - services/worker/strategies/composite_signal.py: CompositeSignalStrategy
+    (meta-strategy with weighted voting, configurable quorum, min confidence,
+    indicator deduplication across sub-strategies)
+  - services/worker/strategies/_base.py: build_signal() factory with ULID generation
+  - tests/unit/test_signal_strategy_registry.py: 13 tests (registration 4,
+    retrieval 3, listing 3, unregister 2, thread safety 1)
+  - tests/unit/test_signal_strategies.py: 49 tests (MA crossover 12, RSI 8,
+    MACD 6, Bollinger 6, Stochastic 6, Composite 11)
+  - Total: 62 M4 tests passing, ruff clean
+
+M5 — Signal Evaluation Service & Risk Gate Pipeline
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/interfaces/signal_evaluation_service.py: SignalEvaluationServiceInterface
+    ABC (evaluate method: signal, deployment_id, execution_mode, correlation_id → SignalEvaluation)
+  - services/api/services/signal_evaluation_service.py: SignalEvaluationService
+    (6-gate fail-fast pipeline: data_quality → kill_switch → duplicate_filter →
+    risk_gate → position_sizing → var_impact; constructor takes 6 injected deps +
+    3 config params: var_threshold, quality_threshold, cooldown_seconds;
+    _check_data_quality: get_latest_score, composite_score >= threshold;
+    _check_kill_switch: is_halted with fail-safe on unavailability;
+    _check_duplicate: find_signals by strategy/symbol/since, match direction+bar_timestamp;
+    _check_risk_gate: proxy OrderRequest → check_order delegation;
+    _compute_position_size: SizingRequest → compute_size, zero-size rejection;
+    _check_var_impact: compute_var, |var_95| <= threshold;
+    _build_rejected: helper for rejected evaluation persistence;
+    structured logging with structlog at info/warning levels)
+  - tests/unit/test_signal_evaluation_service.py: 22 tests
+    (TestFullPipelineApproval 3, TestDataQualityGate 3, TestKillSwitchGate 2,
+    TestRiskGate 2, TestPositionSizing 3, TestVaRImpactGate 2,
+    TestDuplicateSignalFilter 3, TestGateOrdering 4)
+  - Total: 22 M5 tests passing, ruff clean
+
+### Track: Strategy Execution Engine
+
+M6 — Execution Loop Contracts & State Machine
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/execution_loop.py: LoopState (6 values: INITIALIZING, RUNNING,
+    PAUSED, COOLDOWN, STOPPED, FAILED), VALID_TRANSITIONS (frozenset map),
+    validate_transition(), is_terminal(), InvalidStateTransitionError,
+    ExecutionLoopConfig (frozen Pydantic: deployment_id, strategy_id,
+    signal_strategy_id, symbols with normalization/dedup, interval, execution_mode,
+    max_positions_per_symbol, cooldown_after_trade_s, max_consecutive_errors,
+    health_check_interval_s), LoopDiagnostics (frozen Pydantic: state, deployment_id,
+    14 counter/timestamp fields with ge=0 validation)
+  - libs/contracts/interfaces/execution_loop.py: ExecutionLoopInterface ABC
+    (start, stop, pause, resume, diagnostics, state property)
+  - libs/contracts/mocks/mock_execution_loop.py: MockExecutionLoop with state
+    machine enforcement, event_log, introspection (start/stop/pause/resume_count),
+    set_diagnostics, force_state, clear; thread-safe with Lock
+  - tests/unit/test_execution_loop_contracts.py: 65 tests
+    (TestLoopStateEnum 4, TestStateTransitions 12, TestInvalidTransitions 8,
+    TestTerminalStates 6, TestValidTransitionsCompleteness 2,
+    TestExecutionLoopConfig 14, TestLoopDiagnostics 5, TestMockExecutionLoop 14)
+  - Total: 65 M6 tests passing, ruff clean
+
+M7 — Strategy Execution Engine Implementation
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - services/worker/execution/__init__.py: package docstring
+  - services/worker/execution/strategy_execution_engine.py: StrategyExecutionEngine
+    (implements ExecutionLoopInterface; push-model via process_bar();
+    7 injected deps: signal_strategy, signal_evaluation_service, broker_adapter,
+    market_data_repository, indicator_engine, kill_switch_service, signal_repository;
+    full pipeline: kill switch check → candle buffer → compute_batch indicators →
+    strategy.evaluate → signal_evaluation_service.evaluate → persist signal+eval →
+    submit order (non-shadow); circuit breaker: consecutive_errors >= max trips FAILED;
+    kill switch halt → auto-pause; shadow mode skips order submission;
+    thread-safe diagnostics with Lock; candle buffer per symbol with max 500;
+    structured logging with structlog and correlation_id propagation)
+  - tests/unit/test_strategy_execution_engine.py: 34 tests
+    (TestLifecycle 11, TestBarProcessing 4, TestSignalOrderFlow 4,
+    TestErrorHandling 5, TestKillSwitch 3, TestGracefulShutdown 3,
+    TestThreadSafety 1, TestEdgeCases 3)
+  - Total: 34 M7 tests passing, ruff clean
+
+M8 — Execution Loop API & Monitoring
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - services/api/infrastructure/execution_loop_manager.py: ExecutionLoopManager
+    (thread-safe registry: register, unregister, get, list_deployments,
+    list_diagnostics, get_diagnostics, count, stop_all; max_concurrent limit;
+    one loop per deployment enforcement; Lock protection)
+  - services/api/routes/execution_loop.py: 6 REST endpoints
+    (POST /execution/loops — start, DELETE /{id} — stop,
+    PUT /{id}/pause, PUT /{id}/resume, GET /{id}/diagnostics,
+    GET /execution/loops — list all; auth enforcement with
+    get_current_user + require_scope("operator:write") for mutations;
+    StartLoopRequest/LoopStatusResponse/LoopListResponse schemas;
+    factory pattern for engine creation via app.state)
+  - services/api/main.py: router wired with execution_loop import
+  - tests/unit/test_execution_loop_routes.py: 24 tests
+    (TestManagerRegistration 6, TestManagerRetrieval 5, TestManagerStopAll 3,
+    TestManagerThreadSafety 1, TestExecutionLoopRoutes 9 — start/stop/pause/
+    resume/diagnostics/list/404/409 error paths)
+  - Total: 24 M8 tests passing, ruff clean
+
+### Track: Advanced Backtesting
+
+M9 — Event-Driven Backtesting Engine
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/backtest.py: Extended BacktestResult with signal_summary field;
+    added EquityCurvePoint, DrawdownPoint, SignalAttribution, BacktestSignalSummary
+    (Phase 8 M9 signal-attribution extensions)
+  - libs/contracts/interfaces/backtest_engine.py: BacktestEngineInterface ABC
+    (run method: BacktestConfig → BacktestResult)
+  - services/worker/research/backtest_engine.py: BacktestEngine
+    (event-driven replay: fetch candles → sort chronologically →
+    per-bar pipeline: update market price → process pending orders →
+    candle buffer → compute_batch indicators → strategy.evaluate →
+    signal attribution → submit order to PaperBrokerAdapter →
+    equity curve + drawdown tracking; position sizing: 95% cash fraction;
+    slippage: deducted from broker cash post-fill;
+    metrics: total return, annualized return, max drawdown, Sharpe ratio,
+    win rate, profit factor from round-trip trade pairing;
+    structured logging with correlation_id)
+  - tests/unit/test_backtest_engine.py: 34 tests
+    (TestKnownOutcome 4: rising/declining/flat/round-trip,
+    TestSignalAttribution 4: records created/fields/counts/empty,
+    TestFillSimulation 3: next-bar-open fill/timestamps/qty match,
+    TestCostModeling 4: commission reduces equity/slippage reduces equity/
+    commission recorded/slippage recorded,
+    TestEquityCurveAndDrawdown 6: populated/starts-at-initial/ends-at-final/
+    drawdown populated/non-positive/max-drawdown-declining,
+    TestPerformanceMetrics 6: positive return/zero return/win rate/
+    profit factor/bars count/sharpe,
+    TestMultiSymbol 2: all symbols processed/trades per symbol,
+    TestIndicatorIntegration 1: indicator names populated,
+    TestEdgeCases 4: single bar/empty data/config preserved/utc timestamp)
+  - Total: 34 M9 tests passing, ruff clean
+
+M10 — Walk-Forward Analysis & Parameter Optimization
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/walk_forward.py: OptimizationMetric (6 values: sharpe,
+    sortino, calmar, profit_factor, max_drawdown, total_return),
+    WalkForwardConfig (frozen: strategy_id, signal_strategy_id, symbols,
+    start/end_date, interval, in/out_of_sample_bars, step_bars,
+    parameter_grid, optimization_metric, initial_equity),
+    WalkForwardWindowResult (frozen: window_index, date ranges, best_params,
+    in/out_of_sample_metric, parameter_combinations_tested),
+    WalkForwardResult (frozen: config, windows, aggregate_oos_metric,
+    stability_score, best_consensus_params, total_backtests_run, completed_at)
+  - libs/contracts/interfaces/walk_forward_engine.py: WalkForwardEngineInterface
+    ABC (run: WalkForwardConfig → WalkForwardResult)
+  - services/worker/research/walk_forward_engine.py: WalkForwardEngine
+    (rolling window generation from date config; exhaustive grid search via
+    itertools.product; per-window: run BacktestEngine for each param combo
+    on in-sample → select best by metric → validate on OOS;
+    _extract_metric: supports all 6 OptimizationMetric values with
+    Calmar = annualized_return / |max_drawdown|;
+    _compute_stability: Counter-based param tuple frequency / total;
+    _compute_consensus: most common param dict;
+    structured logging with window-level progress)
+  - tests/unit/test_walk_forward.py: 23 tests
+    (TestWalkForwardContracts 5: config/frozen/window/aggregate/enum,
+    TestWindowSplitting 5: count/chronological/IS-before-OOS/no-overlap/single,
+    TestParameterEnumeration 4: all combos/single param/from grid/total count,
+    TestOptimization 3: IS metric/OOS metric/aggregate mean,
+    TestStabilityScoring 3: range/identical params/consensus populated,
+    TestEdgeCases 3: config preserved/UTC timestamp/sequential indices)
+  - Total: 23 M10 tests passing, ruff clean
+
+M11 — Monte Carlo Simulation & Statistical Validation
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/monte_carlo.py: SimulationMethod enum (TRADE_RESAMPLE, RETURN_BOOTSTRAP),
+    MonteCarloConfig (frozen, num_simulations 100-1M, method, confidence_levels, ruin_threshold,
+    random_seed), MonteCarloResult (frozen, equity/drawdown/sharpe/losing_streak percentiles,
+    probability_of_ruin, mean/median_final_equity, completed_at UTC)
+  - libs/contracts/interfaces/monte_carlo_engine.py: MonteCarloEngineInterface ABC
+    (run(backtest_result, config) -> MonteCarloResult)
+  - services/worker/research/monte_carlo_engine.py: MonteCarloEngine implementation
+    (trade resample via permutation, return bootstrap via replacement sampling,
+    round-trip P&L extraction, percentile-based confidence intervals, probability of ruin,
+    Sharpe annualised sqrt(252), max drawdown, longest losing streak, deterministic seeding
+    via np.random.default_rng, zero-trade edge case handling)
+  - tests/unit/test_monte_carlo.py: 20 tests — contracts (5), reproducibility (2),
+    confidence intervals (3), ruin probability (3), simulation methods (2), edge cases (5)
+  - Ruff clean, all 20 tests passing, 4159 total suite (no regressions)
+  - Total: 20 M11 tests passing, ruff clean
+
+### Track: Portfolio & Multi-Strategy
+
+M12 — Portfolio Allocation Contracts & Engine
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/portfolio.py: AllocationMethod (5 values), RebalanceFrequency (4 values),
+    StrategyAllocationConfig (frozen, strategy_id, deployment_id, fixed_weight, max_drawdown_limit),
+    StrategyAllocation (frozen, target/current weight, capital_allocated),
+    PortfolioConfig (frozen, portfolio_id, name, total_capital, allocation_method,
+    rebalance_frequency, rebalance_threshold, strategy_configs, max_total_leverage,
+    max_correlation_between_strategies),
+    PortfolioSnapshot (frozen, total_equity, total_pnl, allocations, correlations),
+    StrategyPerformanceInput (frozen, volatility, returns, win_rate, avg_win_loss_ratio),
+    AllocationResult (frozen, config, allocations, total_weight, leverage, constrained)
+  - libs/contracts/interfaces/portfolio_allocation_engine.py:
+    PortfolioAllocationEngineInterface ABC (compute_allocations)
+  - services/worker/research/portfolio_allocation_engine.py: PortfolioAllocationEngine
+    (equal weight, risk parity/inverse volatility, Kelly optimal with half-Kelly,
+    fixed weight, drawdown limit constraint, leverage cap, weight normalisation)
+  - tests/unit/test_portfolio_allocation.py: 30 tests — contracts (7), equal weight (3),
+    risk parity (4), inverse volatility (1), Kelly optimal (4), fixed (2),
+    constraints (2), edge cases (7)
+  - Ruff clean, all 30 tests passing, 4189 total suite (no regressions)
+  - Total: 30 M12 tests passing, ruff clean
+
+M13 — Multi-Strategy Orchestration & Rebalancing
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/portfolio_orchestrator.py: OrchestratorState (5 values),
+    RebalanceTrigger (4 values), RebalanceRequest, StrategyDrift,
+    RebalanceDecision (frozen, drifts, current/target allocations, max_drift),
+    RebalanceResult (frozen, success, strategies_adjusted, total_capital_moved),
+    OrchestratorDiagnostics (frozen, state, equity, drift, rebalance count)
+  - libs/contracts/interfaces/portfolio_orchestrator.py:
+    PortfolioOrchestratorInterface ABC (evaluate_rebalance, execute_rebalance,
+    get_diagnostics)
+  - services/worker/execution/portfolio_orchestrator.py: PortfolioOrchestrator
+    (drift detection, threshold/manual/scheduled trigger logic, capital movement
+    calculation, thread-safe rebalance counting, diagnostics reporting,
+    delegates to PortfolioAllocationEngine for target weights)
+  - tests/unit/test_portfolio_orchestrator.py: 23 tests — contracts (6),
+    drift detection (5), rebalance execution (4), diagnostics (4), edge cases (4)
+  - Ruff clean, all 23 tests passing, 4212 total suite (no regressions)
+  - Total: 23 M13 tests passing, ruff clean
+
+M14 — Cross-Strategy Risk Aggregation & Capital Optimization
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/cross_strategy_risk.py: VaRMethod (2 values), PortfolioVaR (frozen,
+    var_95, var_99, total_equity, lookback_days), MarginalVaR (frozen, per-strategy
+    VaR contribution), MarginalVaRResult (frozen, portfolio_var + decomposition),
+    CorrelationMatrix (frozen, strategy_ids, 2D matrix, high_correlation_pairs),
+    DrawdownSyncEvent (frozen, strategy_ids, avg/max drawdown, correlation),
+    OptimizationSuggestion (frozen, suggested_weights, expected return/vol/sharpe)
+  - libs/contracts/interfaces/cross_strategy_risk_service.py:
+    CrossStrategyRiskServiceInterface ABC (compute_portfolio_var, compute_marginal_var,
+    compute_correlation_matrix, detect_drawdown_sync, suggest_optimization)
+  - services/api/services/cross_strategy_risk_service.py: CrossStrategyRiskService
+    (historical VaR from weighted returns, component VaR decomposition,
+    np.corrcoef correlation matrix, drawdown sync detection,
+    mean-variance Markowitz optimization via Σ⁻¹μ analytical solution,
+    long-only constraint, equal-weight fallback for singular covariance)
+  - tests/unit/test_cross_strategy_risk.py: 25 tests — contracts (6), portfolio VaR (4),
+    marginal VaR (2), correlation matrix (4), drawdown sync (3), optimization (3),
+    edge cases (3)
+  - Ruff clean, all 25 tests passing, 4238 total suite (no regressions)
+  - Total: 25 M14 tests passing, ruff clean
+
+### Track: Acceptance
+
+M15 — Phase 8 Acceptance Test Pack
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - tests/acceptance/test_phase8_acceptance.py: 13 acceptance tests covering:
+    1. Data quality → signal suppression (grade thresholds: A/C/D/F)
+    2. Signal generation → order execution (backtest trade pipeline)
+    3. Walk-forward → parameter selection (config contract validation)
+    4. Monte Carlo → confidence intervals (5000 sims, percentile ordering,
+       reproducibility, bootstrap method)
+    5. Portfolio rebalancing (drift detection, capital movement, all methods)
+    6. Cross-strategy risk (VaR diversification, correlation matrix,
+       drawdown sync detection)
+    7. Optimization suggestion (mean-variance weights sum to 1.0)
+    8. Full pipeline integration (backtest → Monte Carlo → portfolio allocation
+       → risk aggregation end-to-end)
+  - Ruff clean, all 13 tests passing, 4251 total suite (no regressions)
+  - Total: 13 M15 acceptance tests passing, ruff clean
+
+---
+
+## Reconciliation
+
+Source milestone count: 16
+Done count: 16
+Open count: 0
+Assertion: 16 == 16 + 0 ✓
+Phase status: COMPLETE

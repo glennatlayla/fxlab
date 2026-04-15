@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# FXLab API — HorizontalPodAutoscaler
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Automatically scale the API deployment between 2 and 8 replicas based on
+#   CPU utilization. Ensures the service can handle traffic spikes during
+#   market hours without manual intervention.
+#
+# Scaling policy:
+#   - Target CPU: 70% of requested CPU (500m × 0.7 = 350m per pod).
+#   - Min replicas: 2 (high availability — always at least 2 pods).
+#   - Max replicas: 8 (cost ceiling — prevents runaway scaling).
+#   - Scale-up: up to 4 pods added per 60s (fast response to load).
+#   - Scale-down: 1 pod removed per 300s (conservative, avoids flapping).
+#
+# Prerequisites:
+#   - metrics-server must be deployed in the cluster.
+#   - Resource requests must be set on the deployment (see api-deployment.yaml).
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-hpa.yaml
+#   kubectl get hpa -n fxlab
+# ---------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fxlab-api
+  namespace: fxlab
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fxlab-api
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300

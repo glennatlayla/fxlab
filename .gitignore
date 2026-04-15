@@ -67,3 +67,36 @@ service-account*.json
 
 # Archive (local backups)
 .archive/
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Database files
+*.db
+*.sqlite3
+
+# Build artifacts and release archives
+*.zip
+
+# Binary documents (keep source, not generated docs)
+*.docx
+*.pdf
+
+# User specification folders (not source code)
+User Spec/
+Strategy Repo/
+
+# Temporary / debug files
+ship.errors.txt
+
+# Claude working files
+.claude/
+
+# FUSE mount artifacts
+.fuse_hidden*
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/

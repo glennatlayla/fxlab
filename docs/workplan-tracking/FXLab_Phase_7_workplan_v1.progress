@@ -1,0 +1,281 @@
+# FXLab Phase 7 — Progress Tracking
+# Source: FXLab_Phase_7_workplan_v1.md
+# Seeded: 2026-04-12
+# Source milestone count: 16
+# Source milestone IDs: M0, M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14, M15
+
+## Milestone Status
+
+### Track: Market Data Pipeline
+
+M0 — Market Data Contracts, Interfaces & Storage Schema
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/market_data.py: CandleInterval, Candle, TickData, DataGap, MarketDataQuery, MarketDataPage
+  - libs/contracts/interfaces/market_data_repository.py: MarketDataRepositoryInterface (5 methods)
+  - libs/contracts/models.py: CandleRecord, DataGapRecord ORM models
+  - libs/contracts/mocks/mock_market_data_repository.py: full mock implementation
+  - services/api/repositories/sql_market_data_repository.py: SQLite upsert, cursor pagination, gap detection
+  - migrations/versions/20260412_0015_add_candle_and_data_gap_tables.py: Alembic migration
+  - tests/unit/test_market_data_contracts.py: 25 tests passing
+  - tests/unit/test_market_data_repository.py: 26 tests passing
+  - tests/integration/test_market_data_sql_integration.py: 17 tests passing (incl. 10K candle perf benchmark)
+  - Full regression: 2699 unit + 174 integration = 2873 tests passing, 83.96% coverage
+
+M1 — Alpaca Market Data Collector
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/interfaces/market_data_provider.py: MarketDataProviderInterface (3 methods)
+  - libs/contracts/collection.py: CollectionResult, SymbolCollectionResult contracts
+  - libs/contracts/mocks/mock_market_data_provider.py: mock provider with introspection
+  - libs/contracts/alpaca_config.py: extended with data_base_url, bars_url()
+  - services/worker/collectors/alpaca_market_data_provider.py: httpx-based, pagination, error mapping
+  - services/worker/collectors/market_data_collector.py: batched collection, gap detection, error isolation
+  - services/worker/tasks/market_data_tasks.py: collect_historical_bars, backfill_gaps entry points
+  - services/api/metrics.py: 4 new Prometheus metrics (candles_collected, errors, gaps, duration)
+  - tests/unit/test_market_data_provider.py: 13 tests
+  - tests/unit/test_alpaca_market_data_provider.py: 12 tests
+  - tests/unit/test_market_data_collector.py: 11 tests
+  - tests/unit/test_collection_contracts.py: 9 tests
+  - tests/unit/test_market_data_tasks.py: 10 tests
+  - tests/integration/test_market_data_collector_integration.py: 5 tests
+  - Full regression: 2754 unit + 179 integration = 2933 tests passing, 83.89% coverage
+
+M2 — Market Data API Endpoints
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - services/api/routes/market_data.py: GET /candles, GET /candles/latest, GET /gaps, POST /backfill
+  - services/api/auth.py: added operator:write scope to admin and operator roles
+  - services/api/main.py: registered market_data router
+  - LTTB downsampling integrated for large result sets (threshold=2000)
+  - Scope enforcement: feeds:read for reads, operator:write for backfill
+  - tests/unit/test_market_data_routes.py: 14 tests (auth, serialization, error handling)
+  - Full regression: 2767 unit + 179 integration = 2946 tests, 83.82% coverage
+  - Note: Frontend TypeScript integration deferred to frontend track
+
+M3 — Real-Time Market Data Streaming
+Status: DONE
+Completed: 2026-04-13
+Verification:
+  - libs/contracts/ws_messages.py: Added MARKET_DATA_UPDATE enum and WsMarketDataUpdate payload model
+  - libs/contracts/interfaces/bar_stream_interface.py: BarStreamInterface ABC, BarCallback type alias
+  - services/worker/streams/__init__.py: Package init
+  - services/worker/streams/alpaca_bar_stream.py: Full AlpacaBarStream implementation
+    - WebSocket auth via Alpaca key/secret, subscribe to "bars" channel
+    - Candle normalization (Alpaca JSON → Candle contract, CandleInterval.M1)
+    - Repository persistence via upsert_candles
+    - Callback dispatch with error isolation per callback
+    - Thread-safe: all shared state under threading.Lock (§0.6 compliant)
+    - Exponential backoff reconnect: 1s → 2s → 4s → 8s → 16s max
+    - Auth failure (code 402) → ExternalServiceError (fatal, no retry)
+    - Diagnostics: connected, bars_received, last_bar_at, reconnect_count, errors, uptime_seconds
+  - services/api/routes/ws_market_data.py: WebSocket /ws/market-data/{symbol} endpoint
+    - JWT auth via query parameter (same pattern as ws_positions)
+    - market_data_ws_manager (WebSocketConnectionManager keyed by symbol)
+    - REST /ws/market-data/stats diagnostics endpoint
+    - Symbol normalization to uppercase
+  - services/api/main.py: ws_market_data router registered
+  - tests/unit/test_alpaca_bar_stream.py: 36 tests
+    - Bar parsing (7): valid, missing fields, uppercase, optional, zero volume
+    - Callback dispatch (3): single, multiple, error isolation
+    - Repository persistence (3): upsert, failure isolation, no-repo dispatch
+    - Subscription (5): normalize, additive, empty ignore, unsubscribe, nonexistent
+    - Diagnostics (4): initial, after bars, after subscribe, error count
+    - Lifecycle (3): stop idempotent, start sets running, double-start raises
+    - Message routing (5): bar, success auth, success connected, non-JSON, non-array
+    - Error handling (4): auth 402 raises, non-auth error, on_error, on_close
+    - Thread safety (2): concurrent bar processing, concurrent registration
+  - tests/unit/test_ws_market_data.py: 8 tests
+    - Auth (4): valid token, no token, invalid token, expired token
+    - Lifecycle (2): connected message includes symbol, symbol normalized
+    - Stats (2): empty stats, connection info
+  - All 44 M3 tests passing, ruff lint clean
+
+### Track: Technical Indicators
+
+M4 — Indicator Calculation Engine (Core Library)
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/indicator.py: IndicatorCalculator protocol, IndicatorInfo, IndicatorResult, IndicatorRequest, IndicatorParam
+  - libs/contracts/errors.py: IndicatorNotFoundError added to exception hierarchy
+  - libs/indicators/engine.py: IndicatorEngine with compute(), compute_batch(), OHLCV extraction
+  - libs/indicators/registry.py: IndicatorRegistry with register/get/list_available/has/count/clear/names
+  - tests/unit/test_indicator_contracts.py: 19 tests (params, info, result, request, protocol)
+  - tests/unit/test_indicator_registry.py: 17 tests (registration, lookup, listing, thread safety)
+  - tests/unit/test_indicator_engine.py: 18 tests (extraction, compute, batch, params, errors)
+  - Full regression: 2821 unit + 179 integration = 3000 tests passing, 83.96% coverage
+
+M5 — Trend and Momentum Indicators
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/indicators/trend.py: SMA, EMA, WMA, DEMA, TEMA (all vectorized numpy)
+  - libs/indicators/momentum.py: MACD, RSI, Stochastic, StochasticRSI, ROC, MOM, Williams_R, CCI
+  - libs/indicators/__init__.py: auto-registration of all 13 indicators in default_registry
+  - _ema_array: NaN-aware chaining for DEMA/TEMA double/triple EMA passes
+  - tests/unit/test_trend_indicators.py: 39 tests (SMA, EMA, WMA, DEMA, TEMA + properties)
+  - tests/unit/test_momentum_indicators.py: 42 tests (all 8 momentum + registration)
+  - Full regression: 2956 unit + 179 integration = 3135 tests passing, 84.30% coverage
+
+M6 — Volatility and Volume Indicators
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/indicators/volatility.py: BollingerBands, ATR, Keltner, DonchianChannel, StandardDeviation, HistoricalVolatility
+  - libs/indicators/volume.py: OBV, VWAP, ADL, MFI, CMF
+  - libs/indicators/__init__.py: auto-registration of all 11 M6 indicators (24 total)
+  - tests/unit/test_volatility_indicators.py: 27 tests (all 6 volatility indicators)
+  - tests/unit/test_volume_indicators.py: 27 tests (all 5 volume + registration)
+  - Full regression: 2956 unit + 179 integration = 3135 tests passing, 84.30% coverage
+
+M7 — Indicator API, DSL Integration & Frontend Visualization
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - services/api/services/interfaces/indicator_service_interface.py: IndicatorServiceInterface ABC
+  - services/api/services/indicator_service.py: IndicatorService (compute, batch, list, info)
+  - services/api/routes/indicators.py: GET /indicators, GET /indicators/{name}/info, POST /indicators/compute
+  - services/api/main.py: registered indicators router
+  - NaN→null serialization, multi-output component support, scope enforcement (feeds:read)
+  - tests/unit/test_indicator_service.py: 8 tests (compute, batch, list, info, errors)
+  - tests/unit/test_indicator_routes.py: 15 tests (list, info, compute, auth, errors)
+  - Full regression: 2969 unit + 179 integration = 3148 tests passing, 84.14% coverage
+  - Note: DSL integration and frontend deferred to respective tracks
+
+### Track: Advanced Risk Management
+
+M8 — Portfolio Risk Analytics Engine
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/risk_analytics.py: VaRMethod, VaRResult, CorrelationEntry, CorrelationMatrix, SymbolConcentration, ConcentrationReport, PortfolioRiskSummary
+  - libs/contracts/interfaces/risk_analytics_service.py: RiskAnalyticsServiceInterface (4 methods)
+  - services/api/services/risk_analytics_service.py: Historical VaR, CVaR, Pearson correlation, HHI concentration, exposure breakdown
+  - services/api/routes/risk_analytics.py: GET /risk/analytics/var, /correlation, /concentration, /summary
+  - services/api/main.py: registered risk_analytics router
+  - Scope enforcement: deployments:read for all endpoints
+  - tests/unit/test_risk_analytics_contracts.py: 36 tests (VaRResult, CorrelationEntry, CorrelationMatrix, SymbolConcentration, ConcentrationReport, PortfolioRiskSummary)
+  - tests/unit/test_risk_analytics_service.py: 26 tests (VaR, CVaR, correlation matrix, HHI, concentration, exposure, edge cases)
+  - tests/unit/test_risk_analytics_routes.py: 12 tests (auth, serialization, error handling)
+  - Full regression: 3043 unit + 179 integration = 3222 tests passing, 84.30% coverage
+
+M9 — Stress Testing and Scenario Analysis
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/stress_test.py: ScenarioLibrary, StressScenario, SymbolStressImpact, StressTestResult, PREDEFINED_SCENARIOS
+  - libs/contracts/interfaces/stress_test_service.py: StressTestServiceInterface (3 methods)
+  - services/api/services/stress_test_service.py: Custom+predefined scenario execution, halt detection, margin impact
+  - services/api/routes/stress_test.py: POST /risk/stress-test, POST /risk/stress-test/custom, GET /risk/stress-test/scenarios
+  - services/api/main.py: registered stress_test router
+  - 4 predefined scenarios: Flash Crash 2010, COVID March 2020, Rate Hike 2022, Sector Rotation
+  - tests/unit/test_stress_test_contracts.py: 21 tests
+  - tests/unit/test_stress_test_service.py: 19 tests (custom, predefined, halt trigger, edge cases)
+  - tests/unit/test_stress_test_routes.py: 9 tests (auth, serialization, errors)
+  - Full regression: 3092 unit + 179 integration = 3271 tests passing, 84.38% coverage
+  - Note: Frontend components deferred to frontend track
+
+M10 — Dynamic Position Sizing
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/position_sizing.py: SizingMethod, SizingRequest, SizingResult (frozen Pydantic models)
+  - libs/contracts/interfaces/position_sizing_service.py: PositionSizingServiceInterface (2 methods)
+  - services/api/services/position_sizing_service.py: FIXED, ATR_BASED, KELLY, RISK_PARITY, EQUAL_WEIGHT methods
+  - services/api/routes/position_sizing.py: POST /risk/position-size, GET /risk/position-size/methods
+  - services/api/main.py: registered position_sizing router
+  - Stateless service: pure computation, no DB dependencies
+  - Kelly criterion: half-Kelly with 50% cap, negative → zero
+  - ATR-based: risk_budget / (ATR × multiplier) with stop-loss calculation
+  - Risk parity fallback to equal weight without ATR data
+  - Risk gate cap enforcement across all methods
+  - tests/unit/test_position_sizing_service.py: 24 tests (all methods, caps, errors, contracts)
+  - tests/unit/test_position_sizing_routes.py: 11 tests (auth, serialization, errors, methods listing)
+  - Full regression: 3128 unit + 179 integration = 3307 tests passing, 84.54% coverage
+  - Known pre-existing failures: 9 kill_switch_routes (module ordering), 1 OIDC flaky
+
+M11 — Risk Dashboard and Alerting
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/risk_alert.py: RiskAlertType, RiskAlertConfig, RiskAlert, RiskAlertEvaluation
+  - libs/contracts/interfaces/risk_alert_service.py: RiskAlertServiceInterface (4 methods)
+  - libs/contracts/interfaces/risk_alert_config_repository.py: RiskAlertConfigRepositoryInterface (4 methods)
+  - libs/contracts/mocks/mock_risk_alert_config_repository.py: in-memory mock with introspection
+  - libs/contracts/models.py: RiskAlertConfigRecord ORM model (SQL persistence)
+  - libs/contracts/notification.py: Added VAR_THRESHOLD_BREACH, CONCENTRATION_THRESHOLD_BREACH, CORRELATION_SPIKE triggers
+  - services/api/repositories/sql_risk_alert_config_repository.py: SQL upsert, find_all, find_all_enabled
+  - services/api/services/risk_alert_service.py: VaR breach, concentration breach, correlation spike evaluation
+  - services/api/routes/risk_alert.py: POST /evaluate, GET /config, PUT /config, GET /configs
+  - services/api/infrastructure/notification_config.py: 3 new alert rules for risk triggers
+  - services/api/main.py: registered risk_alert router
+  - Integrates with RiskAnalyticsService for metrics and IncidentManager for dispatch
+  - tests/unit/test_risk_alert_contracts.py: 19 tests
+  - tests/unit/test_risk_alert_service.py: 17 tests (VaR, concentration, correlation, config CRUD, dispatch)
+  - tests/unit/test_risk_alert_routes.py: 12 tests (auth, scope enforcement, serialization, errors)
+  - Full regression: 3176 unit tests passing, 84.41% coverage
+  - Known pre-existing failures: 9 kill_switch_routes, 1 OIDC flaky
+  - Note: Frontend React dashboard components deferred to frontend track
+
+### Track: Strategy Intelligence
+
+M12 — Backtesting Engine Enhancement
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/backtest.py: BacktestInterval, BacktestConfig, BacktestBar, BacktestTrade, BacktestResult (frozen Pydantic models)
+  - libs/contracts/interfaces/indicator_resolver.py: IndicatorResolverInterface (4 methods)
+  - services/worker/research/indicator_resolver.py: IndicatorResolver with LRU cache, lookback buffer, thread safety
+  - tests/unit/test_backtest_contracts.py: 32 tests (interval, config, bar, trade, result validation)
+  - tests/unit/test_indicator_resolver.py: 21 tests (resolve, resolve_at_bar, cache, helpers)
+  - Full regression: 3228 unit + 179 integration = 3407 tests passing, 84.47% coverage
+  - Known pre-existing failures: 9 kill_switch_routes (module ordering), 1 OIDC flaky
+
+M13 — Strategy Performance Comparison and Ranking
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - libs/contracts/strategy_comparison.py: StrategyRankingCriteria, StrategyComparisonRequest, StrategyMetrics, StrategyRank, StrategyComparisonResult
+  - libs/contracts/interfaces/strategy_comparison_service.py: StrategyComparisonServiceInterface (2 methods)
+  - services/api/services/strategy_comparison_service.py: Sortino, Calmar, risk-adjusted return, ranking with deterministic tiebreaker
+  - services/api/routes/strategy_comparison.py: POST /strategies/compare, GET /strategies/{id}/metrics
+  - services/api/main.py: registered strategy_comparison router
+  - tests/unit/test_strategy_comparison_contracts.py: 17 tests
+  - tests/unit/test_strategy_comparison_service.py: 20 tests (ranking, Sortino, Calmar, metrics, edge cases)
+  - tests/unit/test_strategy_comparison_routes.py: 7 tests (auth, serialization, errors)
+  - Full regression: 3272 unit + 179 integration = 3451 tests passing, 84.47% coverage
+  - Known pre-existing failures: 9 kill_switch_routes, 1 OIDC flaky
+  - Note: Frontend components deferred to frontend track
+
+M14 — Candlestick Chart Component and Technical Analysis View
+Status: DEFERRED
+Notes: Frontend React/TypeScript milestone. Deferred to frontend track. Backend APIs (M2 candle endpoints, M7 indicator endpoints) are ready for frontend integration.
+
+M15 — Phase 7 Acceptance Test Pack and Documentation
+Status: DONE
+Completed: 2026-04-12
+Verification:
+  - tests/integration/test_phase7_acceptance.py: 11 acceptance tests
+    - Market data → indicator pipeline (SMA, RSI, caching, multi-symbol, resolve_at_bar)
+    - Backtest contracts round-trip (full BacktestResult construction + serialization)
+    - Strategy comparison integration (3-strategy ranking by Sharpe)
+    - Indicator accuracy (SMA known values, batch multi-symbol)
+    - Performance: 10K candle SMA < 1s, cache prevents recomputation
+  - Full regression: 3272 unit + 190 integration = 3462 tests passing, 84.47% coverage
+  - Known pre-existing failures: 9 kill_switch_routes (module ordering), 1 OIDC flaky
+  - Note: Frontend tests and DEPLOYMENT.md updates deferred to frontend track
+
+---
+
+## Reconciliation
+
+Source milestone count: 16
+Done count: 15
+Open count: 1
+Assertion: 16 == 15 + 1 ✓
+Notes: M14 (Frontend Charts) remains open — deferred to frontend track.
+Phase status: IN_PROGRESS (1 milestone deferred to frontend track)

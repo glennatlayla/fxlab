@@ -1,0 +1,107 @@
+# FXLab Prometheus Configuration
+# ============================================================================
+#
+# Purpose:
+#   Defines all metrics scrape targets (API, infrastructure), alert rules,
+#   and Alertmanager routing for the FXLab production stack.
+#
+# Scrape Jobs:
+#   - fxlab-api: FastAPI metrics endpoint (15s interval)
+#   - node-exporter: Host CPU, memory, disk metrics (15s interval)
+#   - cadvisor: Container resource metrics (30s interval)
+#
+# Alert Management:
+#   - Loads rules from /etc/prometheus/alerts.yml (26 alert rules)
+#   - Routes all alerts to Alertmanager at alertmanager:9093
+#   - Evaluation interval: 15s (matches scrape interval for tight feedback)
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'fxlab-prod'
+    environment: 'production'
+
+# Alert rules files
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Scrape configurations
+scrape_configs:
+
+  # =========================================================================
+  # FXLab API — Application metrics
+  # =========================================================================
+  # Scrapes /metrics endpoint from the FastAPI backend.
+  # Metrics: order latency, kill switch MTTH, broker request duration,
+  # API request counters/histograms, etc.
+  #
+  # Expected uptime: always (API must be healthy, otherwise page immediately)
+  - job_name: 'fxlab-api'
+    scheme: 'http'
+    static_configs:
+      - targets: ['fxlab-api:8000']
+        labels:
+          service: 'api'
+          layer: 'application'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    relabel_configs:
+      # Add container_id label for correlation with cadvisor
+      - source_labels: [__address__]
+        regex: '([^:]+):[0-9]+'
+        target_label: 'instance'
+
+  # =========================================================================
+  # Node Exporter — Host metrics
+  # =========================================================================
+  # Scrapes CPU, memory, disk, network, and system metrics from the host.
+  # Metrics: node_cpu, node_memory, node_filesystem, node_network, node_load, etc.
+  #
+  # Alerts: HighCPU, HighMemory, DiskUsage, ContainerRestarting
+  - job_name: 'node-exporter'
+    scheme: 'http'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: 'node-exporter'
+          layer: 'infrastructure'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  # =========================================================================
+  # cAdvisor — Container metrics
+  # =========================================================================
+  # Scrapes resource metrics for all containers on the host.
+  # Metrics: container_cpu, container_memory, container_network, etc.
+  #
+  # Alerts: container resource limits, memory pressure, network saturation
+  - job_name: 'cadvisor'
+    scheme: 'http'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: 'cadvisor'
+          layer: 'infrastructure'
+    scrape_interval: 30s
+    scrape_timeout: 25s
+    metrics_path: '/metrics'
+
+# Remote storage (optional — commented out by default)
+# Uncomment to enable long-term metric storage in an external backend
+# (e.g., Prometheus remote storage, Thanos, or cloud provider).
+#
+# remote_write:
+#   - url: 'https://remote-storage-url/api/prom/push'
+#     write_relabel_configs:
+#       - source_labels: [__name__]
+#         regex: '(up|prometheus_.*|go_.*|node_.*)'
+#         action: 'drop'  # Exclude unneeded metrics to save storage

@@ -1,0 +1,95 @@
+# FXLab Phase 6 — Progress Tracking
+# Source: FXLab_Phase_6_workplan_v1.md
+# Seeded: 2026-04-12
+# Source milestone count: 14
+# Source milestone IDs: M0, M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13
+
+## Milestone Status
+
+### Track: Identity & Auth
+
+M0 — Keycloak Token Validation and RS256 Migration
+Status: DONE
+Completed: 2026-04-12
+Notes: Core implemented in prior phases. Gap fill: AuthMode enum, auth_mode field on AuthenticatedUser, GET /admin/secrets/expiring endpoint. 37 tests passing (8 new + 17 KC validator + 12 admin).
+
+M1 — Frontend OIDC Integration
+Status: DONE
+Completed: 2026-04-12
+Notes: OidcProvider.tsx with PKCE auth code flow via oidc-client-ts, InMemoryWebStorage (no localStorage), automatic silent renewal, RP-initiated logout. AuthGate.tsx mode switch (VITE_AUTH_MODE=oidc|local). .env.example updated with OIDC variables (VITE_OIDC_AUTHORITY, VITE_OIDC_CLIENT_ID, etc.). 20 new tests (15 OidcProvider + 5 AuthGate), 1191 total frontend tests passing.
+
+M2 — Admin Panel: User Management and Secret Rotation UI
+Status: DONE
+Completed: 2026-04-12
+Notes: AdminLayout.tsx with sidebar nav (Users/Secrets tabs), admin:manage scope enforcement. UserManagement.tsx: user table with search/filter, create-user modal, role editing, password reset. SecretManagement.tsx: secret table with expiring indicators, rotate functionality, expiring-only toggle. Admin API service (features/admin/api.ts) with 7 endpoints. Router updated with /admin routes and scope guard. 15 new tests (8 UserManagement + 7 SecretManagement), 1262 total frontend tests passing.
+
+### Track: Live Trading
+
+M3 — Live Execution Service and Broker Credential Wiring
+Status: DONE
+Completed: 2026-04-12
+Notes: LiveExecutionService with mandatory kill switch pre-check, risk gate enforcement, database persistence before broker submission. LiveExecutionServiceInterface, live routes (POST/GET /live/orders, positions, pnl, cancel, sync), KillSwitchActiveError, live:trade scope + live_trader role. 36 new tests (27 service + 9 routes), 2539 total passing, 85.82% coverage.
+
+M4 — Multi-Broker Expansion: Schwab/TD Ameritrade Adapter
+Status: DONE
+Completed: 2026-04-12
+Notes: SchwabConfig Pydantic model (frozen, factory methods, URL properties). SchwabOAuthManager with thread-safe token lifecycle, auto-refresh 120s before expiry, Basic auth to token endpoint. SchwabBrokerAdapter implementing all 12 BrokerAdapterInterface methods: submit/cancel/get/list orders, get fills/positions/account, diagnostics, market hours. OAuth Bearer token injection on every request. Full Schwab status mapping (20 statuses). Error mapping: 401/403→AuthError, 404→NotFoundError, 429/5xx→TransientError. Retry with exponential backoff. 75 new tests (29 auth + 46 adapter), 2651 total passing, 86.40% coverage.
+
+M5 — Live Integration Tests and Performance Validation
+Status: DONE
+Completed: 2026-04-12
+Notes: Full integration test suite validating LiveExecutionService with real SQL repositories (SQLite) + MockBrokerAdapter. test_live_execution_integration.py (14 tests): order lifecycle, kill switch blocking, risk gate enforcement, concurrent submission, deployment validation, idempotency, order sync. test_multi_broker_integration.py (8 tests): parallel broker execution, failover, position/P&L isolation, registry operations. locustfile_live.py: 4 load test scenarios (order throughput, mixed workload, kill switch MTTH, P&L latency). SLO validation report with all 5 SLOs passing. Bug fix: datetime-to-ISO conversion in LiveExecutionService for SQL repo compatibility. 22 new tests, 2727 total passing, 84.41% coverage.
+
+M6 — MinIO Artifact Storage Wiring and Deployment Pipeline
+Status: DONE
+Completed: 2026-04-12
+Notes: TODO ISS-012 resolved. MinIO backend wired into get_artifact_storage() with env-based config (MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_SECURE). Lifespan initializes storage on startup with graceful failure handling. DeploymentPipeline service with staging validation gates, promotion with automatic rollback, and audit trail. K8s manifests for staging (1 replica, MinIO HTTP) and production (3 replicas, MinIO TLS, topology spread). Staging-to-production runbook updated with infrastructure promotion procedure. 37 new tests (15 wiring + 22 pipeline), 2576 total passing, 86.32% coverage.
+
+### Track: Trader UX
+
+M7 — Real-Time Position Dashboard (WebSocket)
+Status: DONE
+Completed: 2026-04-12
+Notes: WsMessageType enum and frozen Pydantic message contracts (WsPositionItem, WsPositionUpdate, WsOrderUpdate, WsAccountUpdate, WsFillEvent, WsPnlUpdate, WsMessage envelope). WebSocketConnectionManager with asyncio.Lock, deployment-scoped rooms, dead-connection cleanup on broadcast. ws_positions WebSocket endpoint at /ws/positions/{deployment_id} with JWT auth via query param, connected message, ping/pong. REST /ws/stats for diagnostics. Frontend useWebSocket hook with auto-reconnect, exponential backoff, auth-failure detection (4008 no retry). LiveDashboard component: connection status indicator, account summary cards, positions table with P&L coloring, recent orders with status badges. 50 new tests (14 ws_manager + 6 ws_positions + 13 useWebSocket + 23 LiveDashboard — backend: 2671 passing, 86.51% coverage; frontend: 1227 passing).
+
+M8 — Execution Reports and Order History
+Status: DONE
+Completed: 2026-04-12
+Notes: New contracts: OrderHistoryQuery, OrderHistoryItem, FillItem, OrderHistoryPage, ExecutionReportSummary, SymbolBreakdown, ModeBreakdown (libs/contracts/execution_report.py). Extended ExecutionAnalysisInterface with get_order_history(), get_execution_report(), export_orders_csv(). Service methods: paginated order history with filtering (symbol/side/status/mode/date_range), sorting, CSV export; aggregate metrics with fill_rate, volume, commission, symbol/mode breakdowns. Three new API endpoints: GET /execution-analysis/orders (paginated), GET /execution-analysis/report (aggregates), GET /execution-analysis/export (CSV). Frontend: OrderHistory.tsx (filterable sortable paginated table with status badges, row expansion for fills, CSV export), ExecutionReport.tsx (date-range dashboard with summary cards, symbol/mode breakdowns, latency percentiles). API service layer at features/execution/api.ts. 42 new tests (22 backend + 9 OrderHistory + 11 ExecutionReport). Backend: 2693 passing, 85.67% coverage; frontend: 20 new tests passing, TypeScript clean, ESLint clean.
+
+M9 — Strategy P&L Tracking and Performance Attribution
+Status: DONE
+Completed: 2026-04-12
+Notes: Full P&L attribution system. Backend: PnlSnapshot ORM model + Alembic migration (0012), PnlSnapshotRepositoryInterface, SqlPnlSnapshotRepository (upsert semantics), MockPnlSnapshotRepository, PnlAttributionServiceInterface, PnlAttributionService (FIFO trade matching, Sharpe ratio, max drawdown, per-symbol attribution, strategy comparison, daily snapshots). 5 API endpoints at /pnl/* (summary, timeseries, attribution, comparison, snapshot) with deployments:read scope. Pydantic contracts: PnlSummary, PnlTimeseriesPoint, SymbolAttribution, PnlAttributionReport, PnlComparisonReport, PnlSnapshotRecord. 42 backend tests (10 repo + 19 service + 13 routes). Frontend: pnlApi service (features/pnl/api.ts) with retry/backoff, error hierarchy. StrategyPnL.tsx page with equity curve (recharts AreaChart), performance metric cards (net P&L, win rate, Sharpe, drawdown, profit factor, trades), P&L breakdown, trade statistics, per-symbol attribution table. Route at /pnl/:deploymentId with deployments:read scope guard. 14 frontend tests. Lint clean (ruff + ESLint), TypeScript clean.
+
+M10 — Enhanced Strategy Studio (Resolve TODO M26)
+Status: DONE
+Completed: 2026-04-12
+Notes: Full DSL editor with live validation, auto-completion, and line numbers. Backend: DSL tokenizer/parser (recursive descent, 14 indicators, 6 built-in variables, arithmetic/logic/comparison operators), StrategyService (create/get/list/validate), SqlStrategyRepository (ULID, optimistic locking), strategy routes (POST/GET /strategies, POST /validate-dsl, GET /strategies list). Frontend: DslEditor component (debounced validation, auto-completion dropdown for indicators/variables/keywords, validation errors with line/col/suggestion, indicator/variable badges), integrated into StrategyDraftForm conditions step. StrategyStudio submit handler wired to strategyApi.createStrategy() with error handling and navigation. 61 backend tests (32 DSL validator + 17 service + 12 routes), 34 DslEditor component tests. 1310 total frontend tests passing. TypeScript clean, ESLint clean, ruff clean.
+
+### Track: Compliance & Automation
+
+M11 — Trade Execution Reports for Regulatory Compliance
+Status: DONE
+Completed: 2026-04-12
+Notes: Compliance report contracts (ComplianceOrderRecord, ExecutionComplianceReport, BestExecutionRecord, BestExecutionReport, VenueRoutingRecord, VenueRoutingReport, MonthlySummary) in libs/contracts/compliance_report.py. ComplianceReportServiceInterface with 5 abstract methods. ComplianceReportService production implementation with order querying, best execution analysis (slippage vs limit price, fill latency), venue routing aggregation, monthly summaries, CSV export. 5 API endpoints at /compliance/* (execution-report, best-execution, venue-routing, monthly-summary, execution-report/csv), all requiring compliance:read scope. compliance:read added to all RBAC roles. 12 new tests (4 execution report + 2 best execution + 2 venue routing + 2 monthly summary + 2 CSV export). Backend: 2705 passing, 84.31% coverage. Lint clean.
+
+M12 — Audit Trail Export and Retention Policy
+Status: DONE
+Completed: 2026-04-12
+Notes: Full audit export and data retention system. Contracts: AuditExportFormat (JSON/CSV/NDJSON), AuditExportRequest, AuditExportResult (SHA-256 tamper-evident hash), RetentionEntityType (4 types), RetentionPolicyEntry, RetentionPolicyConfig, ArchiveSummary. Interfaces: AuditExportServiceInterface (4 methods), RetentionServiceInterface (3 methods), AuditExportRepositoryInterface (4 methods). Services: AuditExportService (batch fetching, 3 format outputs, gzip compression, SHA-256 hashing), RetentionService (archive expired records past retention period, purge archived records past grace period, entity-type→ORM model mapping). ORM models: ArchivedAuditEvent, ArchivedOrder, AuditExportJob. SQL repository: SqlAuditExportRepository. Routes: POST /audit/export, GET /audit/export/{job_id}, GET /audit/export/{job_id}/content, GET /audit/retention-policy (all scope-protected). Alembic migration 0013 (3 new tables + indexes). 43 new tests (19 export service + 13 retention service + 11 routes). 2052+ backend tests passing. Ruff clean.
+
+M13 — Incident Automation: PagerDuty/Slack Integration
+Status: DONE
+Completed: 2026-04-12
+Notes: Full incident automation system with PagerDuty and Slack integration. Contracts: IncidentSeverity (P1-P4), NotificationChannel (Slack/PagerDuty), AlertTriggerType (7 event types), IncidentStatus (triggered/acknowledged/resolved/escalated), AlertRule, EscalationPolicy, IncidentRecord, NotificationResult. Interfaces: NotificationProviderInterface (send_alert/send_resolution), IncidentRepositoryInterface (save/find_by_id/find_open/find_unacknowledged_past_sla). Providers: SlackNotificationProvider (webhook with severity-coded attachments, connection error handling), PagerDutyNotificationProvider (Events API v2 trigger/resolve, severity mapping P1→critical/P2→error/P3→warning/P4→info, incident_id as dedup_key). IncidentManager: create incident with alert rule matching, dispatch to configured channels, acknowledge/resolve lifecycle, auto-escalation check (P1: 15min, P2: 1hr). NotificationConfig: 7 default alert rules covering all trigger types, 2 escalation policies, factory function with env-based credential wiring. Mock: MockIncidentRepository with SLA query support. 37 new tests (11 providers + 13 incident manager + 13 config). 2089+ backend tests passing. Ruff clean.
+
+---
+
+## Reconciliation
+
+Source milestone count: 14
+Done count: 14
+Open count: 0
+Assertion: 14 == 14 + 0 ✓
+Phase status: COMPLETE

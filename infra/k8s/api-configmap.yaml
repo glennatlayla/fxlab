@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# FXLab API — ConfigMap (non-secret configuration)
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Store non-secret configuration values injected into the API pods as
+#   environment variables. Changing values here triggers a rollout if the
+#   deployment references the ConfigMap via envFrom.
+#
+# Guidelines:
+#   - NEVER put secrets here (database passwords, JWT keys, API keys).
+#     Use api-secrets.yaml or an external secrets manager for those.
+#   - Values should match .env.example documentation.
+#   - CORS_ALLOWED_ORIGINS must be updated per environment.
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-configmap.yaml
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: fxlab
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+data:
+  # -- Application ----------------------------------------------------------
+  ENVIRONMENT: production
+  LOG_LEVEL: INFO
+
+  # -- Database connection pool ---------------------------------------------
+  # See DEPLOYMENT.md for tuning guidance.
+  DB_POOL_SIZE: "5"
+  DB_POOL_OVERFLOW: "10"
+  DB_POOL_TIMEOUT: "30"
+  DB_STATEMENT_TIMEOUT_MS: "30000"
+  DB_SQL_ECHO: "false"
+
+  # -- Redis ----------------------------------------------------------------
+  # REDIS_URL is a secret — set in api-secrets.yaml or external secret store.
+  # These are non-secret Redis tuning params.
+
+  # -- Rate limiting --------------------------------------------------------
+  RATE_LIMIT_GOVERNANCE_LIMIT: "20"
+  RATE_LIMIT_AUTH_LIMIT: "10"
+  RATE_LIMIT_DEFAULT_LIMIT: "100"
+  RATE_LIMIT_BACKEND: memory
+
+  # -- CORS -----------------------------------------------------------------
+  # Update per environment. Comma-separated origins.
+  CORS_ALLOWED_ORIGINS: https://fxlab.example.com
+
+  # -- Request limits -------------------------------------------------------
+  MAX_REQUEST_BODY_BYTES: "524288"
+
+  # -- Graceful shutdown ----------------------------------------------------
+  DRAIN_TIMEOUT_S: "30"

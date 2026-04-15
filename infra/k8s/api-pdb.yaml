@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------------------
+# FXLab API — PodDisruptionBudget
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Guarantee at least 1 API pod is always running during voluntary
+#   disruptions (node drains, cluster upgrades, spot instance reclaims).
+#   This prevents complete service outage during maintenance.
+#
+# Design rationale:
+#   With minReplicas=2, minAvailable=1 allows one pod to be evicted at a
+#   time. The rolling update strategy (maxUnavailable=0) in the deployment
+#   also cooperates with this constraint — combined, they ensure traffic
+#   is always served during both deploys and node maintenance.
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-pdb.yaml
+#   kubectl get pdb -n fxlab
+# ---------------------------------------------------------------------------
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fxlab-api
+  namespace: fxlab
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fxlab-api

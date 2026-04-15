@@ -1,0 +1,120 @@
+# ---------------------------------------------------------------------------
+# FXLab API — NetworkPolicy
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Restrict network access to and from API pods using Kubernetes
+#   NetworkPolicy. This implements the principle of least privilege:
+#     - Ingress: only from the ingress controller (and Prometheus scraper).
+#     - Egress: only to PostgreSQL, Redis, and broker APIs.
+#
+# Prerequisites:
+#   - A CNI plugin that supports NetworkPolicy (Calico, Cilium, etc.).
+#   - Ingress controller pods must carry the label:
+#       app.kubernetes.io/name: ingress-nginx
+#     (adjust if using a different ingress controller).
+#
+# Design rationale:
+#   The API has exactly three external dependencies: PostgreSQL, Redis, and
+#   broker REST/WebSocket APIs. DNS egress (port 53) is required for
+#   service discovery within the cluster and external hostname resolution
+#   for broker APIs (e.g., api.alpaca.markets).
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-networkpolicy.yaml
+#   kubectl get networkpolicy -n fxlab
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fxlab-api
+  namespace: fxlab
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+spec:
+  podSelector:
+    matchLabels:
+      app: fxlab-api
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # -------------------------------------------------------------------------
+  # Ingress: who can talk TO the API pods
+  # -------------------------------------------------------------------------
+  ingress:
+    # Allow traffic from the ingress controller (external client requests).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - port: http
+          protocol: TCP
+
+    # Allow Prometheus to scrape /metrics.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: http
+          protocol: TCP
+
+  # -------------------------------------------------------------------------
+  # Egress: what the API pods can talk TO
+  # -------------------------------------------------------------------------
+  egress:
+    # DNS resolution (required for all service discovery and external hosts).
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # PostgreSQL — cluster-internal database.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+
+    # Redis — cluster-internal cache and rate limit backend.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - port: 6379
+          protocol: TCP
+
+    # Broker REST APIs and WebSocket streams (external).
+    # Alpaca paper: paper-api.alpaca.markets (HTTPS 443)
+    # Alpaca live:  api.alpaca.markets (HTTPS 443)
+    # Alpaca data:  stream.data.alpaca.markets (WSS 443)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # Block access to cluster-internal and private networks
+              # except the explicitly allowed services above.
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP

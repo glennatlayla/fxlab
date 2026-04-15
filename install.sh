@@ -534,7 +534,8 @@ wait_for_healthy() {
         total_count="$(docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null | \
             python3 -c "import sys,json; data=[json.loads(l) for l in sys.stdin]; print(len(data))" 2>/dev/null || echo "0")"
 
-        if [[ "$healthy_count" -ge 5 ]] && [[ "$total_count" -ge 5 ]]; then
+        # All services must be healthy — compare healthy to total, not a hardcoded number.
+        if [[ "$total_count" -gt 0 ]] && [[ "$healthy_count" -eq "$total_count" ]]; then
             log INFO "All ${healthy_count}/${total_count} services are healthy."
             return 0
         fi
@@ -643,6 +644,34 @@ verify_installation() {
         log INFO "Redis is ready."
     else
         log WARN "Redis not responding."
+    fi
+
+    # Prometheus
+    if docker compose -f docker-compose.prod.yml exec -T prometheus wget --spider -q http://localhost:9090/-/healthy 2>/dev/null; then
+        log INFO "Prometheus is ready."
+    else
+        log WARN "Prometheus not responding."
+    fi
+
+    # Alertmanager
+    if docker compose -f docker-compose.prod.yml exec -T alertmanager wget --spider -q http://localhost:9093/-/healthy 2>/dev/null; then
+        log INFO "Alertmanager is ready."
+    else
+        log WARN "Alertmanager not responding."
+    fi
+
+    # Node Exporter
+    if docker compose -f docker-compose.prod.yml exec -T node-exporter wget --spider -q http://localhost:9100/metrics 2>/dev/null; then
+        log INFO "Node Exporter is ready."
+    else
+        log WARN "Node Exporter not responding."
+    fi
+
+    # cAdvisor
+    if docker compose -f docker-compose.prod.yml exec -T cadvisor wget --spider -q http://localhost:8080/healthz 2>/dev/null; then
+        log INFO "cAdvisor is ready."
+    else
+        log WARN "cAdvisor not responding."
     fi
 
     # Print deployed version

@@ -1,0 +1,149 @@
+# ---------------------------------------------------------------------------
+# FXLab API — Production Deployment
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Deploy the FXLab API to production with MinIO artifact storage backend,
+#   production-grade resource limits, multi-replica HA, and strict probes.
+#
+# Differences from staging (api-deployment-staging.yaml):
+#   - 3 replicas for high availability (HPA may scale further).
+#   - Higher resource limits (500m/1000m CPU, 256Mi/512Mi memory).
+#   - ENVIRONMENT=production disables debug logging and test bypass.
+#   - MINIO_SECURE=true for TLS-encrypted object storage traffic.
+#   - Topology spread constraints for fault tolerance across nodes.
+#   - 45s termination grace period (exceeds DRAIN_TIMEOUT_S=30).
+#
+# Prerequisites:
+#   - Production MinIO cluster deployed and accessible.
+#   - api-config-production ConfigMap applied.
+#   - api-secrets-production Secret applied with:
+#     - JWT_SECRET_KEY, DATABASE_URL, MINIO_ACCESS_KEY, MINIO_SECRET_KEY.
+#   - Staging validation passed (see docs/runbooks/staging-to-production.md).
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-deployment-production.yaml
+#   kubectl rollout status deployment/fxlab-api -n fxlab
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fxlab-api
+  namespace: fxlab
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+    environment: production
+spec:
+  replicas: 3
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: fxlab-api
+      environment: production
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Create a new pod before terminating old ones — zero-downtime deploys.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: fxlab-api
+        component: api
+        part-of: fxlab
+        environment: production
+    spec:
+      serviceAccountName: fxlab-api
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: fxlab-api
+          image: fxlab-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          # -----------------------------------------------------------
+          # Startup probe — allows up to 120s for initial boot
+          # (migrations, connection pool warmup, MinIO bucket check).
+          # -----------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 3
+          # -----------------------------------------------------------
+          # Liveness — lightweight DB check. Failure = restart pod.
+          # -----------------------------------------------------------
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          # -----------------------------------------------------------
+          # Readiness — comprehensive dependency check (DB + MinIO +
+          # brokers). Failure = remove from Service endpoints.
+          # -----------------------------------------------------------
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 2
+            successThreshold: 1
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          envFrom:
+            - configMapRef:
+                name: api-config-production
+            - secretRef:
+                name: api-secrets-production
+          env:
+            - name: ENVIRONMENT
+              value: production
+            # -- Artifact storage: MinIO backend for production --
+            - name: ARTIFACT_STORAGE_BACKEND
+              value: minio
+            - name: MINIO_ENDPOINT
+              value: minio.fxlab.svc.cluster.local:9000
+            - name: MINIO_SECURE
+              value: "true"
+            # MINIO_ACCESS_KEY and MINIO_SECRET_KEY from api-secrets-production
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DRAIN_TIMEOUT_S
+              value: "30"
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+      # Spread pods across nodes for fault tolerance.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: fxlab-api
+              environment: production

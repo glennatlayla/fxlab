@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# FXLab API — Kubernetes Service (ClusterIP)
+# ---------------------------------------------------------------------------
+# Purpose:
+#   Expose the FXLab API within the cluster as a stable network endpoint.
+#   ClusterIP type means the service is only accessible from within the
+#   cluster — external access is handled by an Ingress or LoadBalancer.
+#
+# Usage:
+#   kubectl apply -f infra/k8s/api-service.yaml
+#   # Other services connect via: http://fxlab-api.fxlab.svc.cluster.local:80
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: fxlab-api
+  namespace: fxlab
+  labels:
+    app: fxlab-api
+    component: api
+    part-of: fxlab
+spec:
+  type: ClusterIP
+  selector:
+    app: fxlab-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

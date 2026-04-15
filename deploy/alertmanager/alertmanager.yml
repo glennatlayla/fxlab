@@ -1,0 +1,193 @@
+# FXLab Alertmanager Configuration
+# ============================================================================
+#
+# Purpose:
+#   Routes alerts from Prometheus to notification channels (webhook, email,
+#   Slack, PagerDuty) based on severity and labels. Groups related alerts
+#   to reduce notification noise.
+#
+# Alert Routing:
+#   - Critical alerts: Fast deduplication (30s), 1h repeat
+#   - Warning alerts: Slower deduplication (30s), 4h repeat
+#   - All alerts: Webhook (configurable via env)
+#
+# Receivers:
+#   - default_webhook: POST to ALERTMANAGER_WEBHOOK_URL
+#   - (email, slack, pagerduty: see examples below)
+
+global:
+  # Resolver timeout is the time after which an alert expires if Prometheus
+  # has not sent any updates. Set to 5 minutes to avoid stale alerts.
+  resolve_timeout: 5m
+
+  # Optional SMTP configuration for email notifications
+  # Uncomment and configure to enable email alerts
+  # smtp_smarthost: 'smtp.example.com:587'
+  # smtp_auth_username: 'alerting@example.com'
+  # smtp_auth_password: '${SMTP_PASSWORD}'
+  # smtp_require_tls: true
+  # smtp_from: 'alertmanager@fxlab.ai'
+
+templates: []
+
+# Root route with default receiver and grouping
+route:
+  receiver: 'default_webhook'
+  group_by: ['alertname', 'severity', 'instance']
+  group_wait: 30s          # Wait 30s to batch initial alerts
+  group_interval: 5m       # Re-evaluate grouping every 5m
+  repeat_interval: 4h      # Repeat notifications every 4h
+
+  # Critical alerts: shorter timings to page on-call immediately
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical_webhook'
+      group_by: ['alertname', 'severity', 'instance']
+      group_wait: 10s       # Page immediately (10s batch window)
+      group_interval: 5m
+      repeat_interval: 1h   # Repeat critical alerts every 1h
+
+    - match:
+        severity: warning
+      receiver: 'default_webhook'
+      group_by: ['alertname', 'severity', 'instance']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h   # Warning repeat every 4h
+
+# Receivers (notification endpoints)
+receivers:
+
+  # =========================================================================
+  # Default Webhook Receiver (configurable)
+  # =========================================================================
+  # Routes all non-critical alerts to a webhook URL.
+  # URL configured via ALERTMANAGER_WEBHOOK_URL environment variable.
+  #
+  # Example payload:
+  #   {
+  #     "status": "firing",
+  #     "alerts": [
+  #       {
+  #         "status": "firing",
+  #         "labels": {"alertname": "APIHighLatency", "severity": "warning"},
+  #         "annotations": {"summary": "API latency high", "runbook_url": "..."}
+  #       }
+  #     ],
+  #     "groupLabels": {"alertname": "APIHighLatency", "severity": "warning"},
+  #     "commonLabels": {...},
+  #     "commonAnnotations": {...},
+  #     "externalURL": "http://alertmanager:9093",
+  #     "version": "4",
+  #     "groupKey": "{}:{alertname=\"APIHighLatency\", severity=\"warning\"}"
+  #   }
+  - name: 'default_webhook'
+    webhook_configs:
+      - url: '${ALERTMANAGER_WEBHOOK_URL:-http://localhost:5000/alerts}'
+        send_resolved: true
+
+  # =========================================================================
+  # Critical Webhook Receiver (for page-immediately scenarios)
+  # =========================================================================
+  # Routes critical alerts (trading safety, DB down, broker disconnected)
+  # to a dedicated webhook with faster processing requirements.
+  - name: 'critical_webhook'
+    webhook_configs:
+      - url: '${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://localhost:5001/alerts/critical}'
+        send_resolved: true
+
+# ============================================================================
+# OPTIONAL RECEIVER EXAMPLES (uncomment and configure to enable)
+# ============================================================================
+
+# Email Receiver Example
+# Uncomment to send alerts to email addresses.
+# Requires SMTP configuration in global section above.
+#
+# - name: 'email_trading_team'
+#   email_configs:
+#     - to: 'trading-team@fxlab.ai'
+#       from: 'alertmanager@fxlab.ai'
+#       smarthost: 'smtp.example.com:587'
+#       auth_username: 'alerting@example.com'
+#       auth_password: '${SMTP_PASSWORD}'
+#       require_tls: true
+#       headers:
+#         Subject: '[{{ .GroupLabels.alertname }}] {{ .Status }}'
+#       html: |
+#         <p>Alert: {{ .GroupLabels.alertname }}</p>
+#         <p>Severity: {{ .GroupLabels.severity }}</p>
+#         {{ range .Alerts }}
+#         <p>{{ .Annotations.summary }}</p>
+#         {{ end }}
+
+# Slack Receiver Example
+# Uncomment to send alerts to Slack.
+# Requires SLACK_WEBHOOK_URL environment variable with incoming webhook.
+#
+# - name: 'slack_trading_alerts'
+#   slack_configs:
+#     - api_url: '${SLACK_WEBHOOK_URL}'
+#       channel: '#trading-alerts'
+#       title: '{{ .GroupLabels.alertname }}'
+#       text: |
+#         *Severity:* {{ .GroupLabels.severity }}
+#         *Alert:* {{ .GroupLabels.alertname }}
+#         {{ range .Alerts }}
+#         {{ .Annotations.summary }}
+#         {{ end }}
+#       send_resolved: true
+#       color: '{{ if eq .Status "firing" }}#FF0000{{ else }}#00FF00{{ end }}'
+
+# PagerDuty Receiver Example
+# Uncomment to trigger PagerDuty incidents for critical alerts.
+# Requires PAGERDUTY_SERVICE_KEY environment variable (integration key).
+#
+# - name: 'pagerduty_trading_oncall'
+#   pagerduty_configs:
+#     - service_key: '${PAGERDUTY_SERVICE_KEY}'
+#       description: '{{ .GroupLabels.alertname }} - {{ .Status }}'
+#       details:
+#         severity: '{{ .GroupLabels.severity }}'
+#         instance: '{{ .GroupLabels.instance }}'
+#         summary: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+
+# ============================================================================
+# ENVIRONMENT CONFIGURATION GUIDE
+# ============================================================================
+#
+# Set these in your .env.production or deployment orchestration:
+#
+#   ALERTMANAGER_WEBHOOK_URL
+#       Default notification webhook for warning/info alerts.
+#       Example: https://webhook.example.com/alerts/warning
+#
+#   ALERTMANAGER_CRITICAL_WEBHOOK_URL
+#       Critical-only webhook (trading safety, DB down, etc).
+#       Example: https://webhook.example.com/alerts/critical
+#
+#   SLACK_WEBHOOK_URL (optional)
+#       Slack incoming webhook for Slack integration.
+#       Format: https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXX
+#
+#   PAGERDUTY_SERVICE_KEY (optional)
+#       PagerDuty integration key for on-call escalation.
+#       Obtain from PagerDuty Integration → Events API v2
+#
+#   SMTP_PASSWORD (optional, if email enabled)
+#       SMTP password for sending alert emails.
+#
+# ============================================================================
+# TESTING
+# ============================================================================
+#
+# Validate YAML syntax:
+#   python3 -c "import yaml; yaml.safe_load(open('alertmanager.yml')); print('✓ Valid')"
+#
+# Test alert routing (amtool):
+#   docker run --rm prom/alertmanager:latest amtool config routes --config.file=/config/alertmanager.yml
+#
+# Trigger test alert:
+#   curl -X POST http://localhost:9093/api/v1/alerts -d '[{"labels":{"alertname":"TestAlert","severity":"critical"}}]'
+#

@@ -35,6 +35,13 @@ MAX_AI_FIX_ATTEMPTS=2
 # Source directories — only these are linted/formatted/tested
 SRC_DIRS=(services/ libs/ tests/)
 
+# All project directories that should be tracked in git.
+# commit_and_push() stages these; preflight warns about untracked files in them.
+PROJECT_DIRS=(
+    services/ libs/ tests/ frontend/ migrations/
+    deploy/ config/ infra/ scripts/ docs/
+)
+
 # Tool commands — set in preflight() after locating Python
 PY=()      # e.g. ("/path/to/.venv/bin/python")
 RUFF=()    # e.g. ("/path/to/.venv/bin/python" -m ruff)
@@ -467,25 +474,74 @@ Do not add stubs, TODOs, or placeholder code. Do not run any commands."
 commit_and_push() {
     step "Commit & push to ${BRANCH}"
 
-    # Stage tracked changes + new files in project dirs only (not random temp files)
-    git add -- "${SRC_DIRS[@]}" \
-        pyproject.toml pytest.ini setup.cfg \
-        ship.sh install.sh \
-        requirements*.txt \
-        .coveragerc .dockerignore .gitignore \
-        .env.example .env.production.template \
-        CLAUDE.md README.md DEVELOPMENT.md \
-        docker-compose*.yml \
-        frontend/ libs/ services/ tests/ \
-        2>/dev/null || true
+    # ---- Safety gate: warn about untracked source files ----
+    # If any project directory contains untracked files, they won't appear
+    # in the commit and the remote clone will be incomplete. This is the
+    # single most common cause of "works locally, fails on deploy".
+    local untracked_src=""
+    for dir in "${PROJECT_DIRS[@]}"; do
+        if [[ -d "$dir" ]]; then
+            local found
+            found="$(git ls-files --others --exclude-standard -- "$dir" 2>/dev/null | head -20)"
+            if [[ -n "$found" ]]; then
+                untracked_src+="$found"$'\n'
+            fi
+        fi
+    done
 
-    # Also stage any other tracked-but-modified files (e.g. CLAUDE.md)
+    # Also check standalone project files at repo root
+    local root_files=(
+        ship.sh install.sh uninstall.sh build-release.sh
+        requirements*.txt pyproject.toml pytest.ini setup.cfg
+        .coveragerc .dockerignore .gitignore .env.production.template
+        CLAUDE.md README.md README-INSTALL.md DEVELOPMENT.md AUDIT_TRAIL_IMPLEMENTATION.md
+        docker-compose*.yml alembic.ini Makefile
+    )
+    for pattern in "${root_files[@]}"; do
+        # shellcheck disable=SC2086
+        for f in $pattern; do
+            if [[ -f "$f" ]] && ! git ls-files --error-unmatch "$f" &>/dev/null; then
+                untracked_src+="$f"$'\n'
+            fi
+        done
+    done
+
+    if [[ -n "$untracked_src" ]]; then
+        local untracked_count
+        untracked_count="$(echo -n "$untracked_src" | grep -c . || true)"
+        warn "${untracked_count} untracked source file(s) found — staging them now:"
+        echo "$untracked_src" | head -10 | while IFS= read -r line; do
+            [[ -n "$line" ]] && echo -e "  ${YELLOW}+ ${line}${NC}"
+        done
+        if [[ "$untracked_count" -gt 10 ]]; then
+            echo -e "  ${YELLOW}... and $((untracked_count - 10)) more${NC}"
+        fi
+    fi
+
+    # ---- Stage everything ----
+    # 1. All project directories (source, tests, deploy configs, migrations)
+    for dir in "${PROJECT_DIRS[@]}"; do
+        [[ -d "$dir" ]] && git add -- "$dir" 2>/dev/null || true
+    done
+
+    # 2. Root-level project files (configs, scripts, docs)
+    for pattern in "${root_files[@]}"; do
+        # shellcheck disable=SC2086
+        git add -- $pattern 2>/dev/null || true
+    done
+
+    # 3. Tracked-but-modified files (catches anything we missed)
     git add -u
 
     if git diff --cached --quiet; then
         warn "Nothing to commit after staging."
         return 0
     fi
+
+    # Show what we're committing
+    local staged_count
+    staged_count="$(git diff --cached --name-only | wc -l | tr -d ' ')"
+    echo -e "  Staging ${BOLD}${staged_count}${NC} file(s)"
 
     # Generate commit message
     local msg
@@ -498,6 +554,27 @@ ${msg}
 EOF
 )"
     ok "Committed: $(git rev-parse --short HEAD)"
+
+    # ---- Post-commit verification ----
+    # Check that no project source files remain untracked after commit.
+    # If they do, the commit is incomplete and the deploy will fail.
+    local still_untracked=""
+    for dir in "${PROJECT_DIRS[@]}"; do
+        if [[ -d "$dir" ]]; then
+            local found
+            found="$(git ls-files --others --exclude-standard -- "$dir" 2>/dev/null | head -5)"
+            if [[ -n "$found" ]]; then
+                still_untracked+="$found"$'\n'
+            fi
+        fi
+    done
+
+    if [[ -n "$still_untracked" ]]; then
+        warn "Source files still untracked after commit (check .gitignore):"
+        echo "$still_untracked" | head -5 | while IFS= read -r line; do
+            [[ -n "$line" ]] && echo -e "  ${YELLOW}? ${line}${NC}"
+        done
+    fi
 
     # Push
     step "Pushing to origin/${BRANCH}"
