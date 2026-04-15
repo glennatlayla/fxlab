@@ -70,6 +70,21 @@ SKIP_SYSTEMD="${SKIP_SYSTEMD:-0}"
 # can redirect install.sh output without editing this file.
 LOG_FILE="${LOG_FILE:-/var/log/fxlab/install-$(date +%Y%m%d-%H%M%S).log}"
 
+# FXLAB_LOG_DIR is the directory into which per-service failure logs are
+# written when `wait_for_healthy` reports a service as unhealthy. Each
+# failing service gets its own `failed-<service>-<ts>.log` file so the
+# operator can grep, diff, or attach it to a support ticket without
+# re-running the install. Overridable for tests that cannot write to
+# system directories. See _report_install_failure() for the full flow.
+FXLAB_LOG_DIR="${FXLAB_LOG_DIR:-/var/log/fxlab}"
+
+# INSTALL_ALL_LOGS=1 switches the diagnostic output from the default
+# per-service-file mode to a stdout dump of every failing service's full
+# log. Useful when the install is being streamed over ssh to a terminal
+# that will be archived, or when the operator wants to pipe the output
+# into a pager. Settable via env var OR the `--all-logs` CLI arg.
+INSTALL_ALL_LOGS="${INSTALL_ALL_LOGS:-0}"
+
 # Minimum requirements
 MIN_DOCKER_VERSION="24"
 MIN_GIT_VERSION="2"
@@ -804,13 +819,20 @@ print(ch, ct)
     fi
 
     log ERROR "Core services NOT healthy after ${max_wait}s."
-    docker compose -f docker-compose.prod.yml ps 2>&1 | tee -a "$LOG_FILE"
-    _report_unhealthy_services
+    # D4: emit the structured failure banner FIRST so the failing
+    # service names are visible in the first ~20 lines of stderr/stdout
+    # without the operator having to scroll. The banner also writes
+    # per-service log files under $FXLAB_LOG_DIR and prints their paths.
+    _report_install_failure | tee -a "$LOG_FILE"
     fail "Core services did not become healthy within ${max_wait}s. Full log: $LOG_FILE"
 }
 
 _report_unhealthy_services() {
-    # Log details for any unhealthy or non-running services.
+    # Legacy helper used by the WARN branch of wait_for_healthy (core is
+    # healthy but monitoring services are still settling). For the hard
+    # failure path — where the operator needs the root-cause service
+    # named prominently — use _report_install_failure() below, which
+    # emits the D4 diagnostic banner plus per-service log files.
     docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null | \
         python3 -c "
 import sys, json
@@ -825,6 +847,227 @@ for line in sys.stdin:
         docker compose -f docker-compose.prod.yml logs --tail 40 "$svc_name" 2>/dev/null || true
         echo ""
     done
+}
+
+# ---------------------------------------------------------------------------
+# D4 (2026-04-15 remediation) — structured install-failure diagnostics
+# ---------------------------------------------------------------------------
+#
+# During the 2026-04-15 minitux install failure the installer printed the
+# interleaved logs of every container, burying api's Redis EINVAL
+# crashloop under cadvisor and node-exporter noise. The operator had to
+# grep through ~400 lines to find the root cause.
+#
+# The three functions below fix that by:
+#
+#   _identify_unhealthy_services — classifies each service so the banner
+#       can distinguish "restart budget exhausted" (B3/D1 on-failure:3
+#       cap reached) from "still starting" / "unhealthy" / "blocked on
+#       deps". The exit code is preserved so the operator can correlate
+#       with the D1 exit(3) = ConfigError convention.
+#
+#   _write_per_service_log — materialises one `failed-<svc>-<ts>.log`
+#       file per failing service so operators can attach them to
+#       tickets, grep across them, or copy them off the minitux host
+#       with a single `scp` command.
+#
+#   _report_install_failure — orchestrator that emits the banner (failed
+#       service names guaranteed within the first 20 lines of output),
+#       the `docker compose ps` overview, the per-service log paths,
+#       and a short inline tail per failing service. Respects
+#       INSTALL_ALL_LOGS=1 to dump full logs to stdout instead.
+#
+# All three are sourced by tests/shell/test_install_diagnostics.sh —
+# the BASH_SOURCE guard at the bottom of this file prevents main() from
+# running when the test harness sources install.sh.
+
+_identify_unhealthy_services() {
+    # Read `docker compose ps --format json` output on stdin (one JSON
+    # object per line). Emit one TSV line per unhealthy service:
+    #
+    #     <service>\t<classification>\t<exit_code>
+    #
+    # Classifications (short keys — the banner maps them to human labels):
+    #     exhausted   — State=exited, ExitCode != 0. Under B3/D1
+    #                   on-failure:3 compose will NOT restart further.
+    #     starting    — State=running, Health=starting. Still within
+    #                   the healthcheck start_period window.
+    #     unhealthy   — State=running, Health=unhealthy. The container
+    #                   is alive but its healthcheck is failing.
+    #     restarting  — State=restarting. Budget may still have room.
+    #     blocked     — State in {created, paused}. Blocked on a
+    #                   depends_on upstream, never actually booted.
+    #     unknown:<s> — any other state we didn't enumerate.
+    #
+    # Healthy services (State=running AND Health in {healthy, ""} where
+    # the empty Health means "no healthcheck declared → implicitly OK")
+    # and exit-zero completions (State=exited, ExitCode=0) are elided
+    # from the output so the banner lists ONLY things the operator
+    # needs to care about.
+    python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        svc = json.loads(line)
+    except Exception:
+        continue
+    name = svc.get('Service') or svc.get('Name') or 'unknown'
+    state = svc.get('State', '')
+    health = svc.get('Health', '')
+    exit_code = svc.get('ExitCode', 0)
+    if state == 'exited' and exit_code != 0:
+        cls = 'exhausted'
+    elif state == 'exited' and exit_code == 0:
+        continue  # completed cleanly — not an unhealthy state
+    elif state == 'restarting':
+        cls = 'restarting'
+    elif state == 'running' and health == 'healthy':
+        continue
+    elif state == 'running' and health == 'starting':
+        cls = 'starting'
+    elif state == 'running' and health == 'unhealthy':
+        cls = 'unhealthy'
+    elif state == 'running' and not health:
+        continue  # running without healthcheck → implicit OK
+    elif state in ('created', 'paused'):
+        cls = 'blocked'
+    else:
+        cls = f'unknown:{state}'
+    print(f'{name}\t{cls}\t{exit_code}')
+" 2>/dev/null || true
+}
+
+_write_per_service_log() {
+    # Write the full compose log for one service to a dedicated file
+    # under FXLAB_LOG_DIR. Echo the file path so callers can surface it
+    # in the banner. Stderr is merged into the file so the operator
+    # gets the complete picture (compose sometimes emits warnings via
+    # stderr).
+    #
+    # Arguments:
+    #   $1 — service name (e.g. "api")
+    #   $2 — timestamp string (already formatted by caller so all the
+    #        files from one install attempt share a suffix)
+    local svc="$1" ts="$2"
+    local dest="${FXLAB_LOG_DIR}/failed-${svc}-${ts}.log"
+    mkdir -p "$FXLAB_LOG_DIR"
+    docker compose -f docker-compose.prod.yml logs "$svc" >"$dest" 2>&1 || true
+    echo "$dest"
+}
+
+_human_classification_label() {
+    # Map the short classification key (from _identify_unhealthy_services)
+    # to a human-readable label for the banner. Keeping this as a
+    # separate pure function makes the banner text changeable without
+    # touching the classification logic.
+    local cls="$1" exit_code="${2:-0}"
+    case "$cls" in
+        exhausted)   echo "restart budget exhausted (exit code ${exit_code})" ;;
+        starting)    echo "still starting (healthcheck has not yet passed)" ;;
+        unhealthy)   echo "unhealthy (container running, healthcheck failing)" ;;
+        restarting)  echo "restarting (budget may still have room)" ;;
+        blocked)     echo "blocked on deps (never started)" ;;
+        unknown:*)   echo "unexpected state: ${cls#unknown:}" ;;
+        *)           echo "$cls" ;;
+    esac
+}
+
+_report_install_failure() {
+    # Produce the D4 diagnostic banner for a failed install.
+    #
+    # Output structure (first 20 lines always carry the failed service
+    # names so the root cause is visible without scrolling):
+    #
+    #   <banner separator>
+    #     FAILED SERVICES: <name1> (<human-label1>), <name2> ...
+    #   <banner separator>
+    #
+    #   <docker compose ps overview — short table>
+    #
+    #   --- <svc1> — <human-label1> ---
+    #     full log: <path-to-per-service-file>
+    #     last 40 lines:
+    #       <tail of svc1>
+    #   (repeat for each failing svc)
+    #
+    # If INSTALL_ALL_LOGS=1 (either env var or --all-logs CLI flag),
+    # the per-service files are skipped and full logs dump to stdout.
+    #
+    # Callable on a healthy stack — returns silently without a banner
+    # (tested by test_all_healthy_produces_no_banner).
+
+    local ts
+    ts="$(date +%Y%m%d%H%M%S)"
+
+    local ps_json
+    ps_json="$(docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null)" || ps_json=""
+
+    local tsv
+    tsv="$(printf '%s\n' "$ps_json" | _identify_unhealthy_services)"
+
+    if [[ -z "$tsv" ]]; then
+        # Nothing to report — caller was defensive (e.g. wait_for_healthy
+        # timed out but the stack actually came up). No banner.
+        return 0
+    fi
+
+    # --- Build the banner (single-line service list) ---
+    local names_list=""
+    local svc class exit_code label
+    while IFS=$'\t' read -r svc class exit_code; do
+        [[ -z "$svc" ]] && continue
+        label="$(_human_classification_label "$class" "$exit_code")"
+        if [[ -n "$names_list" ]]; then
+            names_list="${names_list}, "
+        fi
+        names_list="${names_list}${svc} (${label})"
+    done <<< "$tsv"
+
+    echo
+    echo "=========================================================="
+    echo "  FAILED SERVICES: ${names_list}"
+    echo "=========================================================="
+    echo
+
+    # --- Compose state overview (one line per service) ---
+    echo "Compose state:"
+    docker compose -f docker-compose.prod.yml ps 2>&1 | sed 's/^/  /' || true
+    echo
+
+    # --- Per-service detail ---
+    if [[ "${INSTALL_ALL_LOGS}" == "1" ]]; then
+        echo "[INSTALL_ALL_LOGS=1] — full logs follow for each failing service."
+        echo "  (Per-service log files are NOT written in this mode.)"
+        echo
+        while IFS=$'\t' read -r svc class exit_code; do
+            [[ -z "$svc" ]] && continue
+            label="$(_human_classification_label "$class" "$exit_code")"
+            echo "--- ${svc} — ${label} ---"
+            docker compose -f docker-compose.prod.yml logs "$svc" 2>&1 || true
+            echo
+        done <<< "$tsv"
+        return 0
+    fi
+
+    # Default mode: per-service log files + short inline tails.
+    while IFS=$'\t' read -r svc class exit_code; do
+        [[ -z "$svc" ]] && continue
+        label="$(_human_classification_label "$class" "$exit_code")"
+        echo "--- ${svc} — ${label} ---"
+        local log_path
+        log_path="$(_write_per_service_log "$svc" "$ts")"
+        echo "  full log: ${log_path}"
+        echo "  last 40 lines:"
+        docker compose -f docker-compose.prod.yml logs --tail 40 "$svc" 2>&1 \
+            | sed 's/^/    /' || true
+        echo
+    done <<< "$tsv"
+
+    echo "(Re-run with INSTALL_ALL_LOGS=1 bash install.sh — or pass --all-logs —"
+    echo "to dump every failing service's full log to stdout in one stream.)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1008,9 +1251,52 @@ print_summary() {
 # Main
 # ---------------------------------------------------------------------------
 
+_parse_install_args() {
+    # Minimal CLI parser. Only `--all-logs` / `-h|--help` are supported
+    # today — additions should extend the case block below and document
+    # the new flag in the --help output. Unknown args fail loudly
+    # rather than being silently ignored (the most common installer
+    # mistake is a misspelled flag that looks like it worked).
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all-logs)
+                INSTALL_ALL_LOGS=1
+                shift
+                ;;
+            -h|--help)
+                cat <<EOF
+FXLab Platform Installer
+
+Usage:
+  sudo bash install.sh [--all-logs]
+
+Options:
+  --all-logs    On diagnostic failure, dump every failing service's
+                full log to stdout instead of writing them to
+                per-service files under \$FXLAB_LOG_DIR
+                (default: ${FXLAB_LOG_DIR}).
+                Equivalent to setting INSTALL_ALL_LOGS=1.
+  -h, --help    Show this help and exit.
+
+Environment variables (see top of install.sh for the full list):
+  FXLAB_HOME, FXLAB_REPO, FXLAB_BRANCH, FXLAB_LOG_DIR,
+  INSTALL_ALL_LOGS, SKIP_SYSTEMD, FXLAB_ALLOW_STALE_CODE
+EOF
+                exit 0
+                ;;
+            *)
+                fail "Unknown install.sh argument: '$1' (try --help)"
+                ;;
+        esac
+    done
+}
+
 main() {
+    _parse_install_args "$@"
+
     # Ensure log directory exists
     mkdir -p /var/log/fxlab
+    mkdir -p "${FXLAB_LOG_DIR}"
 
     echo -e "\n${BOLD}FXLab Platform Installer${NC}"
     echo -e "Installation log: $LOG_FILE\n"
