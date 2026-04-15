@@ -168,7 +168,7 @@ def _read_positive_int(env_var: str, default: int) -> int:
     return value
 
 
-def _get_pool_kwargs(database_url: str) -> dict:
+def _get_pool_kwargs(database_url: str) -> tuple[dict, dict]:
     """
     Build SQLAlchemy engine pool keyword arguments based on the database URL.
 
@@ -180,20 +180,28 @@ def _get_pool_kwargs(database_url: str) -> dict:
         database_url: The database connection URL.
 
     Returns:
-        Dict of keyword arguments suitable for ``create_engine(**kwargs)``.
+        A 2-tuple of:
+        - engine_kwargs: Dict of keyword arguments suitable for
+          ``create_engine(**engine_kwargs)`` (pool settings only, no
+          ``connect_args`` — those are in the second element).
+        - extra_connect_args: Dict of additional libpq/driver connect
+          options (e.g. PostgreSQL ``statement_timeout``).  The caller
+          must merge these into the ``connect_args`` dict passed to
+          ``create_engine()``.
 
     Raises:
         No exceptions raised; invalid env values fall back to defaults with
         CRITICAL-level log warnings.
 
     Example:
-        kwargs = _get_pool_kwargs("postgresql://u:p@host/db")
-        # {"pool_size": 5, "max_overflow": 10, "pool_timeout": 30, "pool_pre_ping": True}
+        engine_kw, pg_connect = _get_pool_kwargs("postgresql://u:p@host/db")
+        # engine_kw == {"pool_size": 20, "max_overflow": 20, ...}
+        # pg_connect == {"options": "-c statement_timeout=30000"}
     """
     if database_url.startswith("sqlite"):
         from sqlalchemy.pool import StaticPool
 
-        return {"poolclass": StaticPool}
+        return {"poolclass": StaticPool}, {}
 
     pool_size = _read_positive_int("DB_POOL_SIZE", _DEFAULT_POOL_SIZE)
     max_overflow = _read_positive_int("DB_POOL_OVERFLOW", _DEFAULT_POOL_OVERFLOW)
@@ -208,19 +216,25 @@ def _get_pool_kwargs(database_url: str) -> dict:
         "max_overflow": max_overflow,
         "pool_timeout": pool_timeout,
         "pool_pre_ping": True,  # evict stale connections before use
-        "connect_args": {
-            "options": f"-c statement_timeout={statement_timeout}",
-        },
+    }, {
+        # PostgreSQL statement timeout via libpq connect options.
+        # Returned separately so the caller can merge into _CONNECT_ARGS
+        # rather than passing a duplicate 'connect_args' to create_engine().
+        "options": f"-c statement_timeout={statement_timeout}",
     }
 
 
-_POOL_KWARGS = _get_pool_kwargs(_DATABASE_URL)
+_POOL_KWARGS, _PG_CONNECT_ARGS = _get_pool_kwargs(_DATABASE_URL)
 
 if _DATABASE_URL.startswith("sqlite"):
     # SQLite requires check_same_thread=False when used with FastAPI because
     # requests are handled in a thread pool and the session may be used from
     # a different thread than the one that created the connection.
     _CONNECT_ARGS = {"check_same_thread": False}
+else:
+    # Merge PostgreSQL-specific libpq options (e.g. statement_timeout)
+    # into connect_args.  _PG_CONNECT_ARGS is empty for SQLite.
+    _CONNECT_ARGS = {**_CONNECT_ARGS, **_PG_CONNECT_ARGS}
 
 engine = create_engine(
     _DATABASE_URL,

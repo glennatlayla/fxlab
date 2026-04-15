@@ -235,12 +235,12 @@ class TestStatementTimeout:
         """
         from services.api.db import _get_pool_kwargs
 
-        result = _get_pool_kwargs("postgresql://u:p@host:5432/db")
+        engine_kwargs, pg_connect_args = _get_pool_kwargs("postgresql://u:p@host:5432/db")
 
-        assert "connect_args" in result, (
+        assert "options" in pg_connect_args, (
             "PostgreSQL pool kwargs must include connect_args with statement_timeout"
         )
-        options = result["connect_args"].get("options", "")
+        options = pg_connect_args.get("options", "")
         assert "statement_timeout" in options, (
             f"connect_args options must include statement_timeout, got: {options}"
         )
@@ -249,9 +249,9 @@ class TestStatementTimeout:
         """Default statement_timeout should be 30000ms (30 seconds)."""
         from services.api.db import _get_pool_kwargs
 
-        result = _get_pool_kwargs("postgresql://u:p@host:5432/db")
+        engine_kwargs, pg_connect_args = _get_pool_kwargs("postgresql://u:p@host:5432/db")
 
-        options = result.get("connect_args", {}).get("options", "")
+        options = pg_connect_args.get("options", "")
         assert "statement_timeout=30000" in options, (
             f"Default statement_timeout should be 30000ms, got: {options}"
         )
@@ -261,9 +261,9 @@ class TestStatementTimeout:
         with patch.dict(os.environ, {"DB_STATEMENT_TIMEOUT_MS": "60000"}, clear=False):
             from services.api.db import _get_pool_kwargs
 
-            result = _get_pool_kwargs("postgresql://u:p@host:5432/db")
+            engine_kwargs, pg_connect_args = _get_pool_kwargs("postgresql://u:p@host:5432/db")
 
-        options = result.get("connect_args", {}).get("options", "")
+        options = pg_connect_args.get("options", "")
         assert "statement_timeout=60000" in options, (
             f"statement_timeout should be 60000 from env, got: {options}"
         )
@@ -272,10 +272,10 @@ class TestStatementTimeout:
         """SQLite URLs should not have connect_args with statement_timeout."""
         from services.api.db import _get_pool_kwargs
 
-        result = _get_pool_kwargs("sqlite:///./test.db")
+        engine_kwargs, sqlite_connect_args = _get_pool_kwargs("sqlite:///./test.db")
 
         # SQLite returns StaticPool config, should not have connect_args
-        assert "connect_args" not in result
+        assert sqlite_connect_args == {}
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +316,8 @@ class TestIncreasedPoolDefaults:
         with patch.dict(os.environ, env_clean, clear=True):
             from services.api.db import _get_pool_kwargs
 
-            result = _get_pool_kwargs("postgresql://u:p@host:5432/db")
+            engine_kwargs, pg_connect_args = _get_pool_kwargs("postgresql://u:p@host:5432/db")
 
-        assert result["pool_size"] == 20
-        assert result["max_overflow"] == 20
+        assert engine_kwargs["pool_size"] == 20
+        assert engine_kwargs["max_overflow"] == 20
+        assert "options" in pg_connect_args  # statement_timeout passed via libpq

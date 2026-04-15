@@ -510,7 +510,9 @@ build_and_start() {
     # Start services
     log INFO "Starting services..."
     if ! docker compose -f docker-compose.prod.yml up -d --remove-orphans 2>>"$LOG_FILE"; then
-        fail "Failed to start services. Check: docker compose -f docker-compose.prod.yml logs"
+        log ERROR "Service startup failed. Dumping container logs:"
+        docker compose -f docker-compose.prod.yml logs --tail 80 2>/dev/null || true
+        fail "Failed to start services. Full log: $LOG_FILE"
     fi
     log INFO "Services started."
 
@@ -545,9 +547,24 @@ wait_for_healthy() {
         elapsed=$((elapsed + interval))
     done
 
-    log WARN "Not all services healthy after ${max_wait}s. Checking status..."
-    docker compose -f docker-compose.prod.yml ps 2>>"$LOG_FILE"
-    fail "Services did not become healthy within ${max_wait}s. Check: docker compose -f docker-compose.prod.yml logs"
+    log WARN "Not all services healthy after ${max_wait}s. Dumping status and logs..."
+    docker compose -f docker-compose.prod.yml ps 2>&1 | tee -a "$LOG_FILE"
+    echo ""
+    log ERROR "Container logs for unhealthy/exited services:"
+    # Show logs for any container that is not healthy — these are the ones that matter.
+    docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null | \
+        python3 -c "
+import sys, json
+for line in sys.stdin:
+    svc = json.loads(line)
+    if svc.get('Health', '') != 'healthy' or svc.get('State', '') != 'running':
+        print(svc.get('Service', svc.get('Name', 'unknown')))
+" 2>/dev/null | while read -r svc_name; do
+        echo "=== $svc_name ==="
+        docker compose -f docker-compose.prod.yml logs --tail 40 "$svc_name" 2>/dev/null || true
+        echo ""
+    done
+    fail "Services did not become healthy within ${max_wait}s. Full log: $LOG_FILE"
 }
 
 # ---------------------------------------------------------------------------

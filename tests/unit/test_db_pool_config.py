@@ -28,7 +28,7 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env_clean, clear=True):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         assert result["pool_size"] == 20
 
     def test_custom_pool_size_from_env(self):
@@ -40,7 +40,7 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env, clear=False):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         assert result["pool_size"] == 20
 
     def test_custom_pool_overflow_from_env(self):
@@ -52,7 +52,7 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env, clear=False):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         assert result["max_overflow"] == 25
 
     def test_custom_pool_timeout_from_env(self):
@@ -64,7 +64,7 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env, clear=False):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         assert result["pool_timeout"] == 60
 
     def test_default_pool_timeout_is_30(self):
@@ -77,14 +77,14 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env_clean, clear=True):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         assert result["pool_timeout"] == 30
 
     def test_sqlite_returns_static_pool(self):
         """SQLite URLs get StaticPool, no pool_size/overflow/timeout."""
         import services.api.db as db_mod
 
-        result = db_mod._get_pool_kwargs("sqlite:///./test.db")
+        result, _ = db_mod._get_pool_kwargs("sqlite:///./test.db")
         from sqlalchemy.pool import StaticPool
 
         assert result["poolclass"] is StaticPool
@@ -100,7 +100,7 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env, clear=False):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         # Should fall back to default of 20
         assert result["pool_size"] == 20
 
@@ -113,7 +113,7 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env, clear=False):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         assert result["pool_size"] == 20
 
     def test_non_numeric_pool_size_uses_default(self):
@@ -125,5 +125,5 @@ class TestPoolConfigFromEnv:
         with patch.dict(os.environ, env, clear=False):
             import services.api.db as db_mod
 
-            result = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
+            result, _ = db_mod._get_pool_kwargs("postgresql://u:p@localhost:5432/db")
         assert result["pool_size"] == 20
