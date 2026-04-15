@@ -18,6 +18,7 @@ import pytest
 from libs.contracts.errors import ConfigError
 from services.api.infrastructure.redis_health import (
     _build_keepalive_options,
+    _classify_connection_error,
     _parse_redis_version,
     _strip_credentials,
     verify_redis_connection,
@@ -186,7 +187,7 @@ class TestVerifyRedisConnectionFailures:
         mock_client.ping.side_effect = Exception("Connection refused")
 
         with patch("redis.Redis.from_url", return_value=mock_client):
-            with pytest.raises(ConfigError, match="Cannot connect to Redis"):
+            with pytest.raises(ConfigError, match="Redis health check failed"):
                 verify_redis_connection("redis://localhost:6379/0")
 
         # Client should still be closed
@@ -562,3 +563,182 @@ class TestVerifyRedisConnectionSocketOptions:
                         f"This is the exact defect that crashed the minitux install "
                         f"on 2026-04-15."
                     )
+
+
+# ---------------------------------------------------------------------------
+# _classify_connection_error() tests (D2 — differentiated diagnostic messages)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyConnectionError:
+    """
+    Classify a Redis connection error into a diagnostic category.
+
+    The goal of this classifier is to stop misleading operators. Before D2,
+    a client-side setsockopt EINVAL surfaced as "Cannot connect to Redis,
+    ensure Redis is running" — which sent operators chasing a Redis
+    availability problem when the real defect was in our own socket-option
+    configuration. The classifier must distinguish:
+
+      * client_socket_option — OSError with EINVAL/ENOPROTOOPT in the
+        exception chain (kernel rejected our setsockopt call).
+      * tls — SSLError in the exception chain.
+      * network — anything else that looks like a connectivity failure.
+    """
+
+    def test_classify_einval_in_chain_returns_client_socket_option(self) -> None:
+        """EINVAL (22) from setsockopt classifies as client_socket_option."""
+        import errno
+
+        root_cause = OSError(errno.EINVAL, "Invalid argument")
+        wrapped = ConnectionError("socket connection failed")
+        wrapped.__cause__ = root_cause
+
+        category, diagnostic = _classify_connection_error(wrapped)
+
+        assert category == "client_socket_option"
+        # Message must NOT suggest "Redis is not running"
+        assert "not running" not in diagnostic.lower()
+        assert "unavailable" not in diagnostic.lower()
+        # Message MUST point at the client-side defect
+        assert "client-side" in diagnostic.lower() or "api" in diagnostic.lower()
+        assert "errno" in diagnostic.lower()
+        assert "einval" in diagnostic.lower()
+
+    def test_classify_enoprotoopt_in_chain_returns_client_socket_option(self) -> None:
+        """ENOPROTOOPT (92) also indicates a client-side option defect."""
+        import errno
+
+        exc = OSError(errno.ENOPROTOOPT, "Protocol not available")
+        category, diagnostic = _classify_connection_error(exc)
+
+        assert category == "client_socket_option"
+        assert "not running" not in diagnostic.lower()
+        assert "enoprotoopt" in diagnostic.lower()
+
+    def test_classify_econnrefused_returns_network(self) -> None:
+        """ECONNREFUSED means Redis is genuinely unreachable — network category."""
+        import errno
+
+        exc = OSError(errno.ECONNREFUSED, "Connection refused")
+        category, diagnostic = _classify_connection_error(exc)
+
+        assert category == "network"
+        # For this category it IS appropriate to tell the operator to check Redis.
+        assert "redis" in diagnostic.lower()
+        assert "refused" in diagnostic.lower() or "running" in diagnostic.lower()
+
+    def test_classify_ssl_error_returns_tls(self) -> None:
+        """SSLError anywhere in the chain classifies as tls."""
+        import ssl
+
+        root = ssl.SSLError("certificate verify failed")
+        wrapped = ConnectionError("TLS handshake failed")
+        wrapped.__cause__ = root
+
+        category, diagnostic = _classify_connection_error(wrapped)
+
+        assert category == "tls"
+        assert "tls" in diagnostic.lower() or "ssl" in diagnostic.lower()
+
+    def test_classify_generic_exception_returns_network(self) -> None:
+        """Unknown errors fall back to network category with generic hint."""
+        exc = RuntimeError("something weird happened")
+        category, diagnostic = _classify_connection_error(exc)
+
+        assert category == "network"
+        assert len(diagnostic) > 0
+
+    def test_classify_handles_context_chain_not_just_cause(self) -> None:
+        """
+        The classifier should also walk __context__ (implicit chaining) so that
+        `except Exception` blocks that wrap a setsockopt error without an
+        explicit `from` still get diagnosed correctly.
+        """
+        import errno
+
+        try:
+            try:
+                raise OSError(errno.EINVAL, "Invalid argument")
+            except OSError:
+                raise ConnectionError("wrapper")
+        except ConnectionError as wrapped:
+            category, diagnostic = _classify_connection_error(wrapped)
+
+        assert category == "client_socket_option"
+        assert "einval" in diagnostic.lower()
+
+    def test_classify_self_referential_chain_does_not_infinite_loop(self) -> None:
+        """Defensive: a cycle in __cause__ must not hang the classifier."""
+        a = RuntimeError("a")
+        b = RuntimeError("b")
+        a.__cause__ = b
+        b.__cause__ = a
+
+        # Must return without hanging.
+        category, diagnostic = _classify_connection_error(a)
+        assert category in ("network", "client_socket_option", "tls")
+        assert len(diagnostic) > 0
+
+
+class TestVerifyRedisConnectionClassifiedErrorMessages:
+    """
+    End-to-end: verify_redis_connection uses the classified diagnostic
+    message in the raised ConfigError, so the operator sees the right hint.
+    """
+
+    def test_einval_from_setsockopt_raises_client_side_configerror(self) -> None:
+        """
+        When redis-py raises a ConnectionError caused by EINVAL from
+        setsockopt, the ConfigError must name the client-side defect —
+        NOT tell the operator to check if Redis is running.
+        """
+        import errno
+
+        import redis
+
+        root_cause = OSError(errno.EINVAL, "Invalid argument")
+        wrapped = redis.ConnectionError("socket option setting failed")
+        wrapped.__cause__ = root_cause
+
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = wrapped
+
+        with patch("redis.Redis.from_url", return_value=mock_client):
+            with pytest.raises(ConfigError) as excinfo:
+                verify_redis_connection("redis://localhost:6379/0")
+
+        message = str(excinfo.value).lower()
+        # The misleading phrase that 2026-04-15 triage traced through must be gone.
+        assert "ensure redis is running" not in message, (
+            "Regression: client-side EINVAL should NOT surface as "
+            "'Ensure Redis is running'. Operators waste time checking a "
+            "healthy server. See D2 in the 2026-04-15 remediation plan."
+        )
+        assert "client-side" in message or "api" in message
+        assert "einval" in message
+
+    def test_econnrefused_keeps_ensure_redis_running_guidance(self) -> None:
+        """
+        ECONNREFUSED is genuinely a server-availability problem, so the
+        'Ensure Redis is running' hint is correct for this branch.
+        """
+        import errno
+
+        import redis
+
+        root = OSError(errno.ECONNREFUSED, "Connection refused")
+        wrapped = redis.ConnectionError("connection refused")
+        wrapped.__cause__ = root
+
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = wrapped
+
+        with patch("redis.Redis.from_url", return_value=mock_client):
+            with pytest.raises(ConfigError) as excinfo:
+                verify_redis_connection("redis://localhost:6379/0")
+
+        message = str(excinfo.value).lower()
+        assert "refused" in message or "running" in message
+        # And it must NOT misclassify as client-side.
+        assert "client-side" not in message

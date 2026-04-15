@@ -42,8 +42,10 @@ Example:
 
 from __future__ import annotations
 
+import errno
 import re
 import socket
+import ssl
 from typing import Any
 
 import structlog
@@ -109,6 +111,112 @@ def _build_keepalive_options() -> dict[int, int]:
         if hasattr(socket, attr_name):
             opts[getattr(socket, attr_name)] = attr_value
     return opts
+
+
+# ---------------------------------------------------------------------------
+# Error classification for operator-facing diagnostics.
+#
+# The misleading message "Ensure Redis is running" is only correct when the
+# failure is a network/server-availability failure. When the failure is a
+# client-side defect — e.g. the kernel rejected one of our setsockopt calls
+# with EINVAL — that message sends the operator on a wild goose chase.
+#
+# This classifier inspects the exception chain and returns:
+#   * ("client_socket_option", ...) when an OSError with EINVAL/ENOPROTOOPT
+#     appears — the kernel refused our socket options.
+#   * ("tls", ...) when an ssl.SSLError appears — the TLS handshake failed.
+#   * ("network", ...) otherwise — the generic "check Redis availability"
+#     hint is appropriate.
+# ---------------------------------------------------------------------------
+
+# errno values that indicate the kernel rejected our setsockopt call.
+# * EINVAL (22) — invalid value for the option (e.g. TCP_KEEPIDLE=1 under
+#   Linux kernel 6.17 in Docker, the 2026-04-15 minitux install failure).
+# * ENOPROTOOPT (92) — option not supported by this protocol level.
+_CLIENT_SOCKET_OPTION_ERRNOS: frozenset[int] = frozenset(
+    e for e in (getattr(errno, "EINVAL", None), getattr(errno, "ENOPROTOOPT", None)) if e is not None
+)
+
+
+def _classify_connection_error(exc: BaseException) -> tuple[str, str]:
+    """
+    Classify a Redis connection error for operator-facing diagnostics.
+
+    Walks ``exc.__cause__`` and ``exc.__context__`` to find the root cause
+    and returns a ``(category, diagnostic)`` pair where:
+
+    * ``category`` is one of ``"client_socket_option"``, ``"tls"``, or
+      ``"network"`` — suitable for structured log fields.
+    * ``diagnostic`` is a human-readable hint that tells the operator
+      where to look. For ``client_socket_option`` the hint explicitly
+      names the defect as client-side so operators do not waste time
+      inspecting a healthy Redis server.
+
+    Args:
+        exc: The exception raised by redis-py or the underlying socket
+             library.
+
+    Returns:
+        ``(category, diagnostic)`` — both strings, both non-empty.
+
+    Example:
+        >>> import errno as _errno
+        >>> cat, msg = _classify_connection_error(
+        ...     OSError(_errno.EINVAL, "Invalid argument")
+        ... )
+        >>> cat
+        'client_socket_option'
+    """
+    root: BaseException | None = exc
+    seen: set[int] = set()
+
+    while root is not None and id(root) not in seen:
+        seen.add(id(root))
+
+        if isinstance(root, ssl.SSLError):
+            return (
+                "tls",
+                "TLS/SSL handshake failure. Verify the rediss:// URL, the CA "
+                "bundle, and the Redis server certificate. Underlying error: "
+                f"{root.__class__.__name__}: {root}.",
+            )
+
+        if isinstance(root, OSError) and root.errno in _CLIENT_SOCKET_OPTION_ERRNOS:
+            errno_name = errno.errorcode.get(root.errno, "unknown")
+            return (
+                "client_socket_option",
+                (
+                    f"Client-side socket option rejected by the kernel "
+                    f"(errno={root.errno} {errno_name}). "
+                    "This is a defect in the API socket configuration — NOT a "
+                    "Redis server availability issue. Do NOT waste time "
+                    "checking whether Redis is running. Inspect "
+                    "services/api/infrastructure/redis_health.py "
+                    "(_build_keepalive_options) and verify the keepalive "
+                    "values meet the running kernel's accepted range."
+                ),
+            )
+
+        if isinstance(root, OSError) and root.errno == getattr(errno, "ECONNREFUSED", None):
+            return (
+                "network",
+                "Connection refused by host — Redis is not accepting connections "
+                "at the configured address. Ensure the Redis service is running, "
+                "the host:port in REDIS_URL is correct, and network policies "
+                "permit egress to the Redis port.",
+            )
+
+        # Walk the chain. Prefer __cause__ (explicit `raise X from Y`) and
+        # fall back to __context__ (implicit chaining from nested raises).
+        next_exc = root.__cause__ or root.__context__
+        root = next_exc
+
+    return (
+        "network",
+        "Could not establish a connection to Redis. Ensure Redis is running "
+        "and reachable at the configured REDIS_URL, and that network policies "
+        "permit egress to the Redis port.",
+    )
 
 
 def verify_redis_connection(redis_url: str, timeout_seconds: float = 5.0) -> None:
@@ -177,28 +285,58 @@ def verify_redis_connection(redis_url: str, timeout_seconds: float = 5.0) -> Non
             # Re-raise our ConfigError as-is
             raise
         except (redis.ConnectionError, redis.TimeoutError) as exc:
-            # Handle redis-specific exceptions
+            # Handle redis-specific exceptions. TimeoutError is always a
+            # server-side / network-side availability concern: the socket
+            # was set up, redis-py tried PING, and no reply came back in
+            # the configured window. We do not classify it — the hint is
+            # unambiguous.
             if isinstance(exc, redis.TimeoutError):
+                logger.warning(
+                    "redis.ping_timeout",
+                    component="redis_health",
+                    category="timeout",
+                    redis_url=_strip_credentials(redis_url),
+                    timeout_seconds=timeout_seconds,
+                )
                 raise ConfigError(
                     f"Redis connection timed out after {timeout_seconds}s at "
                     f"{_strip_credentials(redis_url)}. "
                     f"Error: {str(exc)}. "
                     f"Increase timeout_seconds or check Redis availability."
                 ) from exc
-            else:
-                raise ConfigError(
-                    f"Cannot connect to Redis at {_strip_credentials(redis_url)}. "
-                    f"Error: {str(exc)}. "
-                    f"Ensure Redis is running and reachable. "
-                    f"Check REDIS_URL environment variable."
-                ) from exc
-        except Exception as exc:
-            # Catch any other exception during PING as a connection error
+            # Classify ConnectionError so client-side defects (e.g. EINVAL
+            # from setsockopt) do not masquerade as server-availability
+            # problems. See D2 in docs/remediation/2026-04-15-minitux-install-failure.md.
+            category, diagnostic = _classify_connection_error(exc)
+            logger.warning(
+                "redis.ping_failed",
+                component="redis_health",
+                category=category,
+                redis_url=_strip_credentials(redis_url),
+                underlying_error=str(exc),
+            )
             raise ConfigError(
-                f"Cannot connect to Redis at {_strip_credentials(redis_url)}. "
-                f"Error: {str(exc)}. "
-                f"Ensure Redis is running and reachable. "
-                f"Check REDIS_URL environment variable."
+                f"Redis health check failed at {_strip_credentials(redis_url)}. "
+                f"Category: {category}. "
+                f"Underlying error: {exc!s}. "
+                f"{diagnostic}"
+            ) from exc
+        except Exception as exc:
+            # Any other exception during PING — classify so socket-option
+            # defects raised as plain OSError are still diagnosed correctly.
+            category, diagnostic = _classify_connection_error(exc)
+            logger.warning(
+                "redis.ping_failed",
+                component="redis_health",
+                category=category,
+                redis_url=_strip_credentials(redis_url),
+                underlying_error=str(exc),
+            )
+            raise ConfigError(
+                f"Redis health check failed at {_strip_credentials(redis_url)}. "
+                f"Category: {category}. "
+                f"Underlying error: {exc!s}. "
+                f"{diagnostic}"
             ) from exc
 
         # Check 2: Version >= 6.0 (ACL support required)
