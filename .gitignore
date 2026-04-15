@@ -53,6 +53,7 @@ Thumbs.db
 .env.orig
 .env.*
 !.env.example
+!.env.production.template
 
 # Secret / credential files — NEVER commit
 *.pem

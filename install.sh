@@ -141,11 +141,80 @@ check_os() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# Package manager helpers
+# ---------------------------------------------------------------------------
+
+detect_pkg_manager() {
+    # Sets PKG_MANAGER and PKG_UPDATE globals
+    if command -v apt-get &>/dev/null; then
+        PKG_MANAGER="apt-get"
+        PKG_UPDATE="apt-get update -qq"
+    elif command -v dnf &>/dev/null; then
+        PKG_MANAGER="dnf"
+        PKG_UPDATE="dnf check-update || true"
+    elif command -v yum &>/dev/null; then
+        PKG_MANAGER="yum"
+        PKG_UPDATE="yum check-update || true"
+    else
+        PKG_MANAGER=""
+        PKG_UPDATE=""
+    fi
+}
+
+pkg_install() {
+    # Install one or more packages using the detected package manager.
+    # Usage: pkg_install git curl
+    local packages=("$@")
+    if [[ -z "$PKG_MANAGER" ]]; then
+        fail "No supported package manager found (apt-get, dnf, yum). Install manually: ${packages[*]}"
+    fi
+    log INFO "Installing: ${packages[*]} via ${PKG_MANAGER}..."
+    if [[ "$PKG_MANAGER" == "apt-get" ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}" 2>>"$LOG_FILE" \
+            || fail "Failed to install ${packages[*]} via apt-get."
+    else
+        $PKG_MANAGER install -y "${packages[@]}" 2>>"$LOG_FILE" \
+            || fail "Failed to install ${packages[*]} via ${PKG_MANAGER}."
+    fi
+}
+
+install_docker() {
+    # Install Docker Engine + Compose v2 using the official convenience script.
+    log INFO "Installing Docker Engine..."
+
+    if ! command -v curl &>/dev/null; then
+        pkg_install curl
+    fi
+
+    # Docker's official install script — widely tested on Ubuntu, Debian, RHEL, Fedora, etc.
+    if ! curl -fsSL https://get.docker.com 2>>"$LOG_FILE" | bash 2>>"$LOG_FILE"; then
+        fail "Docker installation failed. Install manually: https://docs.docker.com/engine/install/"
+    fi
+
+    # Enable and start the Docker daemon
+    if command -v systemctl &>/dev/null; then
+        systemctl enable docker 2>>"$LOG_FILE" || true
+        systemctl start docker 2>>"$LOG_FILE" || true
+    fi
+
+    # Verify
+    if ! command -v docker &>/dev/null; then
+        fail "Docker binary not found after installation. Check the log: $LOG_FILE"
+    fi
+    log INFO "Docker installed successfully."
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks (with auto-install)
+# ---------------------------------------------------------------------------
+
 check_git() {
     log STEP "Checking Git installation..."
 
     if ! command -v git &>/dev/null; then
-        fail "Git is not installed. Install it: sudo apt-get install git (Debian/Ubuntu) or sudo yum install git (RHEL)"
+        log WARN "Git is not installed — installing..."
+        pkg_install git
     fi
 
     local git_version
@@ -163,7 +232,8 @@ check_docker() {
     log STEP "Checking Docker installation..."
 
     if ! command -v docker &>/dev/null; then
-        fail "Docker is not installed. Install Docker Engine 24+: https://docs.docker.com/engine/install/"
+        log WARN "Docker is not installed — installing..."
+        install_docker
     fi
 
     local docker_version
@@ -172,17 +242,34 @@ check_docker() {
     docker_major="$(echo "$docker_version" | cut -d. -f1)"
 
     if [[ "$docker_major" -lt "$MIN_DOCKER_VERSION" ]]; then
-        fail "Docker $docker_version is too old. Minimum required: $MIN_DOCKER_VERSION. Upgrade: https://docs.docker.com/engine/install/"
+        log WARN "Docker $docker_version is below minimum (${MIN_DOCKER_VERSION}). Attempting upgrade..."
+        install_docker
+        docker_version="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "0")"
+        docker_major="$(echo "$docker_version" | cut -d. -f1)"
+        if [[ "$docker_major" -lt "$MIN_DOCKER_VERSION" ]]; then
+            fail "Docker $docker_version is still below minimum after upgrade. Install manually: https://docs.docker.com/engine/install/"
+        fi
     fi
     log INFO "Docker version: $docker_version"
 
     if ! docker info &>/dev/null; then
-        fail "Docker daemon is not running. Start it: sudo systemctl start docker"
+        log WARN "Docker daemon is not running — starting..."
+        if command -v systemctl &>/dev/null; then
+            systemctl start docker 2>>"$LOG_FILE" || fail "Failed to start Docker daemon."
+        else
+            fail "Docker daemon is not running and systemctl not available. Start Docker manually."
+        fi
     fi
     log INFO "Docker daemon is running."
 
     if ! docker compose version &>/dev/null; then
-        fail "Docker Compose v2 not found. Install: https://docs.docker.com/compose/install/"
+        # Docker Compose v2 ships with Docker Engine via get.docker.com.
+        # If missing, try installing the plugin package.
+        log WARN "Docker Compose v2 not found — installing plugin..."
+        pkg_install docker-compose-plugin 2>/dev/null || true
+        if ! docker compose version &>/dev/null; then
+            fail "Docker Compose v2 not found after install. Install manually: https://docs.docker.com/compose/install/"
+        fi
     fi
     local compose_version
     compose_version="$(docker compose version --short 2>/dev/null || echo "unknown")"
@@ -621,6 +708,14 @@ main() {
     echo -e "Installation log: $LOG_FILE\n"
 
     check_root
+    detect_pkg_manager
+
+    # Update package index early so auto-installs succeed
+    if [[ -n "$PKG_UPDATE" ]]; then
+        log INFO "Updating package index..."
+        $PKG_UPDATE 2>>"$LOG_FILE" || true
+    fi
+
     detect_mode
 
     if [[ "$INSTALL_MODE" == "update" ]]; then
