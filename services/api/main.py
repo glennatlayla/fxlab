@@ -441,8 +441,21 @@ async def lifespan(app: FastAPI):
                 "Set REDIS_URL to your Redis cluster endpoint "
                 "(e.g. redis://redis:6379/0)."
             )
+        # Phase-wrap so the operator log carries an explicit
+        # startup.phase_failed event for this phase when Redis is
+        # misconfigured. Without this wrap the failure surfaces as a
+        # bare traceback — which is what broke minitux triage on
+        # 2026-04-15.
         try:
-            verify_redis_connection(redis_url, timeout_seconds=5.0)
+            with _startup_phase(
+                "redis_health_check",
+                environment="production",
+                backend="redis",
+                redis_url_scheme=redis_url.split("://", 1)[0] + "://..."
+                if "://" in redis_url
+                else "unset",
+            ):
+                verify_redis_connection(redis_url, timeout_seconds=5.0)
             logger.info(
                 "redis.health_check_passed",
                 component="startup",
@@ -460,7 +473,16 @@ async def lifespan(app: FastAPI):
         # Non-production: log warning if Redis health check fails, but allow startup
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         try:
-            verify_redis_connection(redis_url, timeout_seconds=5.0)
+            with _startup_phase(
+                "redis_health_check",
+                environment=environment or "unset",
+                backend="redis",
+                fallback_on_failure="in_memory_rate_limiter",
+                redis_url_scheme=redis_url.split("://", 1)[0] + "://..."
+                if "://" in redis_url
+                else "unset",
+            ):
+                verify_redis_connection(redis_url, timeout_seconds=5.0)
             logger.info(
                 "redis.health_check_passed",
                 component="startup",
@@ -492,12 +514,23 @@ async def lifespan(app: FastAPI):
     # but artifact upload/download routes will return 503 until storage is
     # available.  This is intentional — the API should serve non-artifact
     # requests even when the storage backend is temporarily unreachable.
+    #
+    # Phase-wrapped so a MinIO misconfiguration surfaces as a structured
+    # startup.phase_failed event (with duration_ms and exc_info) before
+    # the degrade-to-None fallback kicks in. Without this wrap operators
+    # had to correlate "artifact_storage.initialization_failed" with
+    # whatever traceback happened to hit stderr to figure out which
+    # backend and which credential path were in play.
     try:
-        from services.api.routes.artifacts import get_artifact_storage
+        with _startup_phase(
+            "artifact_storage_init",
+            backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
+        ):
+            from services.api.routes.artifacts import get_artifact_storage
 
-        artifact_storage = get_artifact_storage()
-        artifact_storage.initialize(correlation_id="startup")
-        app.state.artifact_storage = artifact_storage
+            artifact_storage = get_artifact_storage()
+            artifact_storage.initialize(correlation_id="startup")
+            app.state.artifact_storage = artifact_storage
         logger.info(
             "artifact_storage.initialized",
             backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
@@ -539,50 +572,56 @@ async def lifespan(app: FastAPI):
     # Run orphaned order recovery for all active live deployments.
     # This detects orders that were submitted to brokers but not recorded
     # internally due to crashes after submission but before acknowledgment.
+    #
+    # Phase-wrapped so operator logs carry an explicit
+    # startup.phase_failed event when recovery fails at startup. The
+    # except clause below still emits orphan_recovery.startup_failed for
+    # context-specific messaging.
     try:
-        from services.api.db import SessionLocal
-        from services.api.services.orphaned_order_recovery_service import (
-            OrphanedOrderRecoveryService,
-        )
-
-        # Instantiate repositories for orphan recovery
-        db_session = SessionLocal()
-        try:
-            from services.api.repositories.sql_deployment_repository import (
-                SqlDeploymentRepository,
-            )
-            from services.api.repositories.sql_execution_event_repository import (
-                SqlExecutionEventRepository,
-            )
-            from services.api.repositories.sql_order_repository import (
-                SqlOrderRepository,
+        with _startup_phase("orphan_recovery"):
+            from services.api.db import SessionLocal
+            from services.api.services.orphaned_order_recovery_service import (
+                OrphanedOrderRecoveryService,
             )
 
-            deployment_repo = SqlDeploymentRepository(db_session)
-            order_repo = SqlOrderRepository(db_session)
-            event_repo = SqlExecutionEventRepository(db_session)
+            # Instantiate repositories for orphan recovery
+            db_session = SessionLocal()
+            try:
+                from services.api.repositories.sql_deployment_repository import (
+                    SqlDeploymentRepository,
+                )
+                from services.api.repositories.sql_execution_event_repository import (
+                    SqlExecutionEventRepository,
+                )
+                from services.api.repositories.sql_order_repository import (
+                    SqlOrderRepository,
+                )
 
-            recovery_service = OrphanedOrderRecoveryService(
-                deployment_repo=deployment_repo,
-                order_repo=order_repo,
-                execution_event_repo=event_repo,
-                broker_registry=broker_registry,
-            )
+                deployment_repo = SqlDeploymentRepository(db_session)
+                order_repo = SqlOrderRepository(db_session)
+                event_repo = SqlExecutionEventRepository(db_session)
 
-            # Run recovery for all active live deployments
-            reports = recovery_service.recover_all_deployments(
-                correlation_id="startup-orphan-recovery"
-            )
+                recovery_service = OrphanedOrderRecoveryService(
+                    deployment_repo=deployment_repo,
+                    order_repo=order_repo,
+                    execution_event_repo=event_repo,
+                    broker_registry=broker_registry,
+                )
 
-            logger.info(
-                "orphan_recovery.startup_completed",
-                deployments_recovered=len(reports),
-                total_recovered=sum(r.recovered_count for r in reports),
-                total_failed=sum(r.failed_count for r in reports),
-                component="startup",
-            )
-        finally:
-            db_session.close()
+                # Run recovery for all active live deployments
+                reports = recovery_service.recover_all_deployments(
+                    correlation_id="startup-orphan-recovery"
+                )
+
+                logger.info(
+                    "orphan_recovery.startup_completed",
+                    deployments_recovered=len(reports),
+                    total_recovered=sum(r.recovered_count for r in reports),
+                    total_failed=sum(r.failed_count for r in reports),
+                    component="startup",
+                )
+            finally:
+                db_session.close()
     except Exception as exc:
         logger.warning(
             "orphan_recovery.startup_failed",
@@ -595,110 +634,103 @@ async def lifespan(app: FastAPI):
     # Wire the LiveExecutionService for live trading endpoints.
     # This instantiates all dependencies and registers the service with the
     # live routes module so that /live/* endpoints have access to it.
-    _live_exec_phase_start = time.monotonic()
-    logger.info(
-        "startup.phase_begin",
-        component="startup",
-        phase="live_execution_wiring",
-    )
+    #
+    # Phase-wrapped via _startup_phase so phase_begin / phase_complete /
+    # phase_failed events are emitted consistently with every other
+    # startup phase. On failure the except clause below preserves the
+    # long-standing "do not abort startup, degrade to 503 on /live/*"
+    # policy — but _startup_phase has already logged the structured
+    # phase_failed event with exc_info, so the live_execution.wiring_failed
+    # message is purely contextual.
     try:
-        from services.api.db import SessionLocal
-        from services.api.repositories.sql_deployment_repository import (
-            SqlDeploymentRepository,
-        )
-        from services.api.repositories.sql_execution_event_repository import (
-            SqlExecutionEventRepository,
-        )
-        from services.api.repositories.sql_kill_switch_event_repository import (
-            SqlKillSwitchEventRepository,
-        )
-        from services.api.repositories.sql_order_repository import SqlOrderRepository
-        from services.api.repositories.sql_position_repository import (
-            SqlPositionRepository,
-        )
-        from services.api.repositories.sql_risk_event_repository import (
-            SqlRiskEventRepository,
-        )
-        from services.api.routes.live import set_live_execution_service
-        from services.api.services.kill_switch_service import KillSwitchService
-        from services.api.services.live_execution_service import LiveExecutionService
-        from services.api.services.risk_gate_service import RiskGateService
+        with _startup_phase("live_execution_wiring"):
+            from services.api.db import SessionLocal
+            from services.api.repositories.sql_deployment_repository import (
+                SqlDeploymentRepository,
+            )
+            from services.api.repositories.sql_execution_event_repository import (
+                SqlExecutionEventRepository,
+            )
+            from services.api.repositories.sql_kill_switch_event_repository import (
+                SqlKillSwitchEventRepository,
+            )
+            from services.api.repositories.sql_order_repository import SqlOrderRepository
+            from services.api.repositories.sql_position_repository import (
+                SqlPositionRepository,
+            )
+            from services.api.repositories.sql_risk_event_repository import (
+                SqlRiskEventRepository,
+            )
+            from services.api.routes.live import set_live_execution_service
+            from services.api.services.kill_switch_service import KillSwitchService
+            from services.api.services.live_execution_service import LiveExecutionService
+            from services.api.services.risk_gate_service import RiskGateService
 
-        # Create a fresh session for LiveExecutionService wiring.
-        # This session is held for the lifetime of the app and used by the
-        # service for all order and position persistence.
-        db_session_live = SessionLocal()
+            # Create a fresh session for LiveExecutionService wiring.
+            # This session is held for the lifetime of the app and used by the
+            # service for all order and position persistence.
+            db_session_live = SessionLocal()
 
-        # Instantiate repositories for live execution
-        deployment_repo = SqlDeploymentRepository(db=db_session_live)
-        order_repo = SqlOrderRepository(db=db_session_live)
-        position_repo = SqlPositionRepository(db=db_session_live)
-        execution_event_repo = SqlExecutionEventRepository(db=db_session_live)
-        risk_event_repo = SqlRiskEventRepository(db=db_session_live)
-        ks_event_repo = SqlKillSwitchEventRepository(db=db_session_live)
+            # Instantiate repositories for live execution
+            deployment_repo = SqlDeploymentRepository(db=db_session_live)
+            order_repo = SqlOrderRepository(db=db_session_live)
+            position_repo = SqlPositionRepository(db=db_session_live)
+            execution_event_repo = SqlExecutionEventRepository(db=db_session_live)
+            risk_event_repo = SqlRiskEventRepository(db=db_session_live)
+            ks_event_repo = SqlKillSwitchEventRepository(db=db_session_live)
 
-        # Instantiate RiskGateService for pre-trade enforcement
-        risk_gate = RiskGateService(
-            deployment_repo=deployment_repo,
-            risk_event_repo=risk_event_repo,
-        )
+            # Instantiate RiskGateService for pre-trade enforcement
+            risk_gate = RiskGateService(
+                deployment_repo=deployment_repo,
+                risk_event_repo=risk_event_repo,
+            )
 
-        # Instantiate KillSwitchService for halt enforcement
-        # Build a dict mapping deployment_id → BrokerAdapterInterface for the service.
-        # This is extracted from the broker registry's internal _registry dict.
-        adapter_registry_dict: dict[str, Any] = {}
-        with broker_registry._lock:
-            for deployment_id, (adapter, _broker_type) in broker_registry._registry.items():
-                adapter_registry_dict[deployment_id] = adapter
+            # Instantiate KillSwitchService for halt enforcement
+            # Build a dict mapping deployment_id → BrokerAdapterInterface for the service.
+            # This is extracted from the broker registry's internal _registry dict.
+            adapter_registry_dict: dict[str, Any] = {}
+            with broker_registry._lock:
+                for deployment_id, (adapter, _broker_type) in broker_registry._registry.items():
+                    adapter_registry_dict[deployment_id] = adapter
 
-        kill_switch_service = KillSwitchService(
-            deployment_repo=deployment_repo,
-            ks_event_repo=ks_event_repo,
-            adapter_registry=adapter_registry_dict,
-        )
+            kill_switch_service = KillSwitchService(
+                deployment_repo=deployment_repo,
+                ks_event_repo=ks_event_repo,
+                adapter_registry=adapter_registry_dict,
+            )
 
-        # Instantiate LiveExecutionService with all dependencies.
-        # The transaction_manager parameter is optional; when None, callers
-        # are responsible for transaction management at the request level.
-        live_execution_service = LiveExecutionService(
-            deployment_repo=deployment_repo,
-            order_repo=order_repo,
-            position_repo=position_repo,
-            execution_event_repo=execution_event_repo,
-            risk_gate=risk_gate,
-            broker_registry=broker_registry,
-            kill_switch_service=kill_switch_service,
-            transaction_manager=None,  # Optional: can be wired if explicit tx boundary is needed
-        )
+            # Instantiate LiveExecutionService with all dependencies.
+            # The transaction_manager parameter is optional; when None, callers
+            # are responsible for transaction management at the request level.
+            live_execution_service = LiveExecutionService(
+                deployment_repo=deployment_repo,
+                order_repo=order_repo,
+                position_repo=position_repo,
+                execution_event_repo=execution_event_repo,
+                risk_gate=risk_gate,
+                broker_registry=broker_registry,
+                kill_switch_service=kill_switch_service,
+                transaction_manager=None,  # Optional: can be wired if explicit tx boundary is needed
+            )
 
-        # Register the service with the live routes module so endpoints can access it
-        set_live_execution_service(live_execution_service)
+            # Register the service with the live routes module so endpoints can access it
+            set_live_execution_service(live_execution_service)
 
-        # Store session and service references on app.state for graceful shutdown
-        # if needed in the future
-        app.state.live_execution_db_session = db_session_live
-        app.state.live_execution_service = live_execution_service
+            # Store session and service references on app.state for graceful shutdown
+            # if needed in the future
+            app.state.live_execution_db_session = db_session_live
+            app.state.live_execution_service = live_execution_service
 
-        logger.info(
-            "live_execution.service_initialized",
-            component="startup",
-            detail="LiveExecutionService wired with all dependencies and registered with /live routes.",
-        )
-        logger.info(
-            "startup.phase_complete",
-            component="startup",
-            phase="live_execution_wiring",
-            duration_ms=int((time.monotonic() - _live_exec_phase_start) * 1000),
-        )
-
+            logger.info(
+                "live_execution.service_initialized",
+                component="startup",
+                detail="LiveExecutionService wired with all dependencies and registered with /live routes.",
+            )
     except Exception as exc:
-        logger.error(
-            "startup.phase_failed",
-            component="startup",
-            phase="live_execution_wiring",
-            duration_ms=int((time.monotonic() - _live_exec_phase_start) * 1000),
-            exc_info=True,
-        )
+        # _startup_phase already logged startup.phase_failed with exc_info
+        # and duration_ms. This critical log carries the degradation policy
+        # context so operators know the API is continuing without live
+        # trading rather than failing startup.
         logger.critical(
             "live_execution.wiring_failed",
             error=str(exc),
