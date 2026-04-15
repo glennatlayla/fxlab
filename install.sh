@@ -32,6 +32,14 @@
 #   FXLAB_HTTP_PORT    — HTTP port (default: 80)
 #   FXLAB_HTTPS_PORT   — HTTPS port (default: 443)
 #   SKIP_SYSTEMD       — Set to "1" to skip systemd installation
+#   FXLAB_ALLOW_STALE_CODE
+#                      — Set to "1" to permit deployment with the current
+#                        checkout when `git fetch` fails (offline / air-
+#                        gapped deploys). DEFAULT IS UNSET: a fetch
+#                        failure is fatal. This exists because a prior
+#                        version silently fell back to stale code on
+#                        fetch failure and operators deployed outdated
+#                        builds without noticing.
 #
 # Requirements:
 #   - Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+, or compatible)
@@ -58,7 +66,9 @@ FXLAB_HTTP_PORT="${FXLAB_HTTP_PORT:-80}"
 FXLAB_HTTPS_PORT="${FXLAB_HTTPS_PORT:-443}"
 SKIP_SYSTEMD="${SKIP_SYSTEMD:-0}"
 
-LOG_FILE="/var/log/fxlab/install-$(date +%Y%m%d-%H%M%S).log"
+# LOG_FILE is overridable so tests (and operators with custom log dirs)
+# can redirect install.sh output without editing this file.
+LOG_FILE="${LOG_FILE:-/var/log/fxlab/install-$(date +%Y%m%d-%H%M%S).log}"
 
 # Minimum requirements
 MIN_DOCKER_VERSION="24"
@@ -365,43 +375,116 @@ clone_repo() {
 }
 
 pull_latest() {
+    # Fetch the latest commit for $FXLAB_BRANCH from origin and hard-reset
+    # the working tree to it. Every step is verified:
+    #
+    #   1. A `git fetch` failure is FATAL unless FXLAB_ALLOW_STALE_CODE=1
+    #      is explicitly set by the operator. A prior version silently
+    #      warned and continued, which shipped stale code without the
+    #      operator noticing — that regression must not recur.
+    #   2. After fetch, origin/$FXLAB_BRANCH must resolve — if upstream
+    #      was deleted we fail loudly instead of resetting to nothing.
+    #   3. After reset, HEAD must equal the remote SHA — if the reset
+    #      did not land we refuse to proceed.
+    #
+    # Local changes (operator edits to docker-compose, .env, etc.) are
+    # stashed before the reset and restored afterwards. A failing stash
+    # is fatal: quietly discarding operator changes is worse than a
+    # visible halt.
     log STEP "Pulling latest changes..."
 
     cd "$FXLAB_HOME"
 
-    # Stash any local changes (e.g. operator tweaks to docker-compose)
+    local current_sha
+    current_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+    if [[ -z "$current_sha" ]]; then
+        fail "Cannot read current git HEAD in ${FXLAB_HOME}. Repository appears corrupt."
+    fi
+    local current_short="${current_sha:0:12}"
+
+    # Stash any local changes (e.g. operator tweaks to docker-compose).
+    # A failing stash is fatal so we never silently drop operator edits.
     local stash_needed=0
     if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
         log INFO "Stashing local changes..."
-        git stash push -m "fxlab-install-$(date +%Y%m%d-%H%M%S)" 2>>"$LOG_FILE" || true
+        if ! git stash push -m "fxlab-install-$(date +%Y%m%d-%H%M%S)" 2>>"$LOG_FILE"; then
+            fail "git stash failed. Refusing to proceed with a dirty tree."
+        fi
         stash_needed=1
     fi
 
-    # Fetch and reset to the latest remote branch
-    # Using fetch + reset instead of pull to handle force-pushes and diverged history
-    local current_sha
-    current_sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    # Fetch from origin.
+    # Full fetch (no --depth 1) so the post-reset changelog log works
+    # when the installer runs repeatedly on the same checkout.
+    if ! git fetch origin "$FXLAB_BRANCH" 2>>"$LOG_FILE"; then
+        if [[ "${FXLAB_ALLOW_STALE_CODE:-0}" == "1" ]]; then
+            log WARN "git fetch failed; FXLAB_ALLOW_STALE_CODE=1 — proceeding with current checkout ${current_short}."
+            log WARN "You are deploying code that MAY BE OUT OF DATE. This is intended for offline/air-gapped deploys only."
+            if [[ "$stash_needed" -eq 1 ]]; then
+                if git stash pop 2>>"$LOG_FILE"; then
+                    log INFO "Re-applied local changes from stash."
+                else
+                    log WARN "Could not re-apply stashed changes. They are saved in: git stash list"
+                fi
+            fi
+            return 0
+        fi
 
-    if ! git fetch origin "$FXLAB_BRANCH" --depth 1 2>>"$LOG_FILE"; then
-        log WARN "git fetch failed (root may lack SSH keys for private repo)."
-        log WARN "Proceeding with existing code at $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')."
-        log WARN "To update code: run 'cd ${FXLAB_HOME} && git pull' as a user with GitHub SSH access, then re-run this script."
-        return 0
+        local remote_url
+        remote_url="$(git config --get remote.origin.url 2>/dev/null || echo unknown)"
+        fail "git fetch origin ${FXLAB_BRANCH} FAILED.
+
+This is fatal. A prior version of this installer silently fell back to
+the existing checkout on fetch failure, which caused operators to deploy
+stale code without noticing. That silent fallback has been removed.
+
+Current HEAD : ${current_short}
+Branch       : ${FXLAB_BRANCH}
+Remote       : ${remote_url}
+Log          : ${LOG_FILE}
+
+To resolve:
+  1. Ensure the invoking user (root when using sudo) can reach GitHub:
+       - For SSH, copy the operator's keys to root:
+           sudo cp -r /home/\$SUDO_USER/.ssh /root/
+           sudo chown -R root:root /root/.ssh
+       - Or rerun fetch as the SSH-authorised user first:
+           sudo -u \$SUDO_USER git -C ${FXLAB_HOME} fetch --all
+  2. Or switch to HTTPS for the repo URL:
+       FXLAB_REPO=https://github.com/glennatlayla/fxlab.git sudo -E bash install.sh
+  3. Or, to INTENTIONALLY deploy the current (possibly stale) checkout
+     (offline or air-gapped deploys only):
+       FXLAB_ALLOW_STALE_CODE=1 sudo -E bash install.sh"
     fi
+
+    # Verify origin/BRANCH exists after the fetch — catches the case
+    # where upstream deleted or renamed the branch.
+    local remote_sha
+    remote_sha="$(git rev-parse "origin/${FXLAB_BRANCH}" 2>/dev/null || echo "")"
+    if [[ -z "$remote_sha" ]]; then
+        fail "git fetch succeeded but origin/${FXLAB_BRANCH} does not exist. Was the branch deleted upstream?"
+    fi
+    local remote_short="${remote_sha:0:12}"
 
     if ! git reset --hard "origin/${FXLAB_BRANCH}" 2>>"$LOG_FILE"; then
-        fail "git reset failed. The repository may be in a broken state."
+        fail "git reset --hard origin/${FXLAB_BRANCH} failed. The repository may be in a broken state."
     fi
 
+    # Defence-in-depth: confirm the reset actually landed on the
+    # fetched SHA. If this ever fails we want a visible halt rather
+    # than a silent divergence.
     local new_sha
-    new_sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    new_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+    if [[ "$new_sha" != "$remote_sha" ]]; then
+        fail "Post-reset verification failed: HEAD=${new_sha:0:12} but origin/${FXLAB_BRANCH}=${remote_short}."
+    fi
 
-    if [[ "$current_sha" == "$new_sha" ]]; then
-        log INFO "Already at latest commit: ${new_sha}"
+    if [[ "$current_sha" == "$remote_sha" ]]; then
+        log INFO "Already at latest commit on origin/${FXLAB_BRANCH}: ${remote_short}"
     else
-        log INFO "Updated: ${current_sha} → ${new_sha}"
-        # Show what changed (abbreviated)
-        git log --oneline "${current_sha}..${new_sha}" 2>/dev/null | head -10 >> "$LOG_FILE" || true
+        log INFO "Updated: ${current_short} → ${remote_short}"
+        # Record the changelog between old and new HEAD in the install log.
+        git log --oneline "${current_sha}..${remote_sha}" 2>/dev/null | head -20 >> "$LOG_FILE" || true
     fi
 
     # Re-apply stashed changes if any
@@ -977,4 +1060,7 @@ main() {
     print_summary
 }
 
-main "$@"
+# Only execute main() when this file is run directly (not sourced by tests).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
