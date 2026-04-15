@@ -464,6 +464,105 @@ async def lifespan(app: FastAPI):
             detail="Orphaned order recovery failed at startup. Continuing without recovery.",
         )
 
+    # Wire the LiveExecutionService for live trading endpoints.
+    # This instantiates all dependencies and registers the service with the
+    # live routes module so that /live/* endpoints have access to it.
+    try:
+        from services.api.db import SessionLocal
+        from services.api.repositories.sql_deployment_repository import (
+            SqlDeploymentRepository,
+        )
+        from services.api.repositories.sql_execution_event_repository import (
+            SqlExecutionEventRepository,
+        )
+        from services.api.repositories.sql_kill_switch_event_repository import (
+            SqlKillSwitchEventRepository,
+        )
+        from services.api.repositories.sql_order_repository import SqlOrderRepository
+        from services.api.repositories.sql_position_repository import (
+            SqlPositionRepository,
+        )
+        from services.api.repositories.sql_risk_event_repository import (
+            SqlRiskEventRepository,
+        )
+        from services.api.routes.live import set_live_execution_service
+        from services.api.services.kill_switch_service import KillSwitchService
+        from services.api.services.live_execution_service import LiveExecutionService
+        from services.api.services.risk_gate_service import RiskGateService
+
+        # Create a fresh session for LiveExecutionService wiring.
+        # This session is held for the lifetime of the app and used by the
+        # service for all order and position persistence.
+        db_session_live = SessionLocal()
+
+        # Instantiate repositories for live execution
+        deployment_repo = SqlDeploymentRepository(db=db_session_live)
+        order_repo = SqlOrderRepository(db=db_session_live)
+        position_repo = SqlPositionRepository(db=db_session_live)
+        execution_event_repo = SqlExecutionEventRepository(db=db_session_live)
+        risk_event_repo = SqlRiskEventRepository(db=db_session_live)
+        ks_event_repo = SqlKillSwitchEventRepository(db=db_session_live)
+
+        # Instantiate RiskGateService for pre-trade enforcement
+        risk_gate = RiskGateService(
+            deployment_repo=deployment_repo,
+            risk_event_repo=risk_event_repo,
+        )
+
+        # Instantiate KillSwitchService for halt enforcement
+        # Build a dict mapping deployment_id → BrokerAdapterInterface for the service.
+        # This is extracted from the broker registry's internal _registry dict.
+        adapter_registry_dict: dict[str, Any] = {}
+        with broker_registry._lock:
+            for deployment_id, (adapter, _broker_type) in broker_registry._registry.items():
+                adapter_registry_dict[deployment_id] = adapter
+
+        kill_switch_service = KillSwitchService(
+            deployment_repo=deployment_repo,
+            ks_event_repo=ks_event_repo,
+            adapter_registry=adapter_registry_dict,
+        )
+
+        # Instantiate LiveExecutionService with all dependencies.
+        # The transaction_manager parameter is optional; when None, callers
+        # are responsible for transaction management at the request level.
+        live_execution_service = LiveExecutionService(
+            deployment_repo=deployment_repo,
+            order_repo=order_repo,
+            position_repo=position_repo,
+            execution_event_repo=execution_event_repo,
+            risk_gate=risk_gate,
+            broker_registry=broker_registry,
+            kill_switch_service=kill_switch_service,
+            transaction_manager=None,  # Optional: can be wired if explicit tx boundary is needed
+        )
+
+        # Register the service with the live routes module so endpoints can access it
+        set_live_execution_service(live_execution_service)
+
+        # Store session and service references on app.state for graceful shutdown
+        # if needed in the future
+        app.state.live_execution_db_session = db_session_live
+        app.state.live_execution_service = live_execution_service
+
+        logger.info(
+            "live_execution.service_initialized",
+            component="startup",
+            detail="LiveExecutionService wired with all dependencies and registered with /live routes.",
+        )
+
+    except Exception as exc:
+        logger.critical(
+            "live_execution.wiring_failed",
+            error=str(exc),
+            component="startup",
+            exc_info=True,
+            detail="Failed to wire LiveExecutionService at startup. "
+            "Live trading endpoints will return 503 Service Unavailable.",
+        )
+        # Do not re-raise — allow the API to start without live execution.
+        # This permits other endpoints to function while live trading is unavailable.
+
     logger.info("api.startup", version="0.1.0")
     yield
 

@@ -22,6 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
+# Force reinstall pydantic-core for the container platform (Linux x86_64/aarch64).
+# Prevents macOS wheel from leaking into Linux containers via cached layers.
+RUN pip install --no-cache-dir --prefix=/install --force-reinstall pydantic-core
+
 # ---------------------------------------------------------------------------
 # Stage 2: runtime
 # ---------------------------------------------------------------------------

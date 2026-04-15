@@ -189,6 +189,159 @@ services:
           memory: 384M
           cpus: '0.5'
 
+  # ---------------------------------------------------------------------------
+  # Prometheus — Metrics collection & alerting
+  # ---------------------------------------------------------------------------
+  # Collects application metrics (API, order latency, broker health) and
+  # infrastructure metrics (CPU, memory, disk) from all exporters.
+  # Evaluates alert rules every 15s and routes to Alertmanager.
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: fxlab-prometheus
+    expose:
+      - "9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    environment:
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+
+  # ---------------------------------------------------------------------------
+  # Alertmanager — Alert routing & notification
+  # ---------------------------------------------------------------------------
+  # Routes Prometheus alerts to notification channels (webhook, email, Slack,
+  # PagerDuty) based on severity and grouping rules. Deduplicates and
+  # throttles alert notifications to avoid fatigue.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: fxlab-alertmanager
+    expose:
+      - "9093"
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--log.level=info'
+    volumes:
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    environment:
+      - TZ=UTC
+      - ALERTMANAGER_WEBHOOK_URL=${ALERTMANAGER_WEBHOOK_URL:-http://localhost:5000/alerts}
+      - ALERTMANAGER_CRITICAL_WEBHOOK_URL=${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://localhost:5001/alerts/critical}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9093/-/healthy"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+  # ---------------------------------------------------------------------------
+  # Node Exporter — Host metrics (CPU, memory, disk, network)
+  # ---------------------------------------------------------------------------
+  # Exposes host-level metrics required for infrastructure alerting:
+  # high CPU, memory pressure, disk usage, etc.
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: fxlab-node-exporter
+    expose:
+      - "9100"
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--collector.netdev.device-exclude=^(veth.*|br.*|docker.*|virbr.*)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    environment:
+      - NODE_ID=fxlab-prod-host
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9100/metrics"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+  # ---------------------------------------------------------------------------
+  # cAdvisor — Container metrics (CPU, memory, network per container)
+  # ---------------------------------------------------------------------------
+  # Exposes Docker container resource metrics for per-container alerting:
+  # memory limits, CPU usage, network I/O, etc.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: fxlab-cadvisor
+    expose:
+      - "8080"
+    command:
+      - '--port=8080'
+      - '--housekeeping_interval=30s'
+      - '--max_housekeeping_interval=60s'
+      - '--disable_metrics=accelerator,cpu_topology,resctrl'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    environment:
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
 networks:
   fxlab-net:
     driver: bridge
@@ -201,3 +354,7 @@ volumes:
     name: fxlab-redis-data
   nginx-certs:
     name: fxlab-nginx-certs
+  prometheus-data:
+    name: fxlab-prometheus-data
+  alertmanager-data:
+    name: fxlab-alertmanager-data
