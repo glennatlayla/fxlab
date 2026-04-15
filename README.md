@@ -4,21 +4,23 @@ Algorithmic trading platform for backtesting, paper trading, and live execution 
 
 ## Quick Start (Production Server)
 
-**One-liner install on a fresh Linux server:**
+**Fresh install on a new Linux server (single command):**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/glennatlayla/fxlab/main/install.sh | sudo bash
+git clone git@github.com:glennatlayla/fxlab.git /opt/fxlab && sudo bash /opt/fxlab/install.sh
 ```
 
-This clones the repo to `/opt/fxlab`, builds all Docker containers, runs database migrations, installs a systemd service for boot persistence, and runs health checks. When it finishes, the platform is live.
+This uses your SSH key to clone (private repo), then runs the installer as root. The installer builds all Docker containers, generates secrets, runs database migrations, installs a systemd service for boot persistence, and runs health checks. When it finishes, the platform is live.
+
+> **Note:** If `/opt/fxlab` requires root to create, use: `sudo mkdir -p /opt/fxlab && sudo chown $USER /opt/fxlab && git clone git@github.com:glennatlayla/fxlab.git /opt/fxlab && sudo bash /opt/fxlab/install.sh`
 
 **Update an existing installation:**
 
 ```bash
-sudo /opt/fxlab/install.sh
+cd /opt/fxlab && git pull && sudo ./install.sh
 ```
 
-Same script, detects the existing install, pulls latest code, rebuilds containers, and restarts.
+Pulls latest code with your SSH key, then rebuilds containers and restarts services.
 
 ## What Gets Deployed
 
