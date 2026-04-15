@@ -424,9 +424,13 @@ async def lifespan(app: FastAPI):
         # Instantiate repositories for orphan recovery
         db_session = SessionLocal()
         try:
-            from services.api.infrastructure.sql_repositories import (
+            from services.api.repositories.sql_deployment_repository import (
                 SqlDeploymentRepository,
+            )
+            from services.api.repositories.sql_execution_event_repository import (
                 SqlExecutionEventRepository,
+            )
+            from services.api.repositories.sql_order_repository import (
                 SqlOrderRepository,
             )
 

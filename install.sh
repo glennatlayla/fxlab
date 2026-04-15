@@ -534,7 +534,7 @@ wait_for_healthy() {
 
         local total_count
         total_count="$(docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null | \
-            python3 -c "import sys,json; data=[json.loads(l) for l in sys.stdin]; print(len(data))" 2>/dev/null || echo "0")"
+            python3 -c "import sys,json; data=[json.loads(l) for l in sys.stdin]; print(sum(1 for s in data if s.get('State','') == 'running'))" 2>/dev/null || echo "0")"
 
         # All services must be healthy — compare healthy to total, not a hardcoded number.
         if [[ "$total_count" -gt 0 ]] && [[ "$healthy_count" -eq "$total_count" ]]; then
