@@ -1,10 +1,9 @@
 """Add missing foreign key indexes for unindexed ForeignKey columns.
 
 Foreign keys without indexes can cause full table scans during JOIN operations
-and ON DELETE CASCADE operations. This migration adds indexes to 7 unindexed
+and ON DELETE CASCADE operations. This migration adds indexes to 6 unindexed
 foreign key columns identified in the schema review:
 
-- candidates.created_by → users.id (missing index)
 - candidates.submitted_by → users.id (missing index)
 - deployments.deployed_by → users.id (missing index)
 - parity_events.reference_feed_id → feeds.id (missing index)
@@ -14,6 +13,8 @@ foreign key columns identified in the schema review:
 
 Note: candidates.strategy_id, deployments.strategy_id already have indexes
 from models.py. Similarly, feeds.id FK relationships are indexed where needed.
+The candidates table has submitted_by but not created_by (created_by is on
+the strategies table, which already has its own index).
 
 This improves query performance for:
 1. Foreign key constraint enforcement at DELETE time.
@@ -41,8 +42,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Create missing indexes on unindexed foreign key columns."""
-    # Candidates table — created_by and submitted_by FKs are unindexed
-    op.create_index("ix_candidates_created_by", "candidates", ["created_by"])
+    # Candidates table — submitted_by FK is unindexed
+    # Note: candidates does NOT have a created_by column (that's on strategies)
     op.create_index("ix_candidates_submitted_by", "candidates", ["submitted_by"])
 
     # Deployments table — deployed_by FK is unindexed
@@ -59,7 +60,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop all created indexes."""
-    op.drop_index("ix_candidates_created_by", "candidates")
     op.drop_index("ix_candidates_submitted_by", "candidates")
     op.drop_index("ix_deployments_deployed_by", "deployments")
     op.drop_index("ix_parity_events_reference_feed_id", "parity_events")
