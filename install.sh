@@ -519,30 +519,41 @@ build_and_start() {
         docker compose -f docker-compose.prod.yml down --timeout 30 2>>"$LOG_FILE" || true
     fi
 
-    # ---- Stale volume detection ----
-    # PostgreSQL only sets the password during initdb (first run). If a
-    # postgres-data volume survives from a previous failed install, Postgres
-    # skips initialization and keeps the OLD password — but install.sh just
-    # generated a NEW random password in .env.  Result: auth failure.
+    # ---- Stale Docker state cleanup (fresh install only) ----
+    # A fresh install means no .env existed, so there is no operator data to
+    # preserve.  But Docker artifacts from a PREVIOUS failed install can
+    # survive independently of the application directory:
     #
-    # On fresh install: if the volume exists, remove it so initdb runs with
-    # the newly generated password.  This is safe because fresh-install means
-    # no .env existed (so no prior data the operator expects to keep).
+    #   - Named volumes (postgres-data, redis-data, prometheus-data, etc.)
+    #     PostgreSQL only runs initdb on an empty data dir.  If the volume
+    #     survives, PG keeps the OLD password while install.sh just generated
+    #     a NEW one → auth failure.
+    #   - Containers in exited/restarting state from a prior compose project
+    #   - Networks that conflict with the new compose stack
+    #   - Orphan services from a compose file that changed between installs
+    #
+    # One command handles ALL of these: `docker compose down --volumes`
+    # removes containers, networks, AND named volumes declared in the
+    # compose file.  --remove-orphans catches services that existed in a
+    # previous compose file version but no longer appear in the current one.
     if [[ "$INSTALL_MODE" == "fresh" ]]; then
-        local pg_volume="fxlab-postgres-data"
-        if docker volume inspect "$pg_volume" &>/dev/null; then
-            log WARN "Stale PostgreSQL volume '${pg_volume}' found from a previous install."
-            log WARN "Removing it so PostgreSQL initializes with the new password."
-            # Stop any containers that might be using the volume
-            docker compose -f docker-compose.prod.yml down --volumes=false --timeout 10 2>>"$LOG_FILE" || true
-            docker volume rm "$pg_volume" 2>>"$LOG_FILE" \
-                || log WARN "Could not remove ${pg_volume} — PostgreSQL may fail to authenticate."
+        # Check if any fxlab Docker artifacts exist from a previous attempt
+        local has_stale_state=false
+        if docker compose -f docker-compose.prod.yml ps -q 2>/dev/null | grep -q .; then
+            has_stale_state=true
         fi
-        # Also check redis volume for consistency
-        local redis_volume="fxlab-redis-data"
-        if docker volume inspect "$redis_volume" &>/dev/null; then
-            log INFO "Removing stale Redis volume '${redis_volume}'."
-            docker volume rm "$redis_volume" 2>>"$LOG_FILE" || true
+        for vol in fxlab-postgres-data fxlab-redis-data fxlab-prometheus-data fxlab-alertmanager-data fxlab-nginx-certs; do
+            if docker volume inspect "$vol" &>/dev/null; then
+                has_stale_state=true
+                break
+            fi
+        done
+
+        if [[ "$has_stale_state" == "true" ]]; then
+            log WARN "Stale Docker artifacts detected from a previous install."
+            log WARN "Removing all FXLab containers, networks, and volumes..."
+            docker compose -f docker-compose.prod.yml down --volumes --remove-orphans --timeout 15 2>>"$LOG_FILE" || true
+            log INFO "Stale Docker state cleaned up."
         fi
     fi
 
