@@ -268,6 +268,194 @@ _PRODUCTION_SENTINEL = "/app/.production-build"
 
 
 # ---------------------------------------------------------------------------
+# CORS origin policy (C2 — 2026-04-15 remediation)
+# ---------------------------------------------------------------------------
+#
+# Production deployments must not accept cross-origin requests from plain
+# HTTP origins or from private-IP / loopback literals. Both are vectors
+# for MITM forgery of the ``Origin`` header. The escape hatch exists for
+# legitimate controlled-rollout scenarios; it is deliberately noisy (an
+# env var AND a written justification) so that bypasses are auditable.
+
+
+class CorsOriginPolicyError(RuntimeError):
+    """
+    Raised when the configured CORS allowlist violates production policy.
+
+    Subclasses ``RuntimeError`` so it surfaces the same way as every
+    other startup-time configuration failure (caught by the lifespan
+    error wrapper, producing a deterministic ``sys.exit(3)``).
+    """
+
+
+#: Minimum character length for the CORS plaintext-LAN justification.
+#: Tuned to reject single-word rubber-stamp values ("ok", "approved")
+#: while not being so high it encourages justifications-as-novels.
+_CORS_JUSTIFICATION_MIN_CHARS = 20
+
+
+def _host_is_private_or_loopback(host: str) -> str | None:
+    """
+    Classify ``host`` against RFC 1918 / 3927 / IPv6 link-local rules.
+
+    Returns a short classification key (``"loopback"``, ``"private"``)
+    if the host falls into one of the disallowed ranges, otherwise
+    ``None``. The return value is consumed directly by the error
+    message builder, so the strings are part of the policy contract
+    and should not be changed without updating the test suite.
+
+    Handles IPv6 bracket notation (``[::1]``) by stripping the
+    brackets before resolving. IP literals outside the well-known
+    private ranges return ``None`` — this function intentionally does
+    not try to classify every RFC 5735 special-use range; we only
+    want to catch the ranges that are plausibly used as CORS origins
+    by a misconfigured deployment.
+    """
+    import ipaddress
+
+    hostname = host.lower().strip()
+    if hostname.startswith("[") and hostname.endswith("]"):
+        hostname = hostname[1:-1]
+
+    # Named loopback — does not round-trip through ipaddress.
+    if hostname in {"localhost", "localhost.localdomain"}:
+        return "loopback"
+
+    try:
+        addr = ipaddress.ip_address(hostname)
+    except ValueError:
+        # Not an IP literal — the policy has no opinion on named
+        # public hosts beyond the scheme check handled elsewhere.
+        return None
+
+    if addr.is_loopback:
+        return "loopback"
+    if addr.is_link_local:
+        # 169.254.0.0/16 and fe80::/10 — classified as "private" in
+        # the error message because operators think of them as "LAN"
+        # not "loopback".
+        return "private"
+    if addr.is_private:
+        return "private"
+    return None
+
+
+def _classify_cors_origin(origin: str) -> str:
+    """
+    Classify a single CORS origin against the production policy.
+
+    Returns one of:
+        - ``"ok"``        — safe for production.
+        - ``"scheme"``    — scheme is not ``https``.
+        - ``"private"``   — host is a private-IP or link-local literal.
+        - ``"loopback"``  — host is loopback (localhost / 127.0.0.1 / ::1).
+        - ``"malformed"`` — origin cannot be parsed as a URL with a host.
+
+    The classification key is stable — it is asserted by the test
+    suite and forms part of the user-facing error message.
+
+    Rationale for the classification order (scheme → host):
+        The scheme check fires first so ``http://app.fxlab.example.com``
+        is reported as a scheme violation, not a (missing) private-IP
+        match. That is clearer for the operator.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return "malformed"
+
+    if not parsed.scheme or not parsed.hostname:
+        return "malformed"
+
+    if parsed.scheme.lower() != "https":
+        # Before returning "scheme", check whether the host is
+        # loopback/private — those get a more specific classification
+        # so the error names the real problem ("localhost is loopback"
+        # is more actionable than "http is not https").
+        host_reason = _host_is_private_or_loopback(parsed.hostname)
+        if host_reason is not None:
+            return host_reason
+        return "scheme"
+
+    host_reason = _host_is_private_or_loopback(parsed.hostname)
+    if host_reason is not None:
+        return host_reason
+
+    return "ok"
+
+
+def _validate_cors_origins(
+    *,
+    origins: list[str],
+    environment: str,
+    allow_plaintext_lan: bool,
+    plaintext_justification: str,
+) -> None:
+    """
+    Enforce the production CORS origin policy.
+
+    Keyword-only signature so call sites read unambiguously —
+    a positional ``bool`` + ``str`` pair is a classic bug magnet.
+
+    Args:
+        origins: The CORS allowlist, parsed from
+            ``CORS_ALLOWED_ORIGINS``. An empty list is valid and
+            produces no allowance.
+        environment: The current ``ENVIRONMENT`` value. Only the
+            literal string ``"production"`` triggers enforcement.
+        allow_plaintext_lan: Value of
+            ``CORS_ORIGINS_ALLOW_PLAINTEXT_LAN``. Must be paired with
+            a non-trivial justification.
+        plaintext_justification: Value of
+            ``CORS_PLAINTEXT_JUSTIFICATION``. Logged at INFO during
+            startup when the escape hatch is active so the bypass is
+            auditable.
+
+    Raises:
+        CorsOriginPolicyError: In production, when any origin is
+            weak and the escape hatch is either not set or not paired
+            with a valid justification. The message names the first
+            offending origin and the escape-hatch variable.
+    """
+    if environment != "production":
+        return
+
+    if allow_plaintext_lan:
+        # Escape hatch is engaged — validate the justification and
+        # let any origin shape through. The caller (startup code)
+        # is responsible for writing the justification into the
+        # structured log so the audit trail is preserved.
+        if len(plaintext_justification.strip()) < _CORS_JUSTIFICATION_MIN_CHARS:
+            raise CorsOriginPolicyError(
+                "CORS_ORIGINS_ALLOW_PLAINTEXT_LAN=true requires a "
+                "CORS_PLAINTEXT_JUSTIFICATION of at least "
+                f"{_CORS_JUSTIFICATION_MIN_CHARS} characters explaining why the "
+                "production CORS policy is being bypassed. This justification "
+                "is written to the startup log as an audit record. "
+                "Example: 'TEMPORARY: staging brought up on private LB "
+                "2026-04-20 for load test — rollback ticket FX-1234'."
+            )
+        return
+
+    for origin in origins:
+        classification = _classify_cors_origin(origin)
+        if classification == "ok":
+            continue
+        raise CorsOriginPolicyError(
+            f"CORS origin {origin!r} violates production policy "
+            f"(reason: {classification}). Production allows only origins "
+            "with scheme=https AND a non-private / non-loopback host. "
+            "Update CORS_ALLOWED_ORIGINS to an HTTPS public origin "
+            "(e.g. 'https://app.fxlab.example.com'), or — only if "
+            "legitimately required and auditable — set "
+            "CORS_ORIGINS_ALLOW_PLAINTEXT_LAN=true paired with a "
+            "CORS_PLAINTEXT_JUSTIFICATION."
+        )
+
+
+# ---------------------------------------------------------------------------
 # libpq sslmode policy (C1 — 2026-04-15 remediation)
 # ---------------------------------------------------------------------------
 #
@@ -1238,6 +1426,41 @@ _cors_origins_raw: str = os.environ.get(
     "http://localhost:3000,http://localhost:5173",
 )
 _cors_origins: list[str] = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+
+# -- C2 enforcement (2026-04-15 remediation) -------------------------------
+# Validate the CORS allowlist against the production policy before the
+# middleware is registered. In production, plaintext-scheme and
+# private-IP / loopback origins raise CorsOriginPolicyError unless the
+# audited escape hatch is engaged. In non-production, validation is a
+# no-op so local dev against localhost / LAN origins keeps working.
+_cors_allow_plaintext_lan: bool = (
+    os.environ.get("CORS_ORIGINS_ALLOW_PLAINTEXT_LAN", "").lower() == "true"
+)
+_cors_plaintext_justification: str = os.environ.get(
+    "CORS_PLAINTEXT_JUSTIFICATION", ""
+)
+_validate_cors_origins(
+    origins=_cors_origins,
+    environment=os.environ.get("ENVIRONMENT", ""),
+    allow_plaintext_lan=_cors_allow_plaintext_lan,
+    plaintext_justification=_cors_plaintext_justification,
+)
+if (
+    os.environ.get("ENVIRONMENT", "") == "production"
+    and _cors_allow_plaintext_lan
+):
+    # Log the audit record every startup. This is the bypass's audit
+    # trail — visible in container logs and any log-aggregation sink.
+    logger.warning(
+        "cors.plaintext_lan_bypass_active",
+        justification=_cors_plaintext_justification,
+        origins=_cors_origins,
+        component="startup",
+        warning=(
+            "CORS_ORIGINS_ALLOW_PLAINTEXT_LAN=true is active in production. "
+            "Production CORS policy is bypassed. Audit justification recorded."
+        ),
+    )
 
 app.add_middleware(
     CORSMiddleware,
