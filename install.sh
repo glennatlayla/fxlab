@@ -580,39 +580,95 @@ build_and_start() {
 wait_for_healthy() {
     log STEP "Waiting for services to become healthy..."
 
-    local max_wait=120
+    # Core services MUST be healthy for the install to succeed.
+    # Monitoring services are checked and warned, but do not block the install.
+    # Rationale: a broken cadvisor or prometheus should not prevent the trading
+    # platform from deploying — these are observability, not the product.
+    # Core services: postgres, redis, api, web, nginx (hardcoded in Python below)
+
+    local max_wait=180
     local elapsed=0
     local interval=5
 
     while [[ "$elapsed" -lt "$max_wait" ]]; do
-        local healthy_count
-        healthy_count="$(docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null | \
-            python3 -c "import sys,json; data=[json.loads(l) for l in sys.stdin]; print(sum(1 for s in data if s.get('Health','') == 'healthy'))" 2>/dev/null || echo "0")"
+        # Parse all service statuses into a temp file so we only call compose once
+        local status_json
+        status_json="$(docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null)" || status_json=""
 
-        local total_count
-        total_count="$(docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null | \
-            python3 -c "import sys,json; data=[json.loads(l) for l in sys.stdin]; print(sum(1 for s in data if s.get('State','') == 'running'))" 2>/dev/null || echo "0")"
+        # Count core healthy / core total(running)
+        local core_healthy core_total all_healthy all_total
+        read -r core_healthy core_total all_healthy all_total < <(echo "$status_json" | \
+            python3 -c "
+import sys, json
+core = {'postgres','redis','api','web','nginx'}
+data = [json.loads(l) for l in sys.stdin if l.strip()]
+ch = sum(1 for s in data if s.get('Service','') in core and s.get('Health','') == 'healthy')
+ct = sum(1 for s in data if s.get('Service','') in core and s.get('State','') == 'running')
+ah = sum(1 for s in data if s.get('Health','') == 'healthy')
+at = sum(1 for s in data if s.get('State','') == 'running')
+print(ch, ct, ah, at)
+" 2>/dev/null) || { core_healthy=0; core_total=0; all_healthy=0; all_total=0; }
 
-        # All services must be healthy — compare healthy to total, not a hardcoded number.
-        if [[ "$total_count" -gt 0 ]] && [[ "$healthy_count" -eq "$total_count" ]]; then
-            log INFO "All ${healthy_count}/${total_count} services are healthy."
+        # Best case: everything healthy
+        if [[ "$all_total" -gt 0 ]] && [[ "$all_healthy" -eq "$all_total" ]]; then
+            log INFO "All ${all_healthy}/${all_total} services are healthy."
             return 0
         fi
 
-        log INFO "Healthy: ${healthy_count}/${total_count} — waiting... (${elapsed}s / ${max_wait}s)"
+        # Core services healthy — don't keep waiting for monitoring
+        if [[ "$core_total" -ge 5 ]] && [[ "$core_healthy" -eq "$core_total" ]]; then
+            local mon_unhealthy=$((all_total - all_healthy))
+            if [[ "$mon_unhealthy" -gt 0 ]]; then
+                log WARN "Core services healthy (${core_healthy}/${core_total}). ${mon_unhealthy} monitoring service(s) still starting or unhealthy."
+                # Give monitoring services a brief grace period (30s) before declaring success
+                if [[ "$elapsed" -ge 30 ]]; then
+                    log WARN "Proceeding — monitoring services may still be settling."
+                    _report_unhealthy_services
+                    return 0
+                fi
+            fi
+        fi
+
+        log INFO "Healthy: ${all_healthy}/${all_total} (core: ${core_healthy}/${core_total}) — waiting... (${elapsed}s / ${max_wait}s)"
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
 
-    log WARN "Not all services healthy after ${max_wait}s. Dumping status and logs..."
+    # Timeout — check if at least core services are healthy
+    local final_json
+    final_json="$(docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null)" || final_json=""
+
+    local final_core_healthy final_core_total
+    read -r final_core_healthy final_core_total < <(echo "$final_json" | \
+        python3 -c "
+import sys, json
+core = {'postgres','redis','api','web','nginx'}
+data = [json.loads(l) for l in sys.stdin if l.strip()]
+ch = sum(1 for s in data if s.get('Service','') in core and s.get('Health','') == 'healthy')
+ct = sum(1 for s in data if s.get('Service','') in core and s.get('State','') == 'running')
+print(ch, ct)
+" 2>/dev/null) || { final_core_healthy=0; final_core_total=0; }
+
+    if [[ "$final_core_total" -ge 5 ]] && [[ "$final_core_healthy" -eq "$final_core_total" ]]; then
+        log WARN "Core services healthy (${final_core_healthy}/${final_core_total}) but monitoring services did not become healthy within ${max_wait}s."
+        _report_unhealthy_services
+        return 0
+    fi
+
+    log ERROR "Core services NOT healthy after ${max_wait}s."
     docker compose -f docker-compose.prod.yml ps 2>&1 | tee -a "$LOG_FILE"
-    echo ""
-    log ERROR "Container logs for unhealthy/exited services:"
-    # Show logs for any container that is not healthy — these are the ones that matter.
+    _report_unhealthy_services
+    fail "Core services did not become healthy within ${max_wait}s. Full log: $LOG_FILE"
+}
+
+_report_unhealthy_services() {
+    # Log details for any unhealthy or non-running services.
     docker compose -f docker-compose.prod.yml ps --format json 2>/dev/null | \
         python3 -c "
 import sys, json
 for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
     svc = json.loads(line)
     if svc.get('Health', '') != 'healthy' or svc.get('State', '') != 'running':
         print(svc.get('Service', svc.get('Name', 'unknown')))
@@ -621,7 +677,6 @@ for line in sys.stdin:
         docker compose -f docker-compose.prod.yml logs --tail 40 "$svc_name" 2>/dev/null || true
         echo ""
     done
-    fail "Services did not become healthy within ${max_wait}s. Full log: $LOG_FILE"
 }
 
 # ---------------------------------------------------------------------------
