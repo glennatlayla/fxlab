@@ -31,7 +31,6 @@ import pytest
 
 from libs.contracts.reconciliation import ReconciliationTrigger
 
-
 # ---------------------------------------------------------------------------
 # Helpers / fakes
 # ---------------------------------------------------------------------------

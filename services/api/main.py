@@ -254,9 +254,7 @@ def _log_runtime_versions() -> None:
         database_url_scheme=_url_scheme(os.environ.get("DATABASE_URL", "")),
         redis_url_scheme=_url_scheme(os.environ.get("REDIS_URL", "")),
         rate_limit_backend=os.environ.get("RATE_LIMIT_BACKEND", "memory"),
-        reconciliation_interval_seconds=os.environ.get(
-            "RECONCILIATION_INTERVAL_SECONDS", "300"
-        ),
+        reconciliation_interval_seconds=os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "300"),
         artifact_storage_backend=os.environ.get("ARTIFACT_STORAGE_BACKEND", "local"),
     )
 

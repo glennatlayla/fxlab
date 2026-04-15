@@ -38,7 +38,6 @@ from unittest.mock import patch
 import pytest
 import structlog
 
-
 # ---------------------------------------------------------------------------
 # Structural guards — static analysis of services/api/main.py
 # ---------------------------------------------------------------------------
@@ -75,11 +74,8 @@ class TestPeriodicReconciliationBlockIsolation:
     of the LiveExecutionService block.
     """
 
-    _START = (
-        "# Periodic broker-vs-internal reconciliation "
-        "(M19 production hardening)"
-    )
-    _END = "logger.info(\"api.startup\""
+    _START = "# Periodic broker-vs-internal reconciliation (M19 production hardening)"
+    _END = 'logger.info("api.startup"'
 
     def test_block_is_present(self) -> None:
         src = _main_source()
@@ -138,9 +134,9 @@ class TestLiveExecutionPhaseInstrumentation:
         assert 'phase="live_execution_wiring"' in src, (
             "LiveExecutionService block missing phase label 'live_execution_wiring'"
         )
-        assert 'startup.phase_begin' in src
-        assert 'startup.phase_complete' in src
-        assert 'startup.phase_failed' in src
+        assert "startup.phase_begin" in src
+        assert "startup.phase_complete" in src
+        assert "startup.phase_failed" in src
 
 
 # ---------------------------------------------------------------------------

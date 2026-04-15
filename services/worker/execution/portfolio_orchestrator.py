@@ -166,9 +166,7 @@ class PortfolioOrchestrator(PortfolioOrchestratorInterface):
             target_weight_d = Decimal(str(alloc.target_weight))
             drift_d = current_weight_d - target_weight_d
             drift_abs_d = abs(drift_d)
-            drift_pct_d = (
-                drift_abs_d / target_weight_d if target_weight_d > 0 else Decimal("0")
-            )
+            drift_pct_d = drift_abs_d / target_weight_d if target_weight_d > 0 else Decimal("0")
 
             drifts.append(
                 StrategyDrift(

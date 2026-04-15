@@ -164,26 +164,17 @@ class PeriodicReconciliationJob:
                 check_interval_seconds=300.0,
             )
         """
-        if (
-            reconciliation_service is None
-            and reconciliation_service_factory is None
-        ):
+        if reconciliation_service is None and reconciliation_service_factory is None:
             raise ValueError(
-                "Either reconciliation_service or "
-                "reconciliation_service_factory must be provided."
+                "Either reconciliation_service or reconciliation_service_factory must be provided."
             )
-        if (
-            reconciliation_service is not None
-            and reconciliation_service_factory is not None
-        ):
+        if reconciliation_service is not None and reconciliation_service_factory is not None:
             raise ValueError(
                 "Provide only one of reconciliation_service or "
                 "reconciliation_service_factory, not both."
             )
         if deployment_repo is None:
-            raise ValueError(
-                "deployment_repo is required for PeriodicReconciliationJob"
-            )
+            raise ValueError("deployment_repo is required for PeriodicReconciliationJob")
 
         self._reconciliation_service = reconciliation_service
         self._reconciliation_service_factory = reconciliation_service_factory
@@ -339,9 +330,7 @@ class PeriodicReconciliationJob:
             )
             return []
 
-        live_active = [
-            d for d in active if d.get("execution_mode") == _LIVE_EXECUTION_MODE
-        ]
+        live_active = [d for d in active if d.get("execution_mode") == _LIVE_EXECUTION_MODE]
 
         logger.info(
             "periodic_reconciliation.tick_started",

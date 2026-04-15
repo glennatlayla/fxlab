@@ -92,11 +92,11 @@ if TYPE_CHECKING:
     )
     from libs.contracts.interfaces.signal_repository import SignalRepositoryInterface
     from libs.contracts.interfaces.signal_strategy import SignalStrategyInterface
+    from libs.contracts.market_data import Candle
+    from libs.indicators.engine import IndicatorEngine
     from services.api.services.interfaces.live_execution_service_interface import (
         LiveExecutionServiceInterface,
     )
-    from libs.contracts.market_data import Candle
-    from libs.indicators.engine import IndicatorEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -168,7 +168,7 @@ class StrategyExecutionEngine(ExecutionLoopInterface):
         signal_repository: SignalRepositoryInterface,
         data_freshness_gate: DataFreshnessGateInterface | None = None,
         data_freshness_policy: DataFreshnessPolicy | None = None,
-        live_execution_service: "LiveExecutionServiceInterface | None" = None,
+        live_execution_service: LiveExecutionServiceInterface | None = None,
     ) -> None:
         """
         Initialize the execution engine with all required dependencies.
