@@ -256,18 +256,49 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const login = useCallback(
     async (email: string, password: string) => {
       setIsLoading(true);
+      console.log("[FXLab:auth] login() called", { email, baseURL: apiClient.defaults.baseURL });
       try {
+        console.log("[FXLab:auth] POST /auth/token sending...");
         const resp = await apiClient.post<TokenResponse>("/auth/token", {
           grant_type: "password",
           username: email,
           password,
         });
+        console.log("[FXLab:auth] POST /auth/token response:", {
+          status: resp.status,
+          hasAccessToken: !!resp.data?.access_token,
+          hasRefreshToken: !!resp.data?.refresh_token,
+          tokenLength: resp.data?.access_token?.length,
+        });
         const data = resp.data;
+
+        console.log("[FXLab:auth] Setting access token...");
         setAccessToken(data.access_token);
         accessTokenRef.current = data.access_token;
+
+        console.log("[FXLab:auth] Storing refresh token in sessionStorage...");
         sessionStorage.setItem(REFRESH_TOKEN_KEY, data.refresh_token);
-        setUser(decodeUser(data.access_token));
+
+        console.log("[FXLab:auth] Decoding JWT...");
+        const decoded = decodeUser(data.access_token);
+        console.log("[FXLab:auth] Decoded user:", decoded);
+        setUser(decoded);
+
+        console.log("[FXLab:auth] Scheduling refresh...");
         scheduleRefresh(data.access_token);
+
+        console.log("[FXLab:auth] Login complete — success");
+      } catch (err) {
+        console.error("[FXLab:auth] Login failed at some stage:", err);
+        console.error("[FXLab:auth] Error type:", typeof err);
+        console.error("[FXLab:auth] Error name:", err instanceof Error ? err.name : "N/A");
+        console.error("[FXLab:auth] Error message:", err instanceof Error ? err.message : String(err));
+        if (err && typeof err === "object" && "response" in err) {
+          const axErr = err as { response?: { status?: number; data?: unknown } };
+          console.error("[FXLab:auth] HTTP status:", axErr.response?.status);
+          console.error("[FXLab:auth] Response data:", axErr.response?.data);
+        }
+        throw err; // Re-throw so LoginPage can handle it
       } finally {
         setIsLoading(false);
       }
