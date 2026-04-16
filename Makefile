@@ -11,7 +11,7 @@ PRECOMMIT   := .venv/bin/pre-commit
 
 .PHONY: help install-dev hooks format format-check lint type-check \
         test test-unit test-integration test-acceptance \
-        test-shell install-smoke \
+        test-shell compose-check install-smoke \
         coverage quality ci clean
 
 help:  ## Show this help message
@@ -60,8 +60,24 @@ test-shell:  ## Run shell test suites for install.sh and ship.sh
 	@bash tests/shell/test_install_env_detection.sh
 	@bash tests/shell/test_install_sudo_delegation.sh
 	@bash tests/shell/test_compose_env_substitution.sh
+	@bash tests/shell/test_install_smoke_preflight.sh
 	@bash tests/shell/test_ship_commit_push.sh
 	@echo "All shell tests passed."
+
+# ---------------------------------------------------------------------------
+# compose-check — lightweight structural verification of docker-compose.prod.yml
+# ---------------------------------------------------------------------------
+# Runs the PyYAML-based test suite that pins the ENVIRONMENT / sslmode
+# substitution contract in the api service block. Requires no Docker
+# daemon — complements `make install-smoke`, which needs a live daemon.
+#
+# Use this on any machine (Mac laptop, CI sandbox, minitux) to verify the
+# 2026-04-16 compose remediation is still intact before attempting a real
+# deploy. This target is the recommended pre-flight check whenever a
+# commit touches docker-compose.prod.yml.
+# ---------------------------------------------------------------------------
+compose-check:  ## Verify docker-compose.prod.yml substitution (no daemon needed)
+	@bash tests/shell/test_compose_env_substitution.sh
 
 ci: quality test  ## Simulate full CI pipeline locally
 
@@ -94,18 +110,63 @@ install-smoke:  ## Spin up prod compose, verify health, tear down
 	@echo "=== Install Smoke Test ==="
 	@echo "Timeout: $(SMOKE_TIMEOUT)s"
 	@echo ""
+	@# --- 0. Preflight: fail fast on environmental prerequisites ---
+	@# The 2026-04-16 local run showed install-smoke silently declaring
+	@# "All services healthy after 0s" when the daemon was down and no
+	@# services had started. These two preflight checks stop the run at
+	@# the earliest point where the fault is diagnosable, before the
+	@# health-check loop has any chance to misinterpret an empty stack.
+	@echo "[0/5] Preflight..."
+	@if ! docker info >/dev/null 2>&1; then \
+		echo "  FAIL: docker daemon is not reachable."; \
+		echo "    Start Docker Desktop (macOS) or 'sudo systemctl start docker' (Linux)"; \
+		echo "    and re-run 'make install-smoke'."; \
+		exit 1; \
+	fi
+	@if [ ! -f .env ]; then \
+		echo "  FAIL: .env is missing at $$(pwd)/.env"; \
+		echo "    install-smoke simulates the post-install environment; it needs"; \
+		echo "    the secrets install.sh would have written. Either run install.sh"; \
+		echo "    first or seed a smoke .env:"; \
+		echo "      cp .env.production.template .env"; \
+		echo "      # then set POSTGRES_PASSWORD, JWT_SECRET_KEY, CORS_ALLOWED_ORIGINS"; \
+		exit 1; \
+	fi
+	@for req in POSTGRES_PASSWORD JWT_SECRET_KEY CORS_ALLOWED_ORIGINS; do \
+		val=$$(grep -E "^$${req}=" .env | head -1 | cut -d= -f2-); \
+		if [ -z "$$val" ] || [ "$$val" = "CHANGE_ME" ]; then \
+			echo "  FAIL: .env is missing required value: $$req"; \
+			echo "    Edit $$(pwd)/.env and set $$req to a real value."; \
+			exit 1; \
+		fi; \
+	done
+	@echo "  OK: docker daemon reachable and .env has required values."
+	@echo ""
 	@# --- 1. Build and start ---
 	@echo "[1/5] Building and starting production stack..."
 	@$(SMOKE_COMPOSE) up -d --build 2>&1 | tail -5
 	@echo ""
 	@# --- 2. Wait for healthchecks ---
 	@echo "[2/5] Waiting for services to become healthy (up to $(SMOKE_TIMEOUT)s)..."
+	@# The Python helper emits "<total> <unhealthy>" on one line. We
+	@# explicitly require total > 0 so a silently-empty stack (daemon
+	@# died between preflight and here, or compose up was a no-op) is
+	@# never classified as healthy. A zero-services result is fatal.
 	@elapsed=0; \
 	while [ $$elapsed -lt $(SMOKE_TIMEOUT) ]; do \
-		unhealthy=$$($(SMOKE_COMPOSE) ps --format json 2>/dev/null | \
-			python3 -c "import sys,json; lines=[json.loads(l) for l in sys.stdin if l.strip()]; print(sum(1 for s in lines if s.get('Health','') not in ('healthy','')))" 2>/dev/null || echo "99"); \
+		counts=$$($(SMOKE_COMPOSE) ps --format json 2>/dev/null | \
+			python3 -c "import sys,json; lines=[json.loads(l) for l in sys.stdin if l.strip()]; total=len(lines); unhealthy=sum(1 for s in lines if s.get('Health','') not in ('healthy','')); print(f'{total} {unhealthy}')" 2>/dev/null || echo "0 99"); \
+		total=$$(echo "$$counts" | cut -d' ' -f1); \
+		unhealthy=$$(echo "$$counts" | cut -d' ' -f2); \
+		if [ "$$total" = "0" ]; then \
+			echo "  FAIL: compose reports zero services running. Stack never started."; \
+			echo "    This usually means 'docker compose up' failed silently. Inspect:"; \
+			echo "      docker compose -f docker-compose.prod.yml ps"; \
+			echo "      docker compose -f docker-compose.prod.yml logs --tail=50"; \
+			exit 1; \
+		fi; \
 		if [ "$$unhealthy" = "0" ]; then \
-			echo "  All services healthy after $${elapsed}s."; \
+			echo "  All $$total services healthy after $${elapsed}s."; \
 			break; \
 		fi; \
 		sleep 5; \
