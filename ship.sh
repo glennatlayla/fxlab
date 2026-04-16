@@ -111,6 +111,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Global error trap — never die silently.
+# set -e can terminate the script from any uncaught non-zero exit deep in
+# a pipeline or command substitution.  Without this trap, the user sees
+# the script stop mid-output with no explanation.  The trap fires on ERR,
+# prints the line that killed us, and exits non-zero so CI catches it.
+_on_error() {
+    local line_no="$1"
+    echo "" >&2
+    echo -e "${RED}${BOLD}ship.sh: unexpected failure at line ${line_no}.${NC}" >&2
+    echo -e "Re-run with ${BOLD}bash -x ./ship.sh${NC} for a full trace." >&2
+    exit 1
+}
+trap '_on_error ${LINENO}' ERR
+
 has_claude_code() {
     command -v claude &>/dev/null
 }
@@ -472,11 +486,28 @@ Do not add stubs, TODOs, or placeholder code. Do not run any commands."
 # ---------------------------------------------------------------------------
 
 commit_and_push() {
+    # Stage, commit, push, and verify that the commit reaches the remote.
+    #
+    # Every critical operation (stage, commit, push, verify) is wrapped in
+    # explicit error handling with a descriptive message.  The script must
+    # NEVER die silently in this function — a silent failure here means
+    # code passes quality gates but never deploys, which is worse than a
+    # loud test failure.
+    #
+    # Flow:
+    #   1. Detect and stage untracked project files.
+    #   2. Stage all project directories + root config files + tracked mods.
+    #   3. Generate commit message (AI with timeout → deterministic fallback).
+    #   4. Commit with explicit error capture.
+    #   5. Post-commit: verify no project files remain untracked.
+    #   6. Push with retry and explicit error capture.
+    #   7. Post-push: verify remote HEAD matches local HEAD.
+
     step "Commit & push to ${BRANCH}"
 
-    # ---- Safety gate: warn about untracked source files ----
+    # ---- 1. Safety gate: detect untracked source files ----
     # If any project directory contains untracked files, they won't appear
-    # in the commit and the remote clone will be incomplete. This is the
+    # in the commit and the remote clone will be incomplete.  This is the
     # single most common cause of "works locally, fails on deploy".
     local untracked_src=""
     for dir in "${PROJECT_DIRS[@]}"; do
@@ -489,7 +520,7 @@ commit_and_push() {
         fi
     done
 
-    # Also check standalone project files at repo root
+    # Also check standalone project files at repo root.
     local root_files=(
         ship.sh install.sh uninstall.sh build-release.sh
         requirements*.txt pyproject.toml pytest.ini setup.cfg
@@ -518,46 +549,85 @@ commit_and_push() {
         fi
     fi
 
-    # ---- Stage everything ----
-    # 1. All project directories (source, tests, deploy configs, migrations)
+    # ---- 2. Stage everything ----
+    echo -e "  Staging files..."
+
+    # 2a. All project directories (source, tests, deploy configs, migrations).
     for dir in "${PROJECT_DIRS[@]}"; do
         [[ -d "$dir" ]] && git add -- "$dir" 2>/dev/null || true
     done
 
-    # 2. Root-level project files (configs, scripts, docs)
+    # 2b. Root-level project files (configs, scripts, docs).
     for pattern in "${root_files[@]}"; do
         # shellcheck disable=SC2086
         git add -- $pattern 2>/dev/null || true
     done
 
-    # 3. Tracked-but-modified files (catches anything we missed)
-    git add -u
+    # 2c. Tracked-but-modified files (catches anything the above missed).
+    if ! git add -u 2>/dev/null; then
+        fail_msg "git add -u failed. Check for index.lock or permission issues."
+        echo -e "  Try: ${BOLD}rm -f .git/index.lock${NC}" >&2
+        exit 1
+    fi
 
     if git diff --cached --quiet; then
         warn "Nothing to commit after staging."
         return 0
     fi
 
-    # Show what we're committing
+    # Show what we're committing.
     local staged_count
     staged_count="$(git diff --cached --name-only | wc -l | tr -d ' ')"
-    echo -e "  Staging ${BOLD}${staged_count}${NC} file(s)"
+    echo -e "  Staged ${BOLD}${staged_count}${NC} file(s):"
+    git diff --cached --name-only | head -15 | while IFS= read -r f; do
+        echo -e "    ${GREEN}+ ${f}${NC}"
+    done
+    if [[ "$staged_count" -gt 15 ]]; then
+        echo -e "    ${YELLOW}... and $((staged_count - 15)) more${NC}"
+    fi
 
-    # Generate commit message
+    # ---- 3. Generate commit message ----
+    echo -e "  Generating commit message..."
     local msg
-    msg="$(generate_commit_msg)"
+    msg="$(generate_commit_msg)" || true
+
+    # Safety net: if generate_commit_msg produced nothing (should not happen
+    # given the deterministic fallback, but defence-in-depth), use a
+    # timestamp-based message rather than letting git commit fail on an
+    # empty -m.
+    if [[ -z "$msg" ]]; then
+        msg="chore: ship $(date +%Y-%m-%dT%H:%M:%S)"
+        warn "Commit message generation returned empty — using fallback: ${msg}"
+    fi
+
     echo -e "  Message: ${BOLD}${msg}${NC}"
 
-    # Commit using heredoc to safely handle special characters
-    git commit -m "$(cat <<EOF
-${msg}
-EOF
-)"
-    ok "Committed: $(git rev-parse --short HEAD)"
+    # ---- 4. Commit with explicit error handling ----
+    local commit_log
+    commit_log="$(make_temp)"
 
-    # ---- Post-commit verification ----
-    # Check that no project source files remain untracked after commit.
-    # If they do, the commit is incomplete and the deploy will fail.
+    # Use a simple -m instead of a heredoc to avoid expansion issues with
+    # special characters ($, `, ", \) in AI-generated messages.
+    if ! git commit -m "$msg" > "$commit_log" 2>&1; then
+        fail_msg "git commit failed."
+        echo -e "${YELLOW}--- commit output ---${NC}" >&2
+        cat "$commit_log" >&2
+        echo -e "${YELLOW}--- end ---${NC}" >&2
+        echo "" >&2
+        echo -e "Common causes:" >&2
+        echo -e "  - Pre-commit hook rejected the changes" >&2
+        echo -e "  - Empty commit message" >&2
+        echo -e "  - Index lock (stale .git/index.lock)" >&2
+        echo "" >&2
+        echo -e "Staged changes are preserved.  Fix the issue and re-run ./ship.sh" >&2
+        exit 1
+    fi
+
+    local commit_sha
+    commit_sha="$(git rev-parse --short HEAD)"
+    ok "Committed: ${commit_sha}"
+
+    # ---- 5. Post-commit: verify no project files remain untracked ----
     local still_untracked=""
     for dir in "${PROJECT_DIRS[@]}"; do
         if [[ -d "$dir" ]]; then
@@ -576,42 +646,143 @@ EOF
         done
     fi
 
-    # Push
+    # ---- 6. Push with retry ----
     step "Pushing to origin/${BRANCH}"
 
-    if ! git push -u origin "$BRANCH" 2>&1; then
-        fail_msg "Push failed."
+    local push_log max_push_attempts=2
+    push_log="$(make_temp)"
+
+    local push_ok=0
+    for attempt in $(seq 1 "$max_push_attempts"); do
+        if git push -u origin "$BRANCH" > "$push_log" 2>&1; then
+            push_ok=1
+            break
+        fi
+        if [[ $attempt -lt $max_push_attempts ]]; then
+            warn "Push attempt ${attempt} failed — retrying in 3s..."
+            cat "$push_log" >&2
+            sleep 2
+        fi
+    done
+
+    if [[ "$push_ok" -eq 0 ]]; then
+        fail_msg "Push to origin/${BRANCH} failed after ${max_push_attempts} attempts."
+        echo -e "${YELLOW}--- push output ---${NC}" >&2
+        cat "$push_log" >&2
+        echo -e "${YELLOW}--- end ---${NC}" >&2
+        echo "" >&2
+        echo -e "The commit ${BOLD}${commit_sha}${NC} exists locally but did NOT reach the remote." >&2
+        echo -e "Troubleshoot:" >&2
+        echo -e "  - Check SSH key: ${BOLD}ssh -T git@github.com${NC}" >&2
+        echo -e "  - Check remote:  ${BOLD}git remote -v${NC}" >&2
+        echo -e "  - Retry push:    ${BOLD}git push origin ${BRANCH}${NC}" >&2
         exit 1
     fi
 
-    ok "Pushed $(git rev-parse --short HEAD) to origin/${BRANCH}"
+    ok "Pushed ${commit_sha} to origin/${BRANCH}"
+
+    # ---- 7. Post-push verification ----
+    # Confirm the remote actually received the commit.  A push can exit 0
+    # in edge cases (shallow clone, partial ref update, proxy interference)
+    # without the commit landing.  If verification fails, it's a warning
+    # (not fatal) because transient caching at the remote can delay
+    # ls-remote updates by a few seconds.
+    echo -e "  Verifying remote received commit..."
+    local remote_sha
+    remote_sha="$(git ls-remote origin "${BRANCH}" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+    local local_sha
+    local_sha="$(git rev-parse HEAD)"
+
+    if [[ -z "$remote_sha" ]]; then
+        warn "Could not verify remote HEAD (ls-remote returned empty). Check manually:"
+        echo -e "    ${BOLD}git ls-remote origin ${BRANCH}${NC}"
+    elif [[ "$remote_sha" != "$local_sha" ]]; then
+        warn "Remote HEAD (${remote_sha:0:7}) does not match local HEAD (${local_sha:0:7})."
+        echo -e "  This may be a transient caching delay.  Verify with:"
+        echo -e "    ${BOLD}git ls-remote origin ${BRANCH}${NC}"
+    else
+        ok "Verified: remote HEAD matches local (${local_sha:0:7})"
+    fi
 }
 
 generate_commit_msg() {
-    # User-provided message takes precedence
+    # Generates a conventional-commit message for the staged changes.
+    #
+    # Priority:
+    #   1. User-supplied message (passed as positional arg to ship.sh).
+    #   2. AI-generated message via Claude Code CLI (with a hard timeout
+    #      so the script never hangs).
+    #   3. Deterministic fallback derived from the staged file types.
+    #
+    # This function MUST always produce a non-empty string.  Every code
+    # path either echoes a message and returns, or falls through to the
+    # deterministic fallback at the bottom.  The caller wraps the output
+    # in an error check, but the fallback is the safety net.
+
+    # --- 1. User-provided message takes precedence ---
     if [[ -n "$COMMIT_MSG" ]]; then
         echo "$COMMIT_MSG"
-        return
+        return 0
     fi
 
-    # AI-generated message if Claude Code is available
+    # --- 2. AI-generated message (with timeout) ---
+    # The Claude CLI can hang on network issues, model overload, or
+    # stdin-tty misdetection.  A 30-second timeout prevents the entire
+    # ship pipeline from blocking.  On timeout or any failure, we fall
+    # through to the deterministic fallback — no error, no retry.
     if has_claude_code && [[ "$NO_AI" -eq 0 ]]; then
-        local diff_summary
-        diff_summary="$(git diff --cached --stat 2>/dev/null)"
-        local ai_msg
-        ai_msg="$(claude --print -p "Generate a one-line conventional commit message \
+        local diff_summary ai_msg=""
+        diff_summary="$(git diff --cached --stat 2>/dev/null || true)"
+
+        # timeout(1) sends SIGTERM after 30s, SIGKILL after 35s.
+        # The || true ensures set -e does not kill the script if the
+        # command fails or times out.
+        if command -v timeout &>/dev/null; then
+            ai_msg="$(timeout --signal=TERM --kill-after=5 30 \
+                claude --print -p "Generate a one-line conventional commit message \
 (format: type(scope): description) for these changes. Types: feat, fix, test, \
-refactor, docs, chore, perf. Under 72 chars. Output ONLY the message.
+refactor, docs, chore, perf. Under 72 chars. Output ONLY the message, no \
+explanation.
 
-${diff_summary}" 2>/dev/null || echo "")"
+${diff_summary}" 2>/dev/null || true)"
+        else
+            # macOS without coreutils: use a background job with kill.
+            local ai_outfile
+            ai_outfile="$(make_temp)"
+            claude --print -p "Generate a one-line conventional commit message \
+(format: type(scope): description) for these changes. Types: feat, fix, test, \
+refactor, docs, chore, perf. Under 72 chars. Output ONLY the message, no \
+explanation.
 
-        if [[ -n "$ai_msg" ]] && [[ "${#ai_msg}" -lt 100 ]]; then
+${diff_summary}" > "$ai_outfile" 2>/dev/null &
+            local ai_pid=$!
+            local waited=0
+            while kill -0 "$ai_pid" 2>/dev/null && [[ $waited -lt 30 ]]; do
+                sleep 1
+                waited=$((waited + 1))
+            done
+            if kill -0 "$ai_pid" 2>/dev/null; then
+                # Still running after 30s — kill it.
+                kill "$ai_pid" 2>/dev/null || true
+                wait "$ai_pid" 2>/dev/null || true
+                warn "Claude CLI timed out generating commit message — using fallback."
+            else
+                wait "$ai_pid" 2>/dev/null || true
+                ai_msg="$(cat "$ai_outfile" 2>/dev/null || true)"
+            fi
+        fi
+
+        # Sanitise: strip leading/trailing whitespace, reject multi-line
+        # or overly long output (LLM hallucination guard).
+        ai_msg="$(echo "$ai_msg" | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+        if [[ -n "$ai_msg" ]] && [[ "${#ai_msg}" -lt 100 ]] && [[ "${#ai_msg}" -gt 5 ]]; then
             echo "$ai_msg"
-            return
+            return 0
         fi
     fi
 
-    # Fallback: infer type from changed files
+    # --- 3. Deterministic fallback: infer type from staged files ---
     local py_files test_files doc_files
     py_files="$(git diff --cached --name-only | grep -c '\.py$' || true)"
     test_files="$(git diff --cached --name-only | grep -c 'test' || true)"
@@ -627,7 +798,7 @@ ${diff_summary}" 2>/dev/null || echo "")"
     fi
 
     local files
-    files="$(git diff --cached --name-only | head -3 | xargs -I{} basename {} | paste -sd, -)"
+    files="$(git diff --cached --name-only | head -3 | xargs -I{} basename {} | paste -sd, - || true)"
     echo "${prefix}: update ${files:-files}"
 }
 

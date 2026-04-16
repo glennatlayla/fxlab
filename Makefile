@@ -53,11 +53,12 @@ coverage:  ## Run tests and enforce ≥80% coverage gate
 
 quality: format-check lint  ## Run all code quality checks (format + lint)
 
-test-shell:  ## Run shell test suites for install.sh
-	@echo "Running install.sh shell test suites..."
+test-shell:  ## Run shell test suites for install.sh and ship.sh
+	@echo "Running shell test suites..."
 	@bash tests/shell/test_install_pull_latest.sh
 	@bash tests/shell/test_install_diagnostics.sh
 	@bash tests/shell/test_install_env_detection.sh
+	@bash tests/shell/test_ship_commit_push.sh
 	@echo "All shell tests passed."
 
 ci: quality test  ## Simulate full CI pipeline locally
