@@ -47,6 +47,14 @@ if ! python -m alembic upgrade head; then
 fi
 echo "[entrypoint] Migrations complete."
 
+# -- Seed initial admin user (idempotent — skips if users already exist) ------
+echo "[entrypoint] Checking for initial admin user..."
+if ! python -m services.api.cli.seed_admin; then
+  echo "WARNING: Admin seeding failed. You can retry manually:" >&2
+  echo "  docker compose exec api python -m services.api.cli.seed_admin" >&2
+  # Non-fatal — the API can still start; operator can seed manually.
+fi
+
 # -- Start API with graceful shutdown ------------------------------------------
 echo "[entrypoint] Starting API server..."
 
