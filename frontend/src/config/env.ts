@@ -65,28 +65,33 @@ export function getConfig(): AppConfig {
   const isProduction = mode === "production";
   const isDevelopment = !isProduction;
 
-  // API base URL — required in production, defaults in dev
+  // API base URL — defaults to "/api" (relative, works behind nginx proxy).
+  // Accepts both absolute URLs (http://...) and relative paths (/api).
+  // Relative paths are the recommended default for Docker deployments
+  // because they adapt to any host without a rebuild.
   const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
   let apiBaseUrl: string;
 
   if (rawApiBaseUrl) {
-    // Validate that it's a real URL
-    try {
-      new URL(rawApiBaseUrl);
+    // Accept relative paths (starting with /) or absolute URLs.
+    if (rawApiBaseUrl.startsWith("/")) {
       apiBaseUrl = rawApiBaseUrl;
-    } catch {
-      throw new Error(
-        `VITE_API_BASE_URL is not a valid URL: "${rawApiBaseUrl}". ` +
-          "Expected format: https://api.example.com",
-      );
+    } else {
+      // Validate that absolute URLs are well-formed.
+      try {
+        new URL(rawApiBaseUrl);
+        apiBaseUrl = rawApiBaseUrl;
+      } catch {
+        throw new Error(
+          `VITE_API_BASE_URL is not a valid URL or path: "${rawApiBaseUrl}". ` +
+            'Expected: "/api" (relative) or "https://api.example.com" (absolute).',
+        );
+      }
     }
-  } else if (isProduction) {
-    throw new Error(
-      "VITE_API_BASE_URL is required in production mode. " +
-        "Set it in your .env.production or build environment.",
-    );
   } else {
-    apiBaseUrl = "http://localhost:8000";
+    // No value set — use relative default. Works in both dev (Vite proxy)
+    // and production (nginx proxy).
+    apiBaseUrl = "/api";
   }
 
   // Auth config — use environment overrides or sensible defaults

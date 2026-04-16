@@ -21,7 +21,17 @@
 
 import axios from "axios";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+// Production default: "/api" (relative). The nginx edge proxy and the
+// frontend's own nginx both route /api/* → fxlab-api:8000, so a relative
+// base URL works on any host without baking a host-specific URL into the
+// build. Development override: set VITE_API_BASE_URL=http://localhost:8000
+// in frontend/.env for local Vite dev server use.
+//
+// Prior to 2026-04-16 this defaulted to "http://localhost:8000", which
+// caused a blank page on every deployed instance — the browser sent API
+// requests to localhost, AuthProvider failed silently, and the app never
+// rendered.
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,

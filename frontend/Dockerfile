@@ -19,7 +19,13 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --prefer-offline; else npm install --prefer-offline; fi
 
-# Copy source and build
+# Copy source and build.
+# VITE_API_BASE_URL is baked into the JS bundle at build time by Vite.
+# Default: /api (relative — works behind the nginx proxy on any host).
+# Override via docker-compose build args or --build-arg for custom setups.
+ARG VITE_API_BASE_URL=/api
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
 COPY . .
 RUN npm run build
 
