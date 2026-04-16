@@ -91,22 +91,50 @@ export default function LoginPage() {
       // Reset rate limiting on success
       setFailedAttempts(0);
       navigate(from, { replace: true });
-    } catch {
+    } catch (err: unknown) {
+      // Log the actual error to the console so operators can diagnose login
+      // failures. The catch-all previously swallowed all errors (network,
+      // JWT decode, session storage, etc.) and displayed the same generic
+      // "Invalid email or password" message, making debugging impossible.
+      console.error("[FXLab] Login failed:", err);
+
       const newAttempts = failedAttempts + 1;
       setFailedAttempts(newAttempts);
+
+      // Determine the appropriate user-facing error message based on the
+      // actual error type, rather than showing a generic message for all
+      // failure modes.
+      let message: string;
+      const isAxiosError =
+        err != null &&
+        typeof err === "object" &&
+        "response" in err &&
+        typeof (err as Record<string, unknown>).response === "object";
+
+      const status = isAxiosError
+        ? ((err as Record<string, unknown>).response as Record<string, unknown>)?.status
+        : undefined;
+
+      if (status === 401) {
+        const remaining = config.auth.maxLoginAttempts - newAttempts;
+        message = `Invalid email or password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`;
+      } else if (status === 429) {
+        message = "Too many login attempts. Please wait and try again.";
+      } else if (isAxiosError) {
+        message = `Login request failed (HTTP ${status}). Check the browser console for details.`;
+      } else {
+        // Non-HTTP error — could be JWT decode failure, session storage
+        // quota, network error, or a bug in post-login processing.
+        message = `Login error: ${err instanceof Error ? err.message : String(err)}. Check the browser console for details.`;
+      }
 
       if (newAttempts >= config.auth.maxLoginAttempts) {
         const lockoutMs = config.auth.lockoutDurationSeconds * 1000;
         setLockoutUntil(Date.now() + lockoutMs);
-        setError(
-          `Too many failed attempts. Please wait ${config.auth.lockoutDurationSeconds} seconds before trying again.`,
-        );
-      } else {
-        const remaining = config.auth.maxLoginAttempts - newAttempts;
-        setError(
-          `Invalid email or password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`,
-        );
+        message = `Too many failed attempts. Please wait ${config.auth.lockoutDurationSeconds} seconds before trying again.`;
       }
+
+      setError(message);
     }
   }
 
