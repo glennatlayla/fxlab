@@ -11,7 +11,15 @@
 #         primary IP is private (LAN-only install).
 #       - setup_env() preserves ENVIRONMENT=production when the server's
 #         primary IP is public.
-#       - FXLAB_ENVIRONMENT_OVERRIDE takes precedence over auto-detection.
+#       - setup_env() writes POSTGRES_SSLMODE=disable alongside
+#         ENVIRONMENT=development for LAN hosts (dev postgres container
+#         has no SSL, so 'prefer' triggers a silent plaintext fallback
+#         that the production libpq gate rejects).
+#       - setup_env() writes POSTGRES_SSLMODE=require alongside
+#         ENVIRONMENT=production for public hosts (fail-safe strict SSL
+#         posture for any routable deployment).
+#       - FXLAB_ENVIRONMENT_OVERRIDE takes precedence over auto-detection
+#         and drives POSTGRES_SSLMODE consistent with the chosen env.
 #
 # Why this matters:
 #     The C2 CORS validator rejects plaintext HTTP origins on private IPs
@@ -19,6 +27,13 @@
 #     http://<LAN_IP> — the combination is a guaranteed crash at startup.
 #     Setting ENVIRONMENT=development on LAN hosts sidesteps the policy
 #     without weakening the production security posture.
+#
+#     Additionally: the production _enforce_postgres_sslmode gate rejects
+#     sslmode in {disable, allow, prefer}. docker-compose.prod.yml's
+#     DATABASE_URL now resolves sslmode from ${POSTGRES_SSLMODE:-require};
+#     install.sh must write the correct value into .env so the container
+#     receives a consistent ENVIRONMENT/sslmode pair. (See 2026-04-16
+#     minitux failure #4 in docs/remediation/.)
 #
 # Why shell-native (no bats):
 #     Matches the existing pattern in tests/shell/test_install_pull_latest.sh.
@@ -298,6 +313,196 @@ test_setup_env_production_override_on_lan() {
 }
 
 # ---------------------------------------------------------------------------
+# POSTGRES_SSLMODE coupling tests (2026-04-16 failure #4 remediation)
+# ---------------------------------------------------------------------------
+#
+# docker-compose.prod.yml resolves sslmode from ${POSTGRES_SSLMODE:-require}.
+# install.sh must write the correct value into .env so the container's
+# DATABASE_URL carries a sslmode consistent with the ENVIRONMENT it runs in:
+#
+#   LAN / development           → POSTGRES_SSLMODE=disable
+#   public-IP / production      → POSTGRES_SSLMODE=require
+#   FXLAB_ENVIRONMENT_OVERRIDE  → mirrors the override decision
+#
+# Rationale for 'disable' in dev: postgres:15-alpine does not ship SSL
+# certs. 'prefer' silently falls back to plaintext on negotiation failure
+# (the exact libpq behaviour the production gate rejects); 'disable'
+# makes the plaintext intent explicit and avoids a pointless SSL probe
+# on every connection.
+
+test_setup_env_lan_ip_writes_sslmode_disable() {
+    local root
+    root="$(make_env_fixture)"
+    trap "cleanup_fixture '$root'" RETURN
+
+    export FXLAB_HOME="$root"
+    export LOG_FILE="${root}/install.log"
+    export FXLAB_HTTP_PORT=80
+    export FXLAB_HTTPS_PORT=443
+    unset FXLAB_ENVIRONMENT_OVERRIDE 2>/dev/null || true
+    source_install_sh
+
+    cp "${root}/.env.production.template" "${root}/.env"
+
+    hostname() { echo "192.168.1.5 "; }
+    export -f hostname
+
+    setup_env 2>/dev/null
+
+    local sslmode
+    sslmode="$(grep '^POSTGRES_SSLMODE=' "${root}/.env" | cut -d= -f2)"
+    assert_eq "disable" "$sslmode" \
+        "LAN IP install must write POSTGRES_SSLMODE=disable to .env" || return 1
+}
+
+test_setup_env_public_ip_writes_sslmode_require() {
+    local root
+    root="$(make_env_fixture)"
+    trap "cleanup_fixture '$root'" RETURN
+
+    export FXLAB_HOME="$root"
+    export LOG_FILE="${root}/install.log"
+    export FXLAB_HTTP_PORT=80
+    export FXLAB_HTTPS_PORT=443
+    unset FXLAB_ENVIRONMENT_OVERRIDE 2>/dev/null || true
+    source_install_sh
+
+    cp "${root}/.env.production.template" "${root}/.env"
+
+    hostname() { echo "20.42.0.50 "; }
+    export -f hostname
+
+    setup_env 2>/dev/null
+
+    local sslmode
+    sslmode="$(grep '^POSTGRES_SSLMODE=' "${root}/.env" | cut -d= -f2)"
+    assert_eq "require" "$sslmode" \
+        "Public IP install must write POSTGRES_SSLMODE=require to .env" || return 1
+}
+
+test_setup_env_production_override_writes_sslmode_require() {
+    # Operator explicitly chose production on a LAN host — sslmode must be
+    # strict to match, otherwise the production gate rejects the DSN.
+    local root
+    root="$(make_env_fixture)"
+    trap "cleanup_fixture '$root'" RETURN
+
+    export FXLAB_HOME="$root"
+    export LOG_FILE="${root}/install.log"
+    export FXLAB_HTTP_PORT=80
+    export FXLAB_HTTPS_PORT=443
+    export FXLAB_ENVIRONMENT_OVERRIDE="production"
+    source_install_sh
+
+    cp "${root}/.env.production.template" "${root}/.env"
+
+    hostname() { echo "192.168.1.5 "; }
+    export -f hostname
+
+    setup_env 2>/dev/null
+
+    local sslmode
+    sslmode="$(grep '^POSTGRES_SSLMODE=' "${root}/.env" | cut -d= -f2)"
+    assert_eq "require" "$sslmode" \
+        "FXLAB_ENVIRONMENT_OVERRIDE=production must yield POSTGRES_SSLMODE=require" || return 1
+}
+
+test_setup_env_development_override_on_public_ip_writes_sslmode_disable() {
+    # Operator explicitly chose development on a public-IP host (e.g.
+    # a staging box on Azure). Non-production skips the sslmode gate,
+    # so 'disable' is correct — it signals the operator's intent.
+    local root
+    root="$(make_env_fixture)"
+    trap "cleanup_fixture '$root'" RETURN
+
+    export FXLAB_HOME="$root"
+    export LOG_FILE="${root}/install.log"
+    export FXLAB_HTTP_PORT=80
+    export FXLAB_HTTPS_PORT=443
+    export FXLAB_ENVIRONMENT_OVERRIDE="development"
+    source_install_sh
+
+    cp "${root}/.env.production.template" "${root}/.env"
+
+    hostname() { echo "20.42.0.50 "; }
+    export -f hostname
+
+    setup_env 2>/dev/null
+
+    local sslmode
+    sslmode="$(grep '^POSTGRES_SSLMODE=' "${root}/.env" | cut -d= -f2)"
+    assert_eq "disable" "$sslmode" \
+        "FXLAB_ENVIRONMENT_OVERRIDE=development must yield POSTGRES_SSLMODE=disable" || return 1
+}
+
+test_setup_env_sslmode_matches_environment_invariant() {
+    # Structural invariant: every branch of setup_env must leave .env
+    # with an ENVIRONMENT / POSTGRES_SSLMODE pair that satisfies:
+    #
+    #   ENVIRONMENT=production       → POSTGRES_SSLMODE in {require,verify-ca,verify-full}
+    #   ENVIRONMENT!=production      → POSTGRES_SSLMODE in {disable,prefer,allow,require,verify-ca,verify-full}
+    #                                  (gate is advisory; any value works)
+    #
+    # This test exercises the four meaningful combinations and asserts
+    # the invariant holds in each.
+    local root
+    root="$(make_env_fixture)"
+    trap "cleanup_fixture '$root'" RETURN
+
+    export FXLAB_HOME="$root"
+    export LOG_FILE="${root}/install.log"
+    export FXLAB_HTTP_PORT=80
+    export FXLAB_HTTPS_PORT=443
+
+    local cases=(
+        "lan|development|disable|192.168.1.5|"
+        "public|production|require|20.42.0.50|"
+        "override_prod_lan|production|require|192.168.1.5|production"
+        "override_dev_public|development|disable|20.42.0.50|development"
+    )
+
+    local case_spec label want_env want_sslmode ip override
+    for case_spec in "${cases[@]}"; do
+        IFS='|' read -r label want_env want_sslmode ip override <<< "$case_spec"
+        if [[ -n "$override" ]]; then
+            export FXLAB_ENVIRONMENT_OVERRIDE="$override"
+        else
+            unset FXLAB_ENVIRONMENT_OVERRIDE 2>/dev/null || true
+        fi
+        # Fresh .env for each scenario so we see the write, not a leftover.
+        cp "${root}/.env.production.template" "${root}/.env"
+        source_install_sh
+        hostname() { echo "$ip "; }
+        export -f hostname
+
+        setup_env 2>/dev/null
+
+        local got_env got_ssl
+        got_env="$(grep '^ENVIRONMENT=' "${root}/.env" | cut -d= -f2)"
+        got_ssl="$(grep '^POSTGRES_SSLMODE=' "${root}/.env" | cut -d= -f2)"
+
+        if [[ "$got_env" != "$want_env" ]]; then
+            echo "    FAIL [$label]: ENVIRONMENT expected=$want_env actual=$got_env"
+            return 1
+        fi
+        if [[ "$got_ssl" != "$want_sslmode" ]]; then
+            echo "    FAIL [$label]: POSTGRES_SSLMODE expected=$want_sslmode actual=$got_ssl"
+            return 1
+        fi
+        # Production invariant check
+        if [[ "$got_env" == "production" ]]; then
+            case "$got_ssl" in
+                require|verify-ca|verify-full) ;;
+                *)
+                    echo "    FAIL [$label]: ENVIRONMENT=production but sslmode=$got_ssl is not strict"
+                    return 1
+                    ;;
+            esac
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Structural assertion: _is_private_ip exists in install.sh
 # ---------------------------------------------------------------------------
 
@@ -332,6 +537,11 @@ main() {
     run_test "setup_env: public IP → ENVIRONMENT=production"        test_setup_env_keeps_production_for_public_ip
     run_test "setup_env: FXLAB_ENVIRONMENT_OVERRIDE takes precedence" test_setup_env_override_takes_precedence
     run_test "setup_env: explicit production on LAN is honoured"     test_setup_env_production_override_on_lan
+    run_test "setup_env: LAN IP → POSTGRES_SSLMODE=disable"          test_setup_env_lan_ip_writes_sslmode_disable
+    run_test "setup_env: public IP → POSTGRES_SSLMODE=require"       test_setup_env_public_ip_writes_sslmode_require
+    run_test "setup_env: override=production → sslmode=require"      test_setup_env_production_override_writes_sslmode_require
+    run_test "setup_env: override=development → sslmode=disable"     test_setup_env_development_override_on_public_ip_writes_sslmode_disable
+    run_test "setup_env: ENVIRONMENT/sslmode pairing invariant"      test_setup_env_sslmode_matches_environment_invariant
     run_test "structural: _is_private_ip exists in install.sh"       test_is_private_ip_function_exists_in_install_sh
 
     echo

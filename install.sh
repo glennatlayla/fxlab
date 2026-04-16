@@ -777,6 +777,10 @@ setup_env() {
     local server_ip
     server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || server_ip="localhost"
 
+    # Resolved environment for this install run. Computed from the override
+    # or IP classification below, then used to derive POSTGRES_SSLMODE.
+    local resolved_env=""
+
     # Only auto-detect if the operator did NOT set ENVIRONMENT explicitly
     # in the shell environment before invoking the installer.
     if [[ -z "${FXLAB_ENVIRONMENT_OVERRIDE:-}" ]]; then
@@ -786,8 +790,10 @@ setup_env() {
                 log INFO "Detected private/LAN IP (${server_ip}) — set ENVIRONMENT=development."
                 log INFO "Override: FXLAB_ENVIRONMENT_OVERRIDE=production sudo -E bash install.sh"
             fi
+            resolved_env="development"
         else
             log INFO "Detected public IP (${server_ip}) — ENVIRONMENT=production."
+            resolved_env="production"
         fi
     else
         local override_env="${FXLAB_ENVIRONMENT_OVERRIDE}"
@@ -797,7 +803,51 @@ setup_env() {
             echo "ENVIRONMENT=${override_env}" >> "$env_file"
         fi
         log INFO "FXLAB_ENVIRONMENT_OVERRIDE=${override_env} — set ENVIRONMENT=${override_env}."
+        resolved_env="$override_env"
     fi
+
+    # -----------------------------------------------------------------------
+    # POSTGRES_SSLMODE — coupled to ENVIRONMENT (v2 remediation 2026-04-16).
+    # -----------------------------------------------------------------------
+    # docker-compose.prod.yml resolves the api service's DATABASE_URL
+    # sslmode from ${POSTGRES_SSLMODE:-require}. The default 'require' is
+    # the fail-safe strict posture — if .env is missing this variable the
+    # container refuses to boot without SSL. setup_env writes an explicit
+    # value into .env so the pairing with ENVIRONMENT is deterministic:
+    #
+    #   ENVIRONMENT=production    → POSTGRES_SSLMODE=require
+    #     (strict SSL required by _enforce_postgres_sslmode production gate)
+    #
+    #   ENVIRONMENT=<anything-else> → POSTGRES_SSLMODE=disable
+    #     (postgres:15-alpine ships no SSL certs; 'disable' is explicit
+    #     plaintext intent — 'prefer' would attempt an SSL handshake,
+    #     silently fall back to plaintext, and trigger the production
+    #     gate's rejection if the image were ever promoted to prod.)
+    #
+    # This guarantees that (a) the container's DATABASE_URL has a sslmode
+    # that _enforce_postgres_sslmode accepts for the resolved environment,
+    # and (b) a mismatched promotion (dev image with dev sslmode into a
+    # prod cluster) fails loudly at startup instead of silently
+    # transmitting credentials in plaintext.
+    #
+    # Sentinel rationale for FXLAB_ENVIRONMENT_OVERRIDE=production on a
+    # LAN host: the operator explicitly requested production. We must
+    # honour that and write require — if the postgres container in the
+    # compose stack has no SSL, the api container will fail at startup
+    # with a clear connection error rather than a silent plaintext DSN.
+    # -----------------------------------------------------------------------
+    local resolved_sslmode
+    if [[ "$resolved_env" == "production" ]]; then
+        resolved_sslmode="require"
+    else
+        resolved_sslmode="disable"
+    fi
+    if grep -q "^POSTGRES_SSLMODE=" "$env_file"; then
+        sed -i "s|^POSTGRES_SSLMODE=.*|POSTGRES_SSLMODE=${resolved_sslmode}|" "$env_file"
+    else
+        echo "POSTGRES_SSLMODE=${resolved_sslmode}" >> "$env_file"
+    fi
+    log INFO "Set POSTGRES_SSLMODE=${resolved_sslmode} (paired with ENVIRONMENT=${resolved_env})."
 
     # Re-source after environment adjustment so downstream setup_env logic
     # (CORS detection, secret generation) sees the updated value.
