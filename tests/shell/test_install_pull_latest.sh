@@ -373,6 +373,114 @@ test_corrupt_repo_detection() {
 }
 
 # ---------------------------------------------------------------------------
+# Fresh-mode-with-existing-repo tests (2026-04-15 v2 remediation)
+# ---------------------------------------------------------------------------
+#
+# Prior to the v2 fix, INSTALL_MODE=fresh with an existing .git directory
+# logged "Repository already cloned — skipping clone" and built from
+# whatever stale commit was on disk. That caused the 2026-04-15 minitux
+# install to deploy pre-fix code. These tests verify the fix: fresh mode
+# with an existing .git now calls pull_latest() to fetch the branch tip.
+
+test_fresh_mode_existing_repo_pulls_latest() {
+    # Simulate the fresh-mode path: .git exists, origin has a newer commit.
+    # The main() fresh-mode branch must call pull_latest() so HEAD advances
+    # to the origin tip — not stay at the stale local commit.
+    local root
+    root="$(make_fixture)"
+    trap "cleanup_fixture '$root'" RETURN
+
+    push_new_commit_to_origin "$root"
+    prime_env "$root"
+    export INSTALL_MODE="fresh"
+    source_install_sh
+
+    local before_sha
+    before_sha="$(git -C "${root}/work" rev-parse HEAD)"
+    local origin_sha
+    origin_sha="$(git -C "${root}/origin.git" rev-parse main)"
+
+    # Verify before state: local is behind origin.
+    [[ "$before_sha" != "$origin_sha" ]] || {
+        echo "    FAIL: precondition — before_sha should differ from origin_sha"
+        return 1
+    }
+
+    # Run pull_latest directly (the function that the fixed fresh-mode
+    # branch now calls when .git exists). We cannot easily call main()
+    # because it requires Docker, systemd, etc. — but the code path
+    # we're testing is:
+    #   if [[ -d "${FXLAB_HOME}/.git" ]]; then
+    #       pull_latest     # <-- THIS is the fix; was missing before v2
+    # So exercising pull_latest() from the fixture proves the function
+    # works; the structural integration (main calls it) is verified by
+    # reading the source.
+    local output rc
+    output="$(pull_latest 2>&1)"
+    rc=$?
+
+    local after_sha
+    after_sha="$(git -C "${root}/work" rev-parse HEAD)"
+
+    assert_eq 0 "$rc" "pull_latest should succeed" || return 1
+    assert_eq "$origin_sha" "$after_sha" "work HEAD must match origin after fresh-mode pull" || return 1
+    assert_contains "$output" "Updated:" "should log transition" || return 1
+}
+
+test_fresh_mode_existing_repo_at_latest_is_noop() {
+    # When .git exists and is already at origin tip, pull_latest()
+    # should succeed silently. This is the common re-install case where
+    # the operator re-runs install.sh without any upstream changes.
+    local root
+    root="$(make_fixture)"
+    trap "cleanup_fixture '$root'" RETURN
+
+    prime_env "$root"
+    export INSTALL_MODE="fresh"
+    source_install_sh
+
+    local before_sha
+    before_sha="$(git -C "${root}/work" rev-parse HEAD)"
+
+    local output rc
+    output="$(pull_latest 2>&1)"
+    rc=$?
+
+    local after_sha
+    after_sha="$(git -C "${root}/work" rev-parse HEAD)"
+
+    assert_eq 0 "$rc" "pull_latest should succeed when already current" || return 1
+    assert_eq "$before_sha" "$after_sha" "HEAD should not move" || return 1
+    assert_contains "$output" "Already at latest commit" "should log already-at-latest" || return 1
+}
+
+test_install_sh_source_fresh_branch_calls_pull_latest() {
+    # Structural assertion: read install.sh and confirm the fresh-mode
+    # branch with existing .git calls pull_latest. This is a defence-in-
+    # depth check — if someone reverts the fix, this test breaks.
+    #
+    # We extract the relevant section and check non-comment code lines
+    # only. The comment block legitimately references the old "skipping
+    # clone" behaviour for historical context — that's fine; what matters
+    # is the executable code calls pull_latest and does NOT log "skipping
+    # clone" as its user-visible message.
+
+    # Extract the fresh-mode block (code + comments).
+    local section
+    section="$(awk '/INSTALL_MODE.*fresh/,/elif.*INSTALL_MODE.*update/' "$INSTALL_SH")"
+
+    assert_contains "$section" "pull_latest" \
+        "fresh-mode .git-exists branch must call pull_latest (v2 remediation)" || return 1
+
+    # Check that no executable line (non-comment, non-blank) says "skipping clone".
+    # The comment may reference it for historical context — that's intentional.
+    local code_lines
+    code_lines="$(printf '%s\n' "$section" | grep -v '^\s*#' | grep -v '^\s*$')"
+    assert_not_contains "$code_lines" "skipping clone" \
+        "fresh-mode executable code must not log 'skipping clone' without pulling" || return 1
+}
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -393,6 +501,9 @@ main() {
     run_test "post-reset HEAD mismatch is fatal"                   test_post_reset_verification_catches_mismatch
     run_test "operator stash is preserved across pull"             test_operator_stash_is_preserved_across_pull
     run_test "corrupt repo is detected early"                      test_corrupt_repo_detection
+    run_test "fresh-mode + existing repo pulls latest"             test_fresh_mode_existing_repo_pulls_latest
+    run_test "fresh-mode + existing repo at latest is noop"        test_fresh_mode_existing_repo_at_latest_is_noop
+    run_test "source: fresh branch calls pull_latest (structural)" test_install_sh_source_fresh_branch_calls_pull_latest
 
     echo
     echo "---------------------------------"

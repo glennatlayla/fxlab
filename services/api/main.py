@@ -278,13 +278,20 @@ _PRODUCTION_SENTINEL = "/app/.production-build"
 # env var AND a written justification) so that bypasses are auditable.
 
 
-class CorsOriginPolicyError(RuntimeError):
+class CorsOriginPolicyError(ConfigError):
     """
     Raised when the configured CORS allowlist violates production policy.
 
-    Subclasses ``RuntimeError`` so it surfaces the same way as every
-    other startup-time configuration failure (caught by the lifespan
-    error wrapper, producing a deterministic ``sys.exit(3)``).
+    Subclasses ``ConfigError`` (not ``RuntimeError``) so the lifespan
+    error wrapper catches it alongside every other startup-time
+    configuration failure and produces a deterministic ``sys.exit(3)``
+    with a structured ``startup.aborted`` log event.
+
+    Prior to the 2026-04-15 v2 remediation this class subclassed
+    ``RuntimeError`` and was raised at module-import time. Both were
+    wrong: the import-time raise bypassed the lifespan handler
+    entirely, and the ``RuntimeError`` base class was not caught by
+    the lifespan's ConfigError handler even if it had reached there.
     """
 
 
@@ -789,6 +796,37 @@ async def lifespan(app: FastAPI):
             _check_pydantic_core()
         with _startup_phase("validate_startup_secrets"):
             _validate_startup_secrets()
+
+        # C2 enforcement (2026-04-15 v2 remediation): validate the CORS
+        # allowlist against the production policy. In production,
+        # plaintext-scheme and private-IP / loopback origins raise
+        # CorsOriginPolicyError (a ConfigError subclass) unless the
+        # audited escape hatch is engaged. In non-production, validation
+        # is a no-op so local dev against localhost / LAN keeps working.
+        #
+        # This MUST run inside lifespan (not at module scope) so that
+        # the outer ConfigError catch clause produces a deterministic
+        # exit(3) on policy violations, instead of an unhandled
+        # import-time crash that causes uvicorn to respawn-loop forever.
+        with _startup_phase("cors_origin_policy"):
+            _validate_cors_origins(
+                origins=_cors_origins,
+                environment=os.environ.get("ENVIRONMENT", ""),
+                allow_plaintext_lan=_cors_allow_plaintext_lan,
+                plaintext_justification=_cors_plaintext_justification,
+            )
+            if os.environ.get("ENVIRONMENT", "") == "production" and _cors_allow_plaintext_lan:
+                logger.warning(
+                    "cors.plaintext_lan_bypass_active",
+                    justification=_cors_plaintext_justification,
+                    origins=_cors_origins,
+                    component="startup",
+                    warning=(
+                        "CORS_ORIGINS_ALLOW_PLAINTEXT_LAN=true is active in "
+                        "production. Production CORS policy is bypassed. "
+                        "Audit justification recorded."
+                    ),
+                )
 
         # Verify Redis health in production if rate limiting is Redis-backed.
         # This ensures the application fails fast if critical infrastructure
@@ -1423,35 +1461,25 @@ _cors_origins_raw: str = os.environ.get(
 )
 _cors_origins: list[str] = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
 
-# -- C2 enforcement (2026-04-15 remediation) -------------------------------
-# Validate the CORS allowlist against the production policy before the
-# middleware is registered. In production, plaintext-scheme and
-# private-IP / loopback origins raise CorsOriginPolicyError unless the
-# audited escape hatch is engaged. In non-production, validation is a
-# no-op so local dev against localhost / LAN origins keeps working.
+# -- C2 enforcement (2026-04-15 v2 remediation) ----------------------------
+# CORS origin policy validation is performed inside the lifespan handler
+# (see the ``cors_origin_policy`` startup phase), NOT at module scope.
+#
+# Prior to v2, _validate_cors_origins() was called here at module-import
+# time. That was wrong for two reasons:
+#   1. An import-time raise bypasses the lifespan ConfigError handler,
+#      so uvicorn sees an unhandled exception and respawn-loops forever
+#      instead of emitting exit(3).
+#   2. The CorsOriginPolicyError class subclassed RuntimeError, not
+#      ConfigError, so even if the raise had been inside lifespan,
+#      the ``except ConfigError`` catch would not have caught it.
+#
+# The env-var reads and middleware registration below are safe at module
+# scope — they never raise. Only the policy enforcement call moved.
 _cors_allow_plaintext_lan: bool = (
     os.environ.get("CORS_ORIGINS_ALLOW_PLAINTEXT_LAN", "").lower() == "true"
 )
 _cors_plaintext_justification: str = os.environ.get("CORS_PLAINTEXT_JUSTIFICATION", "")
-_validate_cors_origins(
-    origins=_cors_origins,
-    environment=os.environ.get("ENVIRONMENT", ""),
-    allow_plaintext_lan=_cors_allow_plaintext_lan,
-    plaintext_justification=_cors_plaintext_justification,
-)
-if os.environ.get("ENVIRONMENT", "") == "production" and _cors_allow_plaintext_lan:
-    # Log the audit record every startup. This is the bypass's audit
-    # trail — visible in container logs and any log-aggregation sink.
-    logger.warning(
-        "cors.plaintext_lan_bypass_active",
-        justification=_cors_plaintext_justification,
-        origins=_cors_origins,
-        component="startup",
-        warning=(
-            "CORS_ORIGINS_ALLOW_PLAINTEXT_LAN=true is active in production. "
-            "Production CORS policy is bypassed. Audit justification recorded."
-        ),
-    )
 
 app.add_middleware(
     CORSMiddleware,

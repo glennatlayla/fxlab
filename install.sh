@@ -516,6 +516,37 @@ To resolve:
 # Environment & secrets
 # ---------------------------------------------------------------------------
 
+_is_private_ip() {
+    # Classify an IPv4 address as private (RFC 1918) or not.
+    #
+    # Returns 0 (true) if the address falls within:
+    #   10.0.0.0/8        — Class A private
+    #   172.16.0.0/12     — Class B private (172.16.0.0 – 172.31.255.255)
+    #   192.168.0.0/16    — Class C private
+    #   127.0.0.0/8       — Loopback
+    #   169.254.0.0/16    — Link-local (RFC 3927)
+    #
+    # Returns 1 (false) for any other address, including "localhost" or
+    # non-IP strings (which default to private=false so the caller falls
+    # through to the production path — fail-safe behaviour).
+    #
+    # Used by setup_env() to auto-detect LAN-only installs and set
+    # ENVIRONMENT=development. See v2 remediation Phase 3.
+    local ip="${1:-}"
+    if [[ "$ip" =~ ^10\. ]]; then
+        return 0
+    elif [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]]; then
+        return 0
+    elif [[ "$ip" =~ ^192\.168\. ]]; then
+        return 0
+    elif [[ "$ip" =~ ^127\. ]]; then
+        return 0
+    elif [[ "$ip" =~ ^169\.254\. ]]; then
+        return 0
+    fi
+    return 1
+}
+
 setup_env() {
     log STEP "Configuring environment..."
 
@@ -533,6 +564,63 @@ setup_env() {
     fi
 
     # Source current env to check values (tolerant of unset vars)
+    set +u
+    source "$env_file" 2>/dev/null || true
+    set -u
+
+    # -----------------------------------------------------------------------
+    # Environment designation — LAN vs public IP detection (v2 remediation).
+    # -----------------------------------------------------------------------
+    # The project's environment policy designates LAN hosts (minitux) as
+    # "development" and public-IP hosts (Azure cluster) as "production".
+    # If the operator has NOT explicitly set ENVIRONMENT before running the
+    # installer, auto-detect based on the server's primary IP address:
+    #
+    #   - RFC 1918 private (10/8, 172.16/12, 192.168/16) → development
+    #   - Any other routable IP → leave .env.production.template default
+    #
+    # An explicit ENVIRONMENT= in the operator's shell environment takes
+    # precedence — the detection only fires when the env var is unset or
+    # still at the template default "production" without the operator
+    # having explicitly chosen it.
+    #
+    # Why this matters: the C2 CORS validator rejects plaintext HTTP
+    # origins on private IPs in production. install.sh auto-detects CORS
+    # origins as http://<LAN_IP> — the combination is a guaranteed crash
+    # at startup. Setting ENVIRONMENT=development on LAN hosts sidesteps
+    # the policy (C2 skips validation in non-production) without weakening
+    # the production security posture.
+    #
+    # See: docs/remediation/2026-04-15-remediation-plan-v2.md, Phase 3.
+    # Tests: tests/shell/test_install_env_detection.sh
+    # -----------------------------------------------------------------------
+    local server_ip
+    server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || server_ip="localhost"
+
+    # Only auto-detect if the operator did NOT set ENVIRONMENT explicitly
+    # in the shell environment before invoking the installer.
+    if [[ -z "${FXLAB_ENVIRONMENT_OVERRIDE:-}" ]]; then
+        if _is_private_ip "$server_ip"; then
+            if grep -q "^ENVIRONMENT=production" "$env_file"; then
+                sed -i "s|^ENVIRONMENT=production|ENVIRONMENT=development|" "$env_file"
+                log INFO "Detected private/LAN IP (${server_ip}) — set ENVIRONMENT=development."
+                log INFO "Override: FXLAB_ENVIRONMENT_OVERRIDE=production sudo -E bash install.sh"
+            fi
+        else
+            log INFO "Detected public IP (${server_ip}) — ENVIRONMENT=production."
+        fi
+    else
+        local override_env="${FXLAB_ENVIRONMENT_OVERRIDE}"
+        if grep -q "^ENVIRONMENT=" "$env_file"; then
+            sed -i "s|^ENVIRONMENT=.*|ENVIRONMENT=${override_env}|" "$env_file"
+        else
+            echo "ENVIRONMENT=${override_env}" >> "$env_file"
+        fi
+        log INFO "FXLAB_ENVIRONMENT_OVERRIDE=${override_env} — set ENVIRONMENT=${override_env}."
+    fi
+
+    # Re-source after environment adjustment so downstream setup_env logic
+    # (CORS detection, secret generation) sees the updated value.
     set +u
     source "$env_file" 2>/dev/null || true
     set -u
@@ -1328,7 +1416,15 @@ main() {
         if [[ -d "${FXLAB_HOME}/.git" ]]; then
             # Repo was already cloned by the user (recommended install path).
             # Skip clone and GitHub access check — the code is already here.
-            log INFO "Repository already cloned at ${FXLAB_HOME} — skipping clone."
+            # IMPORTANT (2026-04-15 v2 remediation): always pull_latest()
+            # even in fresh mode when .git exists. A prior version logged
+            # "skipping clone" and built from whatever stale commit was on
+            # disk. That caused the 2026-04-15 minitux install to deploy
+            # pre-fix code, masking every compose/config remediation that
+            # had been committed upstream. pull_latest() fetches the branch
+            # tip and hard-resets to it, with full SHA verification.
+            log INFO "Repository already cloned at ${FXLAB_HOME} — pulling latest from ${FXLAB_BRANCH}."
+            pull_latest
         else
             check_github_access
             clone_repo

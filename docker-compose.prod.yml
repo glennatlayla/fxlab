@@ -157,6 +157,31 @@ services:
     # case-insensitive comparisons are NOT used, so C.UTF-8 has no
     # behavioural cost. See
     # tests/unit/test_postgres_locale_hygiene.py for the contract.
+    #
+    # KNOWN RESIDUAL (v2 remediation, cosmetic):
+    # The postgres:15-alpine entrypoint probes the `locale` binary to
+    # discover system locale settings. Alpine musl does NOT ship the
+    # `locale` binary, so the entrypoint emits:
+    #
+    #     sh: locale: not found
+    #     warning: no usable system locales were found
+    #
+    # This is DIFFERENT from the N3 warning ("en_US.UTF-8 is not
+    # installed") and is NOT a functional issue — initdb correctly uses
+    # LANG=C.UTF-8 from the environment regardless of the locale probe.
+    # The warning is cosmetic noise from the entrypoint script itself.
+    #
+    # We accept this noise rather than adding a custom Dockerfile or
+    # installing musl-locales, because:
+    #   1. The locale is correctly pinned via LANG and --locale=C.UTF-8.
+    #   2. A custom postgres Dockerfile adds build-time complexity for
+    #      zero functional gain.
+    #   3. The noise is stable (always the same two lines) and operators
+    #      can be trained to ignore it.
+    #
+    # If you want to silence it: `RUN apk add --no-cache musl-locales`
+    # in a custom postgres Dockerfile. See Phase 6 of
+    # docs/remediation/2026-04-15-remediation-plan-v2.md.
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-fxlab}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}

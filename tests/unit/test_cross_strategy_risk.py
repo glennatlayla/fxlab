@@ -59,8 +59,17 @@ def _make_performance(
     max_drawdown: float = 0.05,
 ) -> StrategyPerformanceInput:
     if returns is None:
-        # Generate synthetic daily returns
-        rng = np.random.default_rng(hash(strategy_id) % 2**32)
+        # Generate synthetic daily returns with a fixed seed per strategy.
+        # IMPORTANT: Do NOT use hash(strategy_id) here — Python 3.12+
+        # randomises hash() via PYTHONHASHSEED, which makes the generated
+        # returns non-deterministic across test runs. A fixed mapping
+        # guarantees reproducible data regardless of pytest-randomly seed
+        # or hash randomisation.  (Fix: 2026-04-15 v2 remediation.)
+        _STRATEGY_SEEDS: dict[str, int] = {"s1": 42, "s2": 99, "d1": 7, "d2": 13}
+        seed = _STRATEGY_SEEDS.get(
+            strategy_id, abs(int.from_bytes(strategy_id.encode()[:4], "big"))
+        )
+        rng = np.random.default_rng(seed)
         returns = (rng.normal(0.0005, 0.01, 60)).tolist()
     return StrategyPerformanceInput(
         strategy_id=strategy_id,

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import pytest
 
+from libs.contracts.errors import ConfigError
 from services.api.main import (
     CorsOriginPolicyError,
     _classify_cors_origin,
@@ -311,4 +312,122 @@ def test_empty_origin_list_is_allowed_in_production() -> None:
         environment="production",
         allow_plaintext_lan=False,
         plaintext_justification="",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Error hierarchy — v2 remediation structural guarantees.
+# ---------------------------------------------------------------------------
+
+
+def test_cors_policy_error_is_config_error_subclass() -> None:
+    """CorsOriginPolicyError must subclass ConfigError, not RuntimeError.
+
+    The lifespan handler's ``except ConfigError`` block (D1 exit(3)
+    pattern) must catch CORS policy violations. Prior to v2, this class
+    subclassed RuntimeError and escaped the handler, causing uvicorn to
+    respawn-loop on the unhandled exception instead of emitting a
+    deterministic exit(3).
+
+    See ``docs/remediation/2026-04-15-remediation-plan-v2.md``, Phase 2.
+    """
+    assert issubclass(CorsOriginPolicyError, ConfigError), (
+        "CorsOriginPolicyError must subclass ConfigError so the lifespan "
+        "exit(3) handler catches it. Got bases: "
+        f"{CorsOriginPolicyError.__bases__}"
+    )
+
+
+def test_cors_policy_error_not_runtime_error_subclass() -> None:
+    """CorsOriginPolicyError must NOT subclass RuntimeError.
+
+    Regression guard: if someone adds RuntimeError back as a base class
+    (e.g. via multiple inheritance), the exception would match bare
+    ``except RuntimeError`` catches in framework code and be silently
+    swallowed instead of reaching the ConfigError handler.
+    """
+    assert not issubclass(CorsOriginPolicyError, RuntimeError), (
+        "CorsOriginPolicyError must not subclass RuntimeError. "
+        f"Got bases: {CorsOriginPolicyError.__bases__}"
+    )
+
+
+def test_cors_validation_not_called_at_module_import_time() -> None:
+    """CORS validation must run in lifespan, not at module import.
+
+    The validator function exists at module scope (it's defined there),
+    but the _call_ to ``_validate_cors_origins()`` must happen inside
+    the lifespan handler. This test verifies the structural property
+    by reading the source and confirming no bare call to
+    ``_validate_cors_origins(`` exists between the function definition
+    and the ``async def lifespan`` / ``def lifespan`` marker.
+
+    See ``docs/remediation/2026-04-15-remediation-plan-v2.md``, Phase 2.
+    """
+    import inspect
+    import re
+
+    import services.api.main as main_module
+
+    source = inspect.getsource(main_module)
+
+    # Find where the function definition ends and where lifespan begins.
+    # We want to check that between these two markers, there's no
+    # bare call to _validate_cors_origins( that is NOT in a comment.
+    func_def_end = source.find("def _validate_cors_origins(")
+    lifespan_start = source.find("def lifespan(")
+
+    assert func_def_end != -1, "_validate_cors_origins definition not found"
+    assert lifespan_start != -1, "lifespan definition not found"
+
+    # Find the end of the _validate_cors_origins function body.
+    # Look for the next top-level def/class after func_def_end.
+    next_def = re.search(
+        r"^(?:def |class |async def )",
+        source[func_def_end + 1 :],
+        re.MULTILINE,
+    )
+    func_body_end = func_def_end + 1 + next_def.start() if next_def else func_def_end + 500
+
+    # The zone between function body end and lifespan definition is
+    # module-scope code. Check for bare calls to the validator.
+    module_scope_zone = source[func_body_end:lifespan_start]
+
+    # Strip comments from each line before checking for the call.
+    call_pattern = re.compile(r"^\s*_validate_cors_origins\(", re.MULTILINE)
+    code_lines = []
+    for line in module_scope_zone.split("\n"):
+        stripped = line.split("#")[0]  # remove inline comments
+        code_lines.append(stripped)
+    code_only = "\n".join(code_lines)
+
+    assert not call_pattern.search(code_only), (
+        "_validate_cors_origins() is called at module scope (between its "
+        "definition and lifespan). It must only be called inside lifespan "
+        "so the ConfigError handler can catch policy violations."
+    )
+
+
+def test_cors_validation_called_inside_lifespan() -> None:
+    """CORS validation must be called inside the lifespan function.
+
+    Complements ``test_cors_validation_not_called_at_module_import_time``
+    by confirming the call exists within the lifespan body.
+    """
+    import inspect
+
+    import services.api.main as main_module
+
+    source = inspect.getsource(main_module)
+
+    lifespan_start = source.find("def lifespan(")
+    assert lifespan_start != -1, "lifespan definition not found"
+
+    # Extract lifespan body (approximate — find the next top-level def).
+    lifespan_body = source[lifespan_start:]
+
+    assert "_validate_cors_origins(" in lifespan_body, (
+        "_validate_cors_origins() is not called inside lifespan. "
+        "The CORS policy must be enforced during startup so the "
+        "ConfigError → exit(3) handler can catch violations."
     )

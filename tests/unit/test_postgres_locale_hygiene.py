@@ -314,6 +314,39 @@ def test_postgres_image_is_pinned_to_specific_version(
 
 
 # ---------------------------------------------------------------------------
+# Residual documentation guard (v2 remediation Phase 6).
+# ---------------------------------------------------------------------------
+
+
+def test_postgres_locale_binary_residual_documented(
+    compose_prod_config: dict[str, Any],
+) -> None:
+    """The ``KNOWN RESIDUAL`` comment must be present in the compose file.
+
+    The postgres:15-alpine entrypoint probes the ``locale`` binary,
+    which musl Alpine does not ship. This emits ``sh: locale: not
+    found`` on every boot — cosmetic, but surprising to operators.
+
+    The N3 fix (LANG=C.UTF-8 + --locale=C.UTF-8) is correct for its
+    target symptom (``en_US.UTF-8 is not installed``). The residual
+    ``locale: not found`` message is a separate, documented non-issue.
+
+    This test verifies the documentation comment exists in the raw
+    compose file so a reviewer cannot silently remove it. If the comment
+    is no longer relevant (e.g. because we migrated to a Debian-based
+    image that ships ``locale``), remove this test deliberately.
+    """
+    root = Path(__file__).resolve().parents[2]
+    path = root / "docker-compose.prod.yml"
+    raw_text = path.read_text(encoding="utf-8")
+    assert "KNOWN RESIDUAL" in raw_text, (
+        "docker-compose.prod.yml must contain the 'KNOWN RESIDUAL' comment "
+        "documenting the cosmetic 'sh: locale: not found' warning from "
+        "postgres:15-alpine's entrypoint. See v2 remediation Phase 6."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Named regression guard — exact 2026-04-15 minitux symptom.
 # ---------------------------------------------------------------------------
 
