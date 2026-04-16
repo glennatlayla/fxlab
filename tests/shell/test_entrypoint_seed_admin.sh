@@ -100,6 +100,25 @@ else
 fi
 
 # ---------------------------------------------------------------
+# 8. install.sh print_summary extracts admin creds from container logs
+# ---------------------------------------------------------------
+INSTALL_SCRIPT="$REPO_ROOT/install.sh"
+if grep -q 'FXLAB INITIAL ADMIN CREDENTIALS' "$INSTALL_SCRIPT"; then
+    pass "install.sh print_summary extracts admin credentials from API logs"
+else
+    fail "install.sh print_summary does not extract admin credentials"
+fi
+
+# ---------------------------------------------------------------
+# 9. install.sh shows manual seed command when creds not found
+# ---------------------------------------------------------------
+if grep -q 'python -m services.api.cli.seed_admin' "$INSTALL_SCRIPT"; then
+    pass "install.sh provides manual seed_admin command in summary"
+else
+    fail "install.sh does not provide manual seed_admin fallback"
+fi
+
+# ---------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------
 echo ""

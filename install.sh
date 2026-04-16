@@ -1740,8 +1740,34 @@ print_summary() {
     echo "    cd ${FXLAB_HOME} && docker compose -f docker-compose.prod.yml logs -f"
     echo ""
     if [[ "$INSTALL_MODE" == "fresh" ]]; then
+        # Extract admin credentials from the API container logs.
+        # The seed_admin tool prints a bordered block containing the email
+        # and auto-generated password. We capture it here so the operator
+        # sees it in the install summary — not buried in container logs.
+        local admin_creds
+        admin_creds="$(
+            docker compose -f docker-compose.prod.yml logs api 2>/dev/null \
+                | grep -A6 'FXLAB INITIAL ADMIN CREDENTIALS' \
+                | grep -E '(Email|Password):' \
+                | sed 's/^.*Email:/    Email:/' \
+                | sed 's/^.*Password:/    Password:/'
+        )" || true
+
         echo -e "  ${BOLD}Credentials:${NC}"
-        echo "    See ${FXLAB_HOME}/.env for generated secrets."
+        if [[ -n "$admin_creds" ]]; then
+            echo -e "${GREEN}${BOLD}"
+            echo "$admin_creds"
+            echo -e "${NC}"
+            echo -e "  ${YELLOW}>>> Save these credentials now — they will NOT be shown again. <<<${NC}"
+            echo -e "  ${YELLOW}>>> Change the password immediately after first login.         <<<${NC}"
+        else
+            echo "    Admin user may already exist (seed was skipped)."
+            echo "    To create a new admin manually:"
+            echo "      cd ${FXLAB_HOME} && docker compose -f docker-compose.prod.yml exec api python -m services.api.cli.seed_admin"
+        fi
+        echo ""
+        echo -e "  ${BOLD}Infrastructure secrets:${NC}"
+        echo "    See ${FXLAB_HOME}/.env for database, JWT, and service secrets."
         echo ""
         echo -e "${YELLOW}  IMPORTANT: Back up your .env file — it contains production secrets.${NC}"
         echo ""
