@@ -58,6 +58,7 @@ test-shell:  ## Run shell test suites for install.sh and ship.sh
 	@bash tests/shell/test_install_pull_latest.sh
 	@bash tests/shell/test_install_diagnostics.sh
 	@bash tests/shell/test_install_env_detection.sh
+	@bash tests/shell/test_install_sudo_delegation.sh
 	@bash tests/shell/test_ship_commit_push.sh
 	@echo "All shell tests passed."
 

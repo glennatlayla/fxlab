@@ -272,11 +272,20 @@ test_missing_remote_branch_after_fetch_is_fatal() {
     source_install_sh
 
     # Function shadow takes precedence over $PATH for unqualified `git`.
+    # pull_latest uses `git -C <repo> rev-parse origin/main` (leading
+    # -C added during the 2026-04-16 SSH/sudo remediation), so we scan
+    # the whole argv for the subcommand rather than matching $1.
     git() {
-        # "rev-parse origin/main" → empty ref
-        if [[ "$1" == "rev-parse" && "$2" == "origin/main" ]]; then
-            return 1
-        fi
+        local args=("$@")
+        local i
+        for ((i = 0; i < ${#args[@]}; i++)); do
+            if [[ "${args[$i]}" == "rev-parse" ]]; then
+                local next=$((i + 1))
+                if [[ $next -lt ${#args[@]} ]] && [[ "${args[$next]}" == "origin/main" ]]; then
+                    return 1
+                fi
+            fi
+        done
         command git "$@"
     }
 
@@ -306,11 +315,20 @@ test_post_reset_verification_catches_mismatch() {
     prime_env "$root"
     source_install_sh
 
+    # pull_latest now invokes `git -C <repo> rev-parse HEAD` so we
+    # scan the whole argv for the subcommand rather than matching $1.
     git() {
-        if [[ "$1" == "rev-parse" && "$2" == "HEAD" ]]; then
-            echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-            return 0
-        fi
+        local args=("$@")
+        local i
+        for ((i = 0; i < ${#args[@]}; i++)); do
+            if [[ "${args[$i]}" == "rev-parse" ]]; then
+                local next=$((i + 1))
+                if [[ $next -lt ${#args[@]} ]] && [[ "${args[$next]}" == "HEAD" ]]; then
+                    echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                    return 0
+                fi
+            fi
+        done
         command git "$@"
     }
 

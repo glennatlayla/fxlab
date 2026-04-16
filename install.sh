@@ -359,9 +359,28 @@ check_github_access() {
 
     # Determine if SSH or HTTPS repo URL
     if [[ "$FXLAB_REPO" == git@* ]]; then
-        # SSH — verify ssh connectivity to github.com
-        if ! ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -T git@github.com 2>&1 | grep -qi "successfully authenticated"; then
-            fail "SSH authentication to GitHub failed. Ensure your SSH key is configured:\n  ssh-keygen -t ed25519\n  ssh-add ~/.ssh/id_ed25519\n  Add the public key to https://github.com/settings/keys\n\nOr switch to HTTPS:\n  FXLAB_REPO=https://github.com/glennatlayla/fxlab.git sudo bash install.sh"
+        # SSH — verify ssh connectivity to github.com.
+        #
+        # When invoked via sudo, delegate the SSH probe to the operator
+        # so their ~/.ssh keys are loaded. Running as root would fail
+        # even when the operator has valid keys, because /root/.ssh is
+        # empty — exactly the failure mode the 2026-04-16 remediation
+        # was introduced to fix.
+        local ssh_out
+        ssh_out="$(_as_operator ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -T git@github.com 2>&1 || true)"
+        if ! echo "$ssh_out" | grep -qi "successfully authenticated"; then
+            local who_hint=""
+            if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
+                who_hint="install.sh ran the SSH probe as ${SUDO_USER} (the operator who invoked sudo). "
+            fi
+            fail "SSH authentication to GitHub failed.
+${who_hint}Ensure the SSH key is configured for the operator account:
+  ssh-keygen -t ed25519
+  ssh-add ~/.ssh/id_ed25519
+  Add the public key to https://github.com/settings/keys
+
+Or switch to HTTPS:
+  FXLAB_REPO=https://github.com/glennatlayla/fxlab.git sudo -E bash install.sh"
         fi
         log INFO "GitHub SSH authentication verified."
     else
@@ -374,6 +393,126 @@ check_github_access() {
 }
 
 # ---------------------------------------------------------------------------
+# Privilege delegation helpers (2026-04-16 v2 remediation — SSH/sudo fix)
+# ---------------------------------------------------------------------------
+#
+# Why these exist:
+#
+#   fxlab-reinstall.sh clones the repository as the operator (who owns
+#   the GitHub SSH keys), then invokes `sudo bash install.sh`. Under
+#   sudo, the effective user is root — which has no SSH key in
+#   /root/.ssh. Every subsequent `git fetch` against an SSH remote
+#   failed with "Permission denied (publickey)" and aborted the
+#   install at pull_latest().
+#
+#   The prior installer worked around this by asking operators to
+#   copy their SSH keys to /root/.ssh manually. That is not
+#   production-grade: it leaks private keys to root and leaves a
+#   manual prerequisite that people forget.
+#
+#   The correct fix is to drop privileges to the invoking user for
+#   commands that depend on the user's SSH / git configuration.
+#
+# What these helpers do:
+#
+#   _operator_home
+#       Resolve $SUDO_USER's home directory (needed so SSH finds keys
+#       in ~/.ssh). Returns empty string when SUDO_USER is unset or
+#       the home directory cannot be resolved.
+#
+#   _as_operator <cmd> [args...]
+#       Run an arbitrary command as $SUDO_USER with HOME set to their
+#       home directory. Falls back to direct execution when not
+#       invoked via sudo, when $SUDO_USER is "root", or when the
+#       operator home cannot be resolved.
+#
+#   _ensure_operator_owned
+#       Idempotently chown $FXLAB_HOME to $SUDO_USER:$SUDO_USER's
+#       primary group. Needed because earlier runs of install.sh
+#       may have created root-owned .git objects; if we now run git
+#       as the operator, those would fail to write. Fast-path: skip
+#       the chown when the probe file already has the correct uid.
+#
+# Testability:
+#
+#   All three helpers respect $SUDO_USER as the delegation signal.
+#   Tests simulate sudo mode by exporting SUDO_USER and shadowing
+#   the `sudo` command with a shell function — which `command -v`
+#   also finds, so the helpers behave as if real sudo were present.
+# ---------------------------------------------------------------------------
+
+_operator_home() {
+    if [[ -z "${SUDO_USER:-}" ]]; then
+        return 0
+    fi
+    local home=""
+    if command -v getent >/dev/null 2>&1; then
+        home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+    fi
+    if [[ -z "$home" ]] && [[ -r /etc/passwd ]]; then
+        home="$(awk -F: -v u="$SUDO_USER" '$1==u{print $6}' /etc/passwd 2>/dev/null || true)"
+    fi
+    if [[ -n "$home" ]] && [[ -d "$home" ]]; then
+        printf '%s' "$home"
+    fi
+}
+
+_as_operator() {
+    # Delegate to $SUDO_USER when the installer is invoked via sudo,
+    # preserving HOME so SSH (and other tools that probe $HOME) find
+    # the operator's configuration. Fall through to direct execution
+    # in every other case.
+    if [[ -n "${SUDO_USER:-}" ]] \
+       && [[ "$SUDO_USER" != "root" ]] \
+       && command -v sudo >/dev/null 2>&1; then
+        local user_home
+        user_home="$(_operator_home)"
+        if [[ -n "$user_home" ]]; then
+            sudo -u "$SUDO_USER" -H env HOME="$user_home" "$@"
+            return $?
+        fi
+    fi
+    "$@"
+}
+
+_ensure_operator_owned() {
+    # Sync $FXLAB_HOME ownership to $SUDO_USER so the delegated git
+    # operations can read and write every file in the working tree.
+    # No-op when not running under sudo, when the tree does not yet
+    # exist, or when ownership is already correct.
+    if [[ -z "${SUDO_USER:-}" ]] || [[ "$SUDO_USER" == "root" ]]; then
+        return 0
+    fi
+    if [[ ! -d "$FXLAB_HOME" ]]; then
+        return 0
+    fi
+
+    local operator_uid
+    operator_uid="$(id -u "$SUDO_USER" 2>/dev/null || echo "")"
+    if [[ -z "$operator_uid" ]]; then
+        return 0
+    fi
+
+    # Fast-path probe: .git if present, else FXLAB_HOME itself.
+    local probe="$FXLAB_HOME"
+    if [[ -d "$FXLAB_HOME/.git" ]]; then
+        probe="$FXLAB_HOME/.git"
+    fi
+    local current_uid
+    current_uid="$(stat -c '%u' "$probe" 2>/dev/null || echo "")"
+    if [[ "$current_uid" == "$operator_uid" ]]; then
+        return 0
+    fi
+
+    local operator_group
+    operator_group="$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")"
+    log INFO "Syncing ${FXLAB_HOME} ownership to ${SUDO_USER}:${operator_group} (prior root-run artefacts detected)."
+    if ! chown -R "$SUDO_USER:$operator_group" "$FXLAB_HOME" 2>>"$LOG_FILE"; then
+        log WARN "Could not chown ${FXLAB_HOME} to ${SUDO_USER}. SSH-based git operations may fail."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Git operations
 # ---------------------------------------------------------------------------
 
@@ -382,8 +521,26 @@ clone_repo() {
 
     mkdir -p "$(dirname "$FXLAB_HOME")"
 
-    if ! git clone --branch "$FXLAB_BRANCH" --depth 1 "$FXLAB_REPO" "$FXLAB_HOME" 2>>"$LOG_FILE"; then
-        fail "git clone failed. Check access permissions and network connectivity."
+    # When invoked via sudo, clone as the operator so (a) their SSH
+    # keys authenticate with GitHub and (b) the resulting tree is
+    # operator-owned, keeping subsequent user-initiated git commands
+    # working. `sudo -u` requires the parent directory to be writable
+    # by the operator; when it is not (e.g. /opt owned by root), we
+    # pre-create FXLAB_HOME with the right ownership first.
+    if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
+        local operator_group
+        operator_group="$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")"
+        mkdir -p "$FXLAB_HOME"
+        chown "$SUDO_USER:$operator_group" "$FXLAB_HOME" 2>>"$LOG_FILE" || true
+        # Clone into the now-operator-owned directory. git clone into
+        # an existing empty dir is supported.
+        if ! _as_operator git clone --branch "$FXLAB_BRANCH" --depth 1 "$FXLAB_REPO" "$FXLAB_HOME" 2>>"$LOG_FILE"; then
+            fail "git clone failed. Check access permissions and network connectivity. Log: $LOG_FILE"
+        fi
+    else
+        if ! git clone --branch "$FXLAB_BRANCH" --depth 1 "$FXLAB_REPO" "$FXLAB_HOME" 2>>"$LOG_FILE"; then
+            fail "git clone failed. Check access permissions and network connectivity. Log: $LOG_FILE"
+        fi
     fi
 
     log INFO "Cloned ${FXLAB_REPO} (branch: ${FXLAB_BRANCH}) to ${FXLAB_HOME}"
@@ -406,12 +563,25 @@ pull_latest() {
     # stashed before the reset and restored afterwards. A failing stash
     # is fatal: quietly discarding operator changes is worse than a
     # visible halt.
+    #
+    # Privilege model (2026-04-16 v2 remediation — SSH/sudo fix):
+    #   - When run via sudo, ownership of ${FXLAB_HOME} is synchronised
+    #     to $SUDO_USER by _ensure_operator_owned() at function entry.
+    #   - Every git invocation uses _as_operator, which delegates to
+    #     $SUDO_USER when present so GitHub SSH keys (in the operator's
+    #     ~/.ssh, not /root/.ssh) are used to authenticate.
+    #   - When run as a plain user (no sudo), _as_operator passes
+    #     through and git runs as the current user. Same end result.
     log STEP "Pulling latest changes..."
+
+    # Repair ownership drift before touching git. Safe no-op when the
+    # tree is already operator-owned or when we're not running as sudo.
+    _ensure_operator_owned
 
     cd "$FXLAB_HOME"
 
     local current_sha
-    current_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+    current_sha="$(_as_operator git -C "$FXLAB_HOME" rev-parse HEAD 2>/dev/null || echo "")"
     if [[ -z "$current_sha" ]]; then
         fail "Cannot read current git HEAD in ${FXLAB_HOME}. Repository appears corrupt."
     fi
@@ -420,23 +590,26 @@ pull_latest() {
     # Stash any local changes (e.g. operator tweaks to docker-compose).
     # A failing stash is fatal so we never silently drop operator edits.
     local stash_needed=0
-    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    if ! _as_operator git -C "$FXLAB_HOME" diff --quiet 2>/dev/null \
+       || ! _as_operator git -C "$FXLAB_HOME" diff --cached --quiet 2>/dev/null; then
         log INFO "Stashing local changes..."
-        if ! git stash push -m "fxlab-install-$(date +%Y%m%d-%H%M%S)" 2>>"$LOG_FILE"; then
+        if ! _as_operator git -C "$FXLAB_HOME" stash push -m "fxlab-install-$(date +%Y%m%d-%H%M%S)" 2>>"$LOG_FILE"; then
             fail "git stash failed. Refusing to proceed with a dirty tree."
         fi
         stash_needed=1
     fi
 
-    # Fetch from origin.
+    # Fetch from origin. Delegated to $SUDO_USER so their SSH keys
+    # authenticate with GitHub — running as root (which has no keys)
+    # is the exact failure mode this remediation addresses.
     # Full fetch (no --depth 1) so the post-reset changelog log works
     # when the installer runs repeatedly on the same checkout.
-    if ! git fetch origin "$FXLAB_BRANCH" 2>>"$LOG_FILE"; then
+    if ! _as_operator git -C "$FXLAB_HOME" fetch origin "$FXLAB_BRANCH" 2>>"$LOG_FILE"; then
         if [[ "${FXLAB_ALLOW_STALE_CODE:-0}" == "1" ]]; then
             log WARN "git fetch failed; FXLAB_ALLOW_STALE_CODE=1 — proceeding with current checkout ${current_short}."
             log WARN "You are deploying code that MAY BE OUT OF DATE. This is intended for offline/air-gapped deploys only."
             if [[ "$stash_needed" -eq 1 ]]; then
-                if git stash pop 2>>"$LOG_FILE"; then
+                if _as_operator git -C "$FXLAB_HOME" stash pop 2>>"$LOG_FILE"; then
                     log INFO "Re-applied local changes from stash."
                 else
                     log WARN "Could not re-apply stashed changes. They are saved in: git stash list"
@@ -446,7 +619,13 @@ pull_latest() {
         fi
 
         local remote_url
-        remote_url="$(git config --get remote.origin.url 2>/dev/null || echo unknown)"
+        remote_url="$(_as_operator git -C "$FXLAB_HOME" config --get remote.origin.url 2>/dev/null || echo unknown)"
+        local sudo_hint=""
+        if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
+            sudo_hint="Running under sudo as $(id -un) (invoked by ${SUDO_USER}). "
+            sudo_hint+="install.sh delegates git to ${SUDO_USER}; verify their SSH key is configured:"$'\n'
+            sudo_hint+="       sudo -u ${SUDO_USER} -H ssh -T git@github.com"
+        fi
         fail "git fetch origin ${FXLAB_BRANCH} FAILED.
 
 This is fatal. A prior version of this installer silently fell back to
@@ -458,13 +637,14 @@ Branch       : ${FXLAB_BRANCH}
 Remote       : ${remote_url}
 Log          : ${LOG_FILE}
 
+${sudo_hint}
+
 To resolve:
-  1. Ensure the invoking user (root when using sudo) can reach GitHub:
-       - For SSH, copy the operator's keys to root:
-           sudo cp -r /home/\$SUDO_USER/.ssh /root/
-           sudo chown -R root:root /root/.ssh
-       - Or rerun fetch as the SSH-authorised user first:
-           sudo -u \$SUDO_USER git -C ${FXLAB_HOME} fetch --all
+  1. Ensure the operator can authenticate to GitHub via SSH:
+       ssh -T git@github.com        # as the operator, not root
+     If the key is missing, generate and register it:
+       ssh-keygen -t ed25519
+       cat ~/.ssh/id_ed25519.pub     # paste into https://github.com/settings/keys
   2. Or switch to HTTPS for the repo URL:
        FXLAB_REPO=https://github.com/glennatlayla/fxlab.git sudo -E bash install.sh
   3. Or, to INTENTIONALLY deploy the current (possibly stale) checkout
@@ -475,13 +655,13 @@ To resolve:
     # Verify origin/BRANCH exists after the fetch — catches the case
     # where upstream deleted or renamed the branch.
     local remote_sha
-    remote_sha="$(git rev-parse "origin/${FXLAB_BRANCH}" 2>/dev/null || echo "")"
+    remote_sha="$(_as_operator git -C "$FXLAB_HOME" rev-parse "origin/${FXLAB_BRANCH}" 2>/dev/null || echo "")"
     if [[ -z "$remote_sha" ]]; then
         fail "git fetch succeeded but origin/${FXLAB_BRANCH} does not exist. Was the branch deleted upstream?"
     fi
     local remote_short="${remote_sha:0:12}"
 
-    if ! git reset --hard "origin/${FXLAB_BRANCH}" 2>>"$LOG_FILE"; then
+    if ! _as_operator git -C "$FXLAB_HOME" reset --hard "origin/${FXLAB_BRANCH}" 2>>"$LOG_FILE"; then
         fail "git reset --hard origin/${FXLAB_BRANCH} failed. The repository may be in a broken state."
     fi
 
@@ -489,7 +669,7 @@ To resolve:
     # fetched SHA. If this ever fails we want a visible halt rather
     # than a silent divergence.
     local new_sha
-    new_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+    new_sha="$(_as_operator git -C "$FXLAB_HOME" rev-parse HEAD 2>/dev/null || echo "")"
     if [[ "$new_sha" != "$remote_sha" ]]; then
         fail "Post-reset verification failed: HEAD=${new_sha:0:12} but origin/${FXLAB_BRANCH}=${remote_short}."
     fi
@@ -499,12 +679,12 @@ To resolve:
     else
         log INFO "Updated: ${current_short} → ${remote_short}"
         # Record the changelog between old and new HEAD in the install log.
-        git log --oneline "${current_sha}..${remote_sha}" 2>/dev/null | head -20 >> "$LOG_FILE" || true
+        _as_operator git -C "$FXLAB_HOME" log --oneline "${current_sha}..${remote_sha}" 2>/dev/null | head -20 >> "$LOG_FILE" || true
     fi
 
     # Re-apply stashed changes if any
     if [[ "$stash_needed" -eq 1 ]]; then
-        if git stash pop 2>>"$LOG_FILE"; then
+        if _as_operator git -C "$FXLAB_HOME" stash pop 2>>"$LOG_FILE"; then
             log INFO "Re-applied local changes from stash."
         else
             log WARN "Could not re-apply stashed changes. They are saved in: git stash list"
