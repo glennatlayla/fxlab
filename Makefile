@@ -66,6 +66,7 @@ test-shell:  ## Run shell test suites for install.sh and ship.sh
 	@bash tests/shell/test_install_sudo_delegation.sh
 	@bash tests/shell/test_compose_env_substitution.sh
 	@bash tests/shell/test_install_smoke_preflight.sh
+	@bash tests/shell/test_install_mode_selection.sh
 	@bash tests/shell/test_ship_commit_push.sh
 	@echo "All shell tests passed."
 

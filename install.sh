@@ -131,13 +131,122 @@ fail() {
 # ---------------------------------------------------------------------------
 
 detect_mode() {
-    # A fresh clone has .git but no .env (install.sh creates .env on first run).
-    # "update" means install.sh has run before — .env exists and services were deployed.
-    if [[ -f "${FXLAB_HOME}/.env" ]]; then
+    # Determine install mode by examining three sources of truth:
+    #
+    #   1. CLI flags (--fresh / --refresh) — if set, override everything.
+    #   2. Docker state — existing FXLab containers or named volumes.
+    #   3. .env existence — indicates a prior completed install.
+    #
+    # The 2026-04-16 minitux reinstall failure exposed a critical gap:
+    # the user had deleted /opt/fxlab (so no .env existed, making this
+    # "fresh") but old Docker containers were still running and holding
+    # port 80. detect_mode classified it as "fresh", check_ports() ran
+    # before any teardown, and the install died with "port 80 in use"
+    # instead of tearing down the old stack first.
+    #
+    # Now: when existing Docker artifacts are detected, the user is
+    # prompted to choose "fresh" (full teardown) or "refresh" (preserve
+    # data, rebuild). Non-interactive invocations must pass --fresh or
+    # --refresh explicitly.
+
+    # --- Priority 1: CLI flag overrides ---
+    if [[ "$INSTALL_MODE_FLAG" == "fresh" ]]; then
+        INSTALL_MODE="fresh"
+        log INFO "Install mode forced by --fresh flag."
+        return
+    fi
+    if [[ "$INSTALL_MODE_FLAG" == "refresh" ]]; then
+        INSTALL_MODE="update"
+        log INFO "Install mode forced by --refresh flag."
+        return
+    fi
+
+    # --- Priority 2: detect existing Docker artifacts ---
+    local has_env=false
+    local has_docker=false
+
+    [[ -f "${FXLAB_HOME}/.env" ]] && has_env=true
+
+    # Check for FXLab containers (via compose if the file exists,
+    # otherwise via direct docker ps filter) and named volumes.
+    if [[ -f "${FXLAB_HOME}/docker-compose.prod.yml" ]] && \
+       docker compose -f "${FXLAB_HOME}/docker-compose.prod.yml" ps -q 2>/dev/null | grep -q .; then
+        has_docker=true
+    fi
+    if [[ "$has_docker" == "false" ]]; then
+        # Compose file may be gone (deleted /opt/fxlab) — check volumes.
+        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^fxlab-'; then
+            has_docker=true
+        fi
+    fi
+
+    # --- Decision matrix ---
+    if [[ "$has_docker" == "true" ]]; then
+        # Existing Docker artifacts found — always prompt (or require flag).
+        _prompt_install_mode "$has_env"
+    elif [[ "$has_env" == "true" ]]; then
+        # .env exists but no Docker artifacts — treat as refresh.
         INSTALL_MODE="update"
     else
+        # Nothing exists at all — truly fresh install.
         INSTALL_MODE="fresh"
     fi
+}
+
+_prompt_install_mode() {
+    # Present the user with a choice between fresh install (full
+    # teardown) and refresh (code update + restart). Called only when
+    # existing FXLab Docker artifacts are detected.
+    #
+    # Args:
+    #   $1 — "true" if .env exists (shown in prompt for context).
+    #
+    # Non-interactive safety:
+    #   If stdin is not a terminal, the script cannot prompt. The user
+    #   must pass --fresh or --refresh on the command line. This prevents
+    #   install.sh from hanging in a CI pipeline or when invoked via
+    #   `echo "y" | sudo bash install.sh`.
+    local has_env="$1"
+
+    if [[ ! -t 0 ]]; then
+        fail "Existing FXLab Docker artifacts detected, but stdin is not a terminal.
+    Cannot prompt interactively. Re-run with --fresh or --refresh:
+
+      sudo bash install.sh --fresh     # Tear down everything, start clean
+      sudo bash install.sh --refresh   # Pull latest code, rebuild, restart"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Existing FXLab installation detected.${NC}"
+    if [[ "$has_env" == "true" ]]; then
+        echo "  (.env and Docker containers/volumes found)"
+    else
+        echo "  (Docker containers/volumes found, but .env is missing)"
+    fi
+    echo ""
+    echo "  1) Fresh install — stop all services, remove containers/images/volumes,"
+    echo "     and start completely clean. Database data will be DELETED."
+    echo ""
+    echo "  2) Refresh — pull latest code, rebuild images, and restart services."
+    echo "     Preserves database, .env configuration, and service data."
+    echo ""
+
+    local choice
+    read -rp "  Select [1/2]: " choice
+
+    case "$choice" in
+        1)
+            INSTALL_MODE="fresh"
+            log INFO "User selected: fresh install (full teardown)."
+            ;;
+        2)
+            INSTALL_MODE="update"
+            log INFO "User selected: refresh (code update + restart)."
+            ;;
+        *)
+            fail "Invalid selection '$choice'. Run install.sh again and choose 1 or 2, or pass --fresh / --refresh."
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -986,6 +1095,80 @@ tune_host_kernel() {
 }
 
 # ---------------------------------------------------------------------------
+# Teardown existing installation (fresh install only)
+# ---------------------------------------------------------------------------
+#
+# Called BEFORE check_ports() in a fresh install when existing Docker
+# artifacts (containers, volumes) are detected. This is the fix for the
+# 2026-04-16 minitux reinstall failure: the old docker-proxy was holding
+# port 80, check_ports() ran first and killed the script, and the
+# stale-state cleanup in build_and_start() never got a chance to run.
+#
+# Teardown sequence:
+#   1. Stop containers + remove volumes via `docker compose down --volumes`
+#      if the compose file is available. This is the most reliable path
+#      because it targets only the FXLab project's resources.
+#   2. If no compose file (user deleted /opt/fxlab before cloning), fall
+#      back to direct docker commands: stop/remove containers by label/name,
+#      remove named volumes by prefix.
+#   3. Remove locally-built FXLab images (--rmi local) so the fresh build
+#      starts from a clean layer cache. Third-party base images (postgres,
+#      redis, nginx) are kept to avoid unnecessary re-downloads.
+#   4. Remove .env if it exists, so setup_env() generates fresh secrets.
+#      (A stale .env with the old POSTGRES_PASSWORD against a wiped volume
+#      produces the same auth-failure root cause we fixed in build_and_start.)
+#
+# This function is a safe no-op if no artifacts exist.
+
+teardown_existing() {
+    log STEP "Tearing down existing FXLab installation..."
+
+    # --- Compose-managed teardown (preferred path) ---
+    if [[ -f "${FXLAB_HOME}/docker-compose.prod.yml" ]]; then
+        log INFO "Stopping containers, removing volumes and locally-built images..."
+        docker compose -f "${FXLAB_HOME}/docker-compose.prod.yml" down \
+            --volumes --remove-orphans --rmi local --timeout 30 \
+            2>>"$LOG_FILE" || true
+    else
+        # --- Fallback: direct docker commands (compose file is gone) ---
+        log INFO "No compose file found — using direct docker commands for teardown."
+
+        # Stop and remove containers whose names start with the fxlab project prefix.
+        # docker compose names them as <project>-<service>-<index>.
+        local fxlab_containers
+        fxlab_containers="$(docker ps -aq --filter 'name=fxlab' 2>/dev/null || true)"
+        if [[ -n "$fxlab_containers" ]]; then
+            log INFO "Removing FXLab containers..."
+            echo "$fxlab_containers" | xargs docker rm -f 2>>"$LOG_FILE" || true
+        fi
+
+        # Remove named volumes with the fxlab- prefix.
+        local fxlab_volumes
+        fxlab_volumes="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep '^fxlab-' || true)"
+        if [[ -n "$fxlab_volumes" ]]; then
+            log INFO "Removing FXLab volumes..."
+            echo "$fxlab_volumes" | xargs docker volume rm -f 2>>"$LOG_FILE" || true
+        fi
+    fi
+
+    # --- Remove dangling FXLab images not caught by compose down ---
+    local fxlab_images
+    fxlab_images="$(docker images --filter 'reference=*fxlab*' -q 2>/dev/null || true)"
+    if [[ -n "$fxlab_images" ]]; then
+        log INFO "Removing FXLab Docker images..."
+        echo "$fxlab_images" | xargs docker rmi -f 2>>"$LOG_FILE" || true
+    fi
+
+    # --- Remove .env so setup_env() generates fresh secrets ---
+    if [[ -f "${FXLAB_HOME}/.env" ]]; then
+        log INFO "Removing old .env (fresh secrets will be generated)."
+        rm -f "${FXLAB_HOME}/.env"
+    fi
+
+    log INFO "Teardown complete — ports and volumes are free."
+}
+
+# ---------------------------------------------------------------------------
 # Build & deploy
 # ---------------------------------------------------------------------------
 
@@ -1570,13 +1753,25 @@ print_summary() {
 # ---------------------------------------------------------------------------
 
 _parse_install_args() {
-    # Minimal CLI parser. Only `--all-logs` / `-h|--help` are supported
-    # today — additions should extend the case block below and document
-    # the new flag in the --help output. Unknown args fail loudly
-    # rather than being silently ignored (the most common installer
-    # mistake is a misspelled flag that looks like it worked).
+    # CLI parser. Unknown args fail loudly rather than being silently
+    # ignored (the most common installer mistake is a misspelled flag
+    # that looks like it worked).
+    #
+    # INSTALL_MODE_FLAG — if set by --fresh or --refresh, it overrides
+    # the interactive prompt in detect_mode(). Required for
+    # non-interactive (piped/scripted) invocations.
+    INSTALL_MODE_FLAG=""
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --fresh)
+                INSTALL_MODE_FLAG="fresh"
+                shift
+                ;;
+            --refresh)
+                INSTALL_MODE_FLAG="refresh"
+                shift
+                ;;
             --all-logs)
                 INSTALL_ALL_LOGS=1
                 shift
@@ -1586,15 +1781,27 @@ _parse_install_args() {
 FXLab Platform Installer
 
 Usage:
-  sudo bash install.sh [--all-logs]
+  sudo bash install.sh [--fresh | --refresh] [--all-logs]
 
 Options:
+  --fresh       Force a fresh install: tear down all existing FXLab
+                containers, volumes, and images before rebuilding.
+                Use when you want a completely clean start.
+  --refresh     Force a refresh: pull latest code, rebuild images,
+                restart services. Preserves database data, .env
+                configuration, and service state. Equivalent to an
+                in-place code update.
   --all-logs    On diagnostic failure, dump every failing service's
                 full log to stdout instead of writing them to
                 per-service files under \$FXLAB_LOG_DIR
                 (default: ${FXLAB_LOG_DIR}).
                 Equivalent to setting INSTALL_ALL_LOGS=1.
   -h, --help    Show this help and exit.
+
+If neither --fresh nor --refresh is specified and an existing FXLab
+installation is detected, install.sh will prompt interactively.
+Non-interactive invocations (piped stdin) MUST pass one of the two
+flags, or the script will fail with a clear error.
 
 Environment variables (see top of install.sh for the full list):
   FXLAB_HOME, FXLAB_REPO, FXLAB_BRANCH, FXLAB_LOG_DIR,
@@ -1628,17 +1835,32 @@ main() {
         $PKG_UPDATE 2>>"$LOG_FILE" || true
     fi
 
-    detect_mode
-
-    if [[ "$INSTALL_MODE" == "update" ]]; then
-        log INFO "Update mode — existing installation detected at ${FXLAB_HOME}"
-    else
-        log INFO "Fresh install mode — no existing installation at ${FXLAB_HOME}"
-    fi
-
+    # Pre-flight: OS, Git, Docker must be working BEFORE detect_mode(),
+    # which probes Docker state to find existing containers/volumes.
     check_os
     check_git
     check_docker
+
+    # detect_mode() examines .env, Docker containers, and Docker volumes
+    # to determine the install mode. If existing artifacts are found it
+    # prompts the user (or reads --fresh / --refresh from the CLI).
+    detect_mode
+
+    if [[ "$INSTALL_MODE" == "update" ]]; then
+        log INFO "Refresh mode — existing installation detected at ${FXLAB_HOME}"
+    else
+        log INFO "Fresh install mode — tearing down any existing artifacts."
+    fi
+
+    # Fresh install: tear down existing containers, volumes, and images
+    # BEFORE the port check. This is the critical ordering fix for the
+    # 2026-04-16 minitux reinstall failure — old docker-proxy was holding
+    # port 80, and check_ports() killed the script before build_and_start()'s
+    # stale-state cleanup ever got a chance to run.
+    if [[ "$INSTALL_MODE" == "fresh" ]]; then
+        teardown_existing
+    fi
+
     check_resources
     check_ports
 
