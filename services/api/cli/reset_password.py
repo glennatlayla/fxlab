@@ -180,12 +180,25 @@ def reset_user_password(
             "cause: column truncation or encoding issue. Rolling back."
         )
 
+    # End-to-end verification: exercise the full login flow (user lookup →
+    # active check → bcrypt verify → JWT generation) to guarantee the
+    # credentials we're about to print will actually work at /auth/token.
+    from services.api.cli.verify_login import verify_login
+
+    login_check = verify_login(session, email, plaintext_password)
+    if not login_check.passed:
+        raise RuntimeError(
+            f"CRITICAL: end-to-end login verification failed at stage "
+            f"'{login_check.stage}': {login_check.detail}. "
+            f"The password was updated but login would fail. Rolling back."
+        )
+
     logger.info(
         "reset_password.success",
         email=email,
         user_id=user.id,
         component="reset_password",
-        verification="passed",
+        verification="e2e_passed",
     )
 
     return ResetResult(
