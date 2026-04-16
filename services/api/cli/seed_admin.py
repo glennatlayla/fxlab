@@ -136,6 +136,19 @@ def seed_admin_user(
     # Generate a ULID primary key — same pattern as all other FXLab entities.
     user_id = str(_ulid_mod.ULID())
 
+    # Verify the plaintext password round-trips through bcrypt BEFORE
+    # persisting anything. If this check fails, bcrypt or encoding is
+    # broken and we must not tell the operator a password that won't work.
+    if not bcrypt.checkpw(plaintext_password.encode("utf-8"), hashed.encode("utf-8")):
+        raise RuntimeError(
+            "CRITICAL: bcrypt verification failed — generated hash does not "
+            "match the plaintext password. This indicates a bcrypt or encoding "
+            "bug. No user was created."
+        )
+
+    # Generate a ULID primary key — same pattern as all other FXLab entities.
+    user_id = str(_ulid_mod.ULID())
+
     user = User(
         id=user_id,
         email=email,
@@ -146,12 +159,25 @@ def seed_admin_user(
     session.add(user)
     session.flush()  # Flush within caller's transaction; let caller commit.
 
+    # Post-insert verification: re-read the row from the session and verify
+    # the stored hash still matches. Guards against truncation (VARCHAR(255)
+    # vs actual hash length) or any ORM transformation mangling the value.
+    session.refresh(user)
+    stored_hash = user.hashed_password
+    if not bcrypt.checkpw(plaintext_password.encode("utf-8"), stored_hash.encode("utf-8")):
+        raise RuntimeError(
+            "CRITICAL: post-insert verification failed — the hash stored in "
+            "the database does not match the plaintext password. Possible "
+            "cause: column truncation or encoding issue. Rolling back."
+        )
+
     logger.info(
         "seed_admin.created",
         email=email,
         user_id=user_id,
         role="admin",
         component="seed_admin",
+        verification="passed",
     )
 
     return SeedResult(email=email, plaintext_password=plaintext_password, created=True)

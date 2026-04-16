@@ -186,6 +186,22 @@ class TestSeedAdminUser:
         assert len(result.plaintext_password) > 0
         assert result.created is True
 
+    def test_post_insert_verification_passes(self, db_session: Session) -> None:
+        """Verification step confirms the stored hash matches the plaintext."""
+        from services.api.cli.seed_admin import seed_admin_user
+
+        # If verification fails, seed_admin_user raises RuntimeError.
+        # A successful return means both pre-write and post-write checks passed.
+        result = seed_admin_user(db_session)
+        db_session.commit()
+
+        # Double-check: re-read from DB and verify independently
+        user = db_session.query(User).filter(User.email == result.email).first()
+        assert bcrypt.checkpw(
+            result.plaintext_password.encode("utf-8"),
+            user.hashed_password.encode("utf-8"),
+        ), "Post-insert verification: stored hash must match plaintext password"
+
     def test_idempotent_repeated_calls(self, db_session: Session) -> None:
         """Calling seed_admin_user twice only creates one user."""
         from services.api.cli.seed_admin import seed_admin_user
