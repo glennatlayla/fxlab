@@ -197,6 +197,58 @@ test_compose_check_runs_substitution_test() {
 }
 
 # ---------------------------------------------------------------------------
+# Python resolver in the substitution test (PyYAML portability)
+# ---------------------------------------------------------------------------
+
+SUBST_TEST="$(cd "$(dirname "$0")" && pwd)/test_compose_env_substitution.sh"
+
+test_subst_prefers_project_venv_python() {
+    # On a macOS dev box the system python3 typically does not have PyYAML
+    # (PEP 668 blocks pip install). The project .venv is the canonical
+    # interpreter. The test script must prefer .venv/bin/python.
+    if ! grep -qE '\.venv/bin/python' "$SUBST_TEST"; then
+        echo "    FAIL: test_compose_env_substitution.sh does not prefer .venv/bin/python"
+        return 1
+    fi
+}
+
+test_subst_has_python_fallback() {
+    # If .venv/bin/python is absent or missing PyYAML, the script must
+    # fall back to `python3` on $PATH (and only fail if it, too, lacks
+    # PyYAML).
+    if ! grep -qE 'command -v python3|which python3' "$SUBST_TEST"; then
+        echo "    FAIL: test_compose_env_substitution.sh lacks a system python3 fallback"
+        return 1
+    fi
+}
+
+test_subst_fails_with_actionable_guidance() {
+    # When NO python with PyYAML is found, the error message must name
+    # the exact command to fix it — not leave the operator to guess.
+    if ! grep -qE 'pip install.*requirements-dev\.txt|PyYAML>=' "$SUBST_TEST"; then
+        echo "    FAIL: test_compose_env_substitution.sh error path omits actionable install instructions"
+        return 1
+    fi
+}
+
+test_install_dev_installs_requirements_dev() {
+    # install-dev must pull in requirements-dev.txt so PyYAML lands in
+    # .venv. Previously only requirements.txt was installed, which left
+    # PyYAML (and compose-check) broken on a fresh clone.
+    local recipe_line
+    recipe_line="$(awk '
+        /^install-dev:/ { capturing = 1; next }
+        capturing && /^[a-zA-Z_-]+:/ { capturing = 0 }
+        capturing { print }
+    ' "$MAKEFILE")"
+
+    if ! echo "$recipe_line" | grep -qE 'requirements-dev\.txt'; then
+        echo "    FAIL: install-dev target does not install requirements-dev.txt"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -216,6 +268,10 @@ main() {
     run_test "health loop: zero-services branch fails explicitly"   test_install_smoke_total_zero_is_not_healthy
     run_test "compose-check: Make target exists"                    test_compose_check_target_exists
     run_test "compose-check: runs the substitution test suite"      test_compose_check_runs_substitution_test
+    run_test "subst test: prefers .venv/bin/python"                 test_subst_prefers_project_venv_python
+    run_test "subst test: falls back to system python3"             test_subst_has_python_fallback
+    run_test "subst test: error path points at requirements-dev"    test_subst_fails_with_actionable_guidance
+    run_test "install-dev: installs requirements-dev.txt"           test_install_dev_installs_requirements_dev
 
     echo
     echo "--------------------------------------------------"

@@ -19,7 +19,12 @@ help:  ## Show this help message
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 install-dev:  ## Install all dependencies (prod + dev)
-	$(PIP) install -r requirements.txt
+	@# requirements-dev.txt has `-r requirements.txt` at the top, so
+	@# installing it pulls in both sets in one invocation. Previously
+	@# this target only installed requirements.txt, which meant PyYAML
+	@# (needed by compose-check and several CI/CD test suites) was
+	@# silently missing from the .venv.
+	$(PIP) install -r requirements-dev.txt
 
 hooks:  ## Install pre-commit hooks (run once after clone)
 	$(PRECOMMIT) install

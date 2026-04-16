@@ -61,6 +61,33 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COMPOSE_FILE="${REPO_ROOT}/docker-compose.prod.yml"
 
 # ---------------------------------------------------------------------------
+# Python resolver
+#
+# PyYAML is declared in requirements-dev.txt (not the system package set).
+# On a macOS dev box the system `python3` typically does NOT have PyYAML
+# and `pip install` against it is blocked by PEP 668. The project's
+# `.venv/bin/python` is the canonical interpreter — it is where
+# `make install-dev` lands every dependency. We prefer the venv
+# interpreter if it exists and has PyYAML; fall back to `python3` only
+# if it can import yaml; otherwise fail fast with actionable guidance.
+# ---------------------------------------------------------------------------
+
+resolve_python() {
+    local venv_py="${REPO_ROOT}/.venv/bin/python"
+    if [[ -x "$venv_py" ]] && "$venv_py" -c "import yaml" 2>/dev/null; then
+        echo "$venv_py"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1 && python3 -c "import yaml" 2>/dev/null; then
+        echo "python3"
+        return 0
+    fi
+    return 1
+}
+
+PYTHON="$(resolve_python || true)"
+
+# ---------------------------------------------------------------------------
 # Python YAML query helper
 #
 # We shell out to Python so each test is independent and self-explanatory.
@@ -70,7 +97,7 @@ COMPOSE_FILE="${REPO_ROOT}/docker-compose.prod.yml"
 
 api_environment_entries() {
     # Print each entry of the api service's `environment:` list, one per line.
-    python3 - "$COMPOSE_FILE" <<'PY'
+    "$PYTHON" - "$COMPOSE_FILE" <<'PY'
 import sys, yaml
 with open(sys.argv[1]) as f:
     data = yaml.safe_load(f)
@@ -88,7 +115,7 @@ PY
 
 api_build_args() {
     # Print each build arg as KEY=VALUE.
-    python3 - "$COMPOSE_FILE" <<'PY'
+    "$PYTHON" - "$COMPOSE_FILE" <<'PY'
 import sys, yaml
 with open(sys.argv[1]) as f:
     data = yaml.safe_load(f)
@@ -240,7 +267,7 @@ test_api_build_arg_environment_is_substituted() {
 test_compose_file_has_no_bare_environment_production_in_api() {
     # Walk the api service block only and assert no list entry is a
     # literal "ENVIRONMENT=production" (without any ${...} token).
-    python3 - "$COMPOSE_FILE" <<'PY' || exit 1
+    "$PYTHON" - "$COMPOSE_FILE" <<'PY' || exit 1
 import sys, yaml
 with open(sys.argv[1]) as f:
     data = yaml.safe_load(f)
@@ -271,10 +298,21 @@ main() {
         echo "ERROR: docker-compose.prod.yml not found at ${COMPOSE_FILE}"
         exit 2
     fi
-    if ! python3 -c "import yaml" 2>/dev/null; then
-        echo "ERROR: PyYAML is required. Run: pip install pyyaml --break-system-packages"
+    if [[ -z "${PYTHON}" ]]; then
+        echo "ERROR: No Python interpreter with PyYAML was found."
+        echo ""
+        echo "  The project venv is the canonical place for PyYAML. Install dev deps:"
+        echo "    .venv/bin/pip install -r requirements-dev.txt"
+        echo ""
+        echo "  Or, if you want to use system python instead:"
+        echo "    python3 -m pip install 'PyYAML>=6.0.0' --break-system-packages"
+        echo ""
+        echo "  Resolution order tried:"
+        echo "    1. ${REPO_ROOT}/.venv/bin/python (preferred)"
+        echo "    2. python3 on \$PATH (fallback)"
         exit 2
     fi
+    echo "Using Python: ${PYTHON}"
 
     echo "docker-compose.prod.yml substitution test suite"
     echo "------------------------------------------------"
