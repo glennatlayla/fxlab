@@ -220,10 +220,7 @@ def test_node_exporter_healthcheck_start_period_is_generous(
     hc = node_exporter_service.get("healthcheck", {})
     start_period = str(hc.get("start_period", ""))
     match = re.match(r"^(\d+)s$", start_period)
-    assert match, (
-        f"node-exporter healthcheck start_period must be '<N>s'. "
-        f"Got: {start_period!r}."
-    )
+    assert match, f"node-exporter healthcheck start_period must be '<N>s'. Got: {start_period!r}."
     value = int(match.group(1))
     assert value >= 30, (
         f"node-exporter healthcheck start_period={value}s is too short. "

@@ -42,6 +42,7 @@ def _no_real_sleep_during_redis_retries(monkeypatch: pytest.MonkeyPatch) -> None
         lambda _seconds: None,
     )
 
+
 # ---------------------------------------------------------------------------
 # _parse_redis_version() tests
 # ---------------------------------------------------------------------------
@@ -949,4 +950,3 @@ class TestVerifyRedisConnectionRetry:
 
         assert mock_client.ping.call_count == 1
         assert sleep_calls == []
-

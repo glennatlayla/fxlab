@@ -106,9 +106,7 @@ def compose_prod_config() -> dict[str, Any]:
 def postgres_service(compose_prod_config: dict[str, Any]) -> dict[str, Any]:
     """Extract the postgres service block from the prod compose file."""
     services = compose_prod_config.get("services", {})
-    assert "postgres" in services, (
-        "docker-compose.prod.yml must define a 'postgres' service."
-    )
+    assert "postgres" in services, "docker-compose.prod.yml must define a 'postgres' service."
     service = services["postgres"]
     assert isinstance(service, dict), "postgres service must be a mapping"
     return service
@@ -145,8 +143,7 @@ def postgres_environment(postgres_service: dict[str, Any]) -> dict[str, str]:
         return {str(k): str(v) for k, v in env.items()}
 
     pytest.fail(
-        f"postgres environment has unexpected type {type(env).__name__}. "
-        "Must be list or mapping."
+        f"postgres environment has unexpected type {type(env).__name__}. Must be list or mapping."
     )
 
 
@@ -261,9 +258,7 @@ def test_postgres_initdb_args_does_not_set_forbidden_locale(
     initdb_args = postgres_environment.get("POSTGRES_INITDB_ARGS", "")
     # Match the locale only as a whole word after --locale= so
     # substrings like "en_US.UTF-8" inside a comment don't trip us.
-    pattern = re.compile(
-        rf"--locale={re.escape(forbidden)}(?:\s|$)"
-    )
+    pattern = re.compile(rf"--locale={re.escape(forbidden)}(?:\s|$)")
     assert not pattern.search(initdb_args), (
         f"POSTGRES_INITDB_ARGS sets --locale={forbidden!r}, which is "
         "not installed on postgres:15-alpine. Use --locale=C.UTF-8."
@@ -306,9 +301,7 @@ def test_postgres_image_is_pinned_to_specific_version(
     narrower so upgrades are deliberate.
     """
     image = str(postgres_service.get("image", ""))
-    assert ":" in image, (
-        f"postgres image must be pinned to a tag. Got: {image!r}."
-    )
+    assert ":" in image, f"postgres image must be pinned to a tag. Got: {image!r}."
     tag = image.split(":", 1)[1]
     assert tag not in {"latest", "alpine", "stable", "edge"}, (
         f"postgres image tag {tag!r} is floating — pin to a specific "
@@ -316,8 +309,7 @@ def test_postgres_image_is_pinned_to_specific_version(
     )
     # Must begin with a digit so we can tell "15-alpine" from "alpine".
     assert tag[0].isdigit(), (
-        f"postgres image tag {tag!r} does not begin with a version "
-        "number. Pin to e.g. 15-alpine."
+        f"postgres image tag {tag!r} does not begin with a version number. Pin to e.g. 15-alpine."
     )
 
 

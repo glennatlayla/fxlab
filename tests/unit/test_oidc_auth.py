@@ -152,7 +152,16 @@ class TestRequireScope:
     """require_scope() returns a dependency that enforces scope checks."""
 
     def test_scope_granted_passes(self):
-        """Dependency returns user when scope is present."""
+        """Dependency returns user when scope is present.
+
+        Uses ``asyncio.run()`` rather than ``asyncio.get_event_loop()
+        .run_until_complete()``: on Python 3.12+, after an earlier
+        test in this module runs ``TestClient`` (which creates and
+        closes an ASGI lifespan loop), ``get_event_loop()`` returns
+        the closed loop and ``run_until_complete()`` raises
+        ``RuntimeError: Event loop is closed``. ``asyncio.run()``
+        allocates a fresh loop for each call and sidesteps the issue.
+        """
         import asyncio
 
         dep = require_scope("feeds:read")
@@ -161,11 +170,15 @@ class TestRequireScope:
             role="operator",
             scopes=["feeds:read", "strategies:write"],
         )
-        result = asyncio.get_event_loop().run_until_complete(dep(user=user))
+        result = asyncio.run(dep(user=user))
         assert result.user_id == user.user_id
 
     def test_scope_denied_raises_403(self):
-        """Dependency raises 403 when scope is missing."""
+        """Dependency raises 403 when scope is missing.
+
+        See ``test_scope_granted_passes`` for why this uses
+        ``asyncio.run()`` rather than ``asyncio.get_event_loop()``.
+        """
         import asyncio
 
         dep = require_scope("approvals:write")
@@ -175,7 +188,7 @@ class TestRequireScope:
             scopes=["feeds:read"],
         )
         with pytest.raises(HTTPException) as exc_info:
-            asyncio.get_event_loop().run_until_complete(dep(user=user))
+            asyncio.run(dep(user=user))
         assert exc_info.value.status_code == 403
         assert "approvals:write" in exc_info.value.detail
 

@@ -306,8 +306,7 @@ class TestStartupPhaseCoverageAudit:
         src = _main_source()
         window = _phase_window(src, "orphan_recovery", context_chars=2500)
         assert "recover_all_deployments(" in window, (
-            "recover_all_deployments() not found inside "
-            "_startup_phase('orphan_recovery') block"
+            "recover_all_deployments() not found inside _startup_phase('orphan_recovery') block"
         )
 
     def test_live_execution_wiring_uses_startup_phase_context_manager(self) -> None:
@@ -569,6 +568,7 @@ class TestLifespanAbortOnConfigError:
         )
 
         try:
+
             def fake_check() -> None:
                 raise ConfigError("boom: synthetic pydantic_core failure for D1 test")
 
@@ -587,8 +587,9 @@ class TestLifespanAbortOnConfigError:
                 async with api_main.lifespan(fake_app):
                     pass  # pragma: no cover — should never be reached
 
-            with patch.object(api_main, "_check_pydantic_core", fake_check), patch(
-                "services.api.main.sys.exit", fake_exit
+            with (
+                patch.object(api_main, "_check_pydantic_core", fake_check),
+                patch("services.api.main.sys.exit", fake_exit),
             ):
                 with pytest.raises(SystemExit) as excinfo:
                     asyncio.run(drive())

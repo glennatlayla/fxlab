@@ -100,23 +100,17 @@ PROD_WEAK_ORIGINS: tuple[tuple[str, str], ...] = (
 @pytest.mark.parametrize("origin", PROD_SAFE_ORIGINS)
 def test_classify_cors_origin_identifies_safe_origin(origin: str) -> None:
     """Safe origins classify as ``ok`` so the validator accepts them."""
-    assert _classify_cors_origin(origin) == "ok", (
-        f"{origin!r} should classify as 'ok'"
-    )
+    assert _classify_cors_origin(origin) == "ok", f"{origin!r} should classify as 'ok'"
 
 
 @pytest.mark.parametrize(("origin", "reason"), PROD_WEAK_ORIGINS)
-def test_classify_cors_origin_identifies_weak_origin(
-    origin: str, reason: str
-) -> None:
+def test_classify_cors_origin_identifies_weak_origin(origin: str, reason: str) -> None:
     """Every weak origin returns its exact classification key.
 
     The key is surfaced in the error message so the operator can map
     the failure to the precise rule without re-deriving it.
     """
-    assert _classify_cors_origin(origin) == reason, (
-        f"{origin!r} should classify as {reason!r}"
-    )
+    assert _classify_cors_origin(origin) == reason, f"{origin!r} should classify as {reason!r}"
 
 
 def test_classify_cors_origin_rejects_malformed_origin() -> None:
@@ -166,9 +160,7 @@ def test_production_rejects_weak_origin(origin: str, reason: str) -> None:
         )
     message = str(exc_info.value)
     assert origin in message, f"Error must name the bad origin. Got: {message!r}"
-    assert reason in message, (
-        f"Error must cite reason {reason!r}. Got: {message!r}"
-    )
+    assert reason in message, f"Error must cite reason {reason!r}. Got: {message!r}"
     assert "CORS_ORIGINS_ALLOW_PLAINTEXT_LAN" in message, (
         f"Error must mention the escape hatch. Got: {message!r}"
     )
@@ -255,16 +247,12 @@ def test_production_escape_hatch_justification_must_be_nontrivial() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "environment", ["development", "staging", "test"]
-)
+@pytest.mark.parametrize("environment", ["development", "staging", "test"])
 @pytest.mark.parametrize(
     "origin",
     [o for o, _ in PROD_WEAK_ORIGINS] + list(PROD_SAFE_ORIGINS),
 )
-def test_non_production_accepts_any_origin(
-    environment: str, origin: str
-) -> None:
+def test_non_production_accepts_any_origin(environment: str, origin: str) -> None:
     """Non-production must accept every origin shape.
 
     Minitux is designated ``development`` per the environment policy.

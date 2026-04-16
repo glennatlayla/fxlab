@@ -466,17 +466,13 @@ def _validate_cors_origins(
 
 #: libpq sslmode values that guarantee an encrypted channel. Accepted
 #: in every environment, including production.
-_STRICT_POSTGRES_SSLMODES: frozenset[str] = frozenset(
-    {"require", "verify-ca", "verify-full"}
-)
+_STRICT_POSTGRES_SSLMODES: frozenset[str] = frozenset({"require", "verify-ca", "verify-full"})
 
 #: libpq sslmode values that do NOT guarantee an encrypted channel.
 #: Rejected when ``ENVIRONMENT=production``. Allowed in development,
 #: staging, and test so local workflows remain frictionless against a
 #: docker-compose Postgres on a private network.
-_WEAK_POSTGRES_SSLMODES: frozenset[str] = frozenset(
-    {"disable", "allow", "prefer"}
-)
+_WEAK_POSTGRES_SSLMODES: frozenset[str] = frozenset({"disable", "allow", "prefer"})
 
 
 def _extract_sslmode(database_url: str) -> str | None:
@@ -1436,19 +1432,14 @@ _cors_origins: list[str] = [o.strip() for o in _cors_origins_raw.split(",") if o
 _cors_allow_plaintext_lan: bool = (
     os.environ.get("CORS_ORIGINS_ALLOW_PLAINTEXT_LAN", "").lower() == "true"
 )
-_cors_plaintext_justification: str = os.environ.get(
-    "CORS_PLAINTEXT_JUSTIFICATION", ""
-)
+_cors_plaintext_justification: str = os.environ.get("CORS_PLAINTEXT_JUSTIFICATION", "")
 _validate_cors_origins(
     origins=_cors_origins,
     environment=os.environ.get("ENVIRONMENT", ""),
     allow_plaintext_lan=_cors_allow_plaintext_lan,
     plaintext_justification=_cors_plaintext_justification,
 )
-if (
-    os.environ.get("ENVIRONMENT", "") == "production"
-    and _cors_allow_plaintext_lan
-):
+if os.environ.get("ENVIRONMENT", "") == "production" and _cors_allow_plaintext_lan:
     # Log the audit record every startup. This is the bypass's audit
     # trail — visible in container logs and any log-aggregation sink.
     logger.warning(

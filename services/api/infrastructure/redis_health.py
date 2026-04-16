@@ -135,7 +135,9 @@ def _build_keepalive_options() -> dict[int, int]:
 #   Linux kernel 6.17 in Docker, the 2026-04-15 minitux install failure).
 # * ENOPROTOOPT (92) — option not supported by this protocol level.
 _CLIENT_SOCKET_OPTION_ERRNOS: frozenset[int] = frozenset(
-    e for e in (getattr(errno, "EINVAL", None), getattr(errno, "ENOPROTOOPT", None)) if e is not None
+    e
+    for e in (getattr(errno, "EINVAL", None), getattr(errno, "ENOPROTOOPT", None))
+    if e is not None
 )
 
 
@@ -240,9 +242,7 @@ _BACKOFF_CAP_SECONDS: float = 30.0
 
 # Categories that must NOT be retried (see _classify_connection_error).
 # Retrying these only delays operator visibility into the real defect.
-_NON_RETRYABLE_CATEGORIES: frozenset[str] = frozenset(
-    {"client_socket_option", "tls", "auth"}
-)
+_NON_RETRYABLE_CATEGORIES: frozenset[str] = frozenset({"client_socket_option", "tls", "auth"})
 
 
 def _compute_backoff_seconds(attempt: int, initial: float, cap: float) -> float:
@@ -364,9 +364,7 @@ def verify_redis_connection(
             try:
                 pong = client.ping()
                 if pong is not True:
-                    raise ConfigError(
-                        f"Redis PING failed: expected True, got {pong}"
-                    )
+                    raise ConfigError(f"Redis PING failed: expected True, got {pong}")
                 logger.debug(
                     "redis.ping_success",
                     component="redis_health",

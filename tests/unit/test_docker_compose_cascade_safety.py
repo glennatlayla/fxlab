@@ -266,9 +266,7 @@ def test_every_depends_on_edge_is_classified(compose_config: dict[str, Any]) -> 
     updating this module would bypass the cascade-safety review. The test
     fails loudly, forcing classification.
     """
-    classified: set[tuple[str, str]] = set(GENUINE_HEALTHY_EDGES) | set(
-        CASCADE_SAFE_STARTED_EDGES
-    )
+    classified: set[tuple[str, str]] = set(GENUINE_HEALTHY_EDGES) | set(CASCADE_SAFE_STARTED_EDGES)
     discovered: set[tuple[str, str]] = set()
     for downstream_name, service in compose_config["services"].items():
         for upstream_name in _depends_on(service):
@@ -351,9 +349,7 @@ def test_depends_on_graph_is_acyclic(compose_config: dict[str, Any]) -> None:
             child_colour = colour.get(child, WHITE)
             if child_colour == GRAY:
                 cycle_path = [n for n, _ in stack] + [child]
-                pytest.fail(
-                    "depends_on cycle detected: " + " → ".join(cycle_path)
-                )
+                pytest.fail("depends_on cycle detected: " + " → ".join(cycle_path))
             if child_colour == WHITE:
                 stack.append((child, 0))
 

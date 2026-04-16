@@ -151,9 +151,7 @@ def test_production_rejects_weak_sslmode(sslmode: str) -> None:
     )
     # Enumerates the acceptable values so the operator can copy/paste a fix.
     for strict in STRICT_SSLMODES:
-        assert strict in message, (
-            f"Error must enumerate allowed value {strict!r}. Got: {message!r}"
-        )
+        assert strict in message, f"Error must enumerate allowed value {strict!r}. Got: {message!r}"
 
 
 # ---------------------------------------------------------------------------

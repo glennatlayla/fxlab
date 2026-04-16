@@ -110,9 +110,7 @@ def compose_prod_config() -> dict[str, Any]:
 def cadvisor_service(compose_prod_config: dict[str, Any]) -> dict[str, Any]:
     """Extract the cadvisor service block from the prod compose file."""
     services = compose_prod_config.get("services", {})
-    assert "cadvisor" in services, (
-        "docker-compose.prod.yml must define a 'cadvisor' service."
-    )
+    assert "cadvisor" in services, "docker-compose.prod.yml must define a 'cadvisor' service."
     service = services["cadvisor"]
     assert isinstance(service, dict), "cadvisor service must be a mapping"
     return service
@@ -265,12 +263,9 @@ def test_cadvisor_service_has_healthcheck(
     assert test_entry, "cadvisor healthcheck 'test' field must be set"
     # The test command must target /healthz on the port we pinned above.
     joined = " ".join(test_entry) if isinstance(test_entry, list) else str(test_entry)
-    assert "/healthz" in joined, (
-        f"cadvisor healthcheck should probe /healthz. Got: {joined!r}."
-    )
+    assert "/healthz" in joined, f"cadvisor healthcheck should probe /healthz. Got: {joined!r}."
     assert "8080" in joined, (
-        f"cadvisor healthcheck should target port 8080 (matches --port flag). "
-        f"Got: {joined!r}."
+        f"cadvisor healthcheck should target port 8080 (matches --port flag). Got: {joined!r}."
     )
 
 
@@ -285,9 +280,7 @@ def test_cadvisor_image_is_pinned_to_specific_tag(
     compose change.
     """
     image = cadvisor_service.get("image", "")
-    assert ":" in image, (
-        f"cadvisor image must be pinned to a specific tag. Got: {image!r}."
-    )
+    assert ":" in image, f"cadvisor image must be pinned to a specific tag. Got: {image!r}."
     tag = image.split(":", 1)[1]
     assert tag not in {"latest", "edge", "stable"}, (
         f"cadvisor image tag {tag!r} is floating — pin to a specific "

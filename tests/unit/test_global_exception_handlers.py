@@ -100,7 +100,15 @@ class TestIntegrityErrorHandler:
     """Verify IntegrityError handler is registered and returns correct status."""
 
     def test_integrity_handler_returns_409_content(self):
-        """The IntegrityError handler produces a 409 response with correct body."""
+        """The IntegrityError handler produces a 409 response with correct body.
+
+        Uses ``asyncio.run()`` rather than ``asyncio.get_event_loop()
+        .run_until_complete()`` because the latter, on Python 3.12+,
+        returns the *closed* loop left behind by an earlier TestClient
+        in this module and raises ``RuntimeError: Event loop is
+        closed``. ``asyncio.run()`` always creates a fresh isolated
+        loop for the duration of the call.
+        """
         import asyncio
         from unittest.mock import MagicMock
 
@@ -109,12 +117,16 @@ class TestIntegrityErrorHandler:
         request = MagicMock()
         exc = IntegrityError("INSERT ...", {}, Exception("UNIQUE constraint failed"))
 
-        response = asyncio.get_event_loop().run_until_complete(_handle_integrity(request, exc))
+        response = asyncio.run(_handle_integrity(request, exc))
         assert response.status_code == 409
         assert b"integrity" in response.body.lower()
 
     def test_operational_handler_returns_503_with_retry_after(self):
-        """The OperationalError handler produces a 503 response with Retry-After."""
+        """The OperationalError handler produces a 503 response with Retry-After.
+
+        See ``test_integrity_handler_returns_409_content`` for the
+        rationale behind ``asyncio.run()``.
+        """
         import asyncio
         from unittest.mock import MagicMock
 
@@ -123,7 +135,7 @@ class TestIntegrityErrorHandler:
         request = MagicMock()
         exc = OperationalError("SELECT 1", {}, Exception("connection refused"))
 
-        response = asyncio.get_event_loop().run_until_complete(_handle_operational(request, exc))
+        response = asyncio.run(_handle_operational(request, exc))
         assert response.status_code == 503
         assert response.headers.get("Retry-After") == "5"
 
