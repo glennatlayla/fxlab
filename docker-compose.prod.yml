@@ -23,6 +23,29 @@
 #   redis-data     — Persistent Redis AOF
 #   nginx-certs    — TLS certificates (optional, for HTTPS)
 
+# ---------------------------------------------------------------------------
+# YAML anchors — cross-service defaults (2026-04-20 Tranche A hardening)
+# ---------------------------------------------------------------------------
+#
+# docker does NOT cap json-file log size by default; a chatty service
+# can fill /var/lib/docker within hours and take postgres writes
+# offline. Every service declares ``logging: *default-logging`` so
+# container logs rotate at 10m x 3 files = 30m ceiling per container.
+# Aggregate across 9 services: 270m max under `/var/lib/docker/containers`.
+# See tests/unit/test_compose_robustness_hygiene.py for the contract.
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    # Quoted so YAML 1.1 does not coerce '10m' to a number / duration.
+    max-size: "10m"
+    max-file: "3"
+    # Best-effort — prevents a slow consumer from blocking the service
+    # writer when the host disk is under pressure. Acceptable loss:
+    # the newest lines if the daemon is wedged. Without this, a stuck
+    # journald/fluent-bit consumer can stall the service's stdout.
+    mode: "non-blocking"
+    max-buffer-size: "4m"
+
 services:
 
   # ---------------------------------------------------------------------------
@@ -50,9 +73,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    restart: unless-stopped
+    # restart: on-failure:3 — bounded retry per 2026-04-20 hardening.
+    # A broken nginx after 3 attempts is visible to operators (exited
+    # with non-zero) rather than looping silently. Combined with the
+    # smoke_health_eval State=restarting detection, this is the shape
+    # the install-smoke path exercises end-to-end.
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+        reservations:
+          # nginx is the public ingress — OOM kill means 5xx from
+          # /health until docker restarts it. 64M guaranteed is
+          # enough for ~10 concurrent connections + worker pool
+          # idle state on this compose's nginx:alpine base.
+          memory: 64M
+          cpus: '0.1'
 
   # ---------------------------------------------------------------------------
   # API — FastAPI backend
@@ -105,14 +146,21 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
+    # Resource limits + reservations (2026-04-20). Reservations guarantee
+    # api has its floor of memory/CPU so a Prometheus query burst or
+    # cadvisor spike cannot OOM-kill it. limits cap the worst case.
     deploy:
       resources:
         limits:
           memory: 1G
           cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
 
   # ---------------------------------------------------------------------------
   # Web — React frontend (served via nginx)
@@ -140,9 +188,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
+    # web is stateless SPA assets behind nginx; no reservation — it
+    # can tolerate being squeezed under pressure and nginx serves a
+    # cached error page in the worst case.
     deploy:
       resources:
         limits:
@@ -219,14 +271,22 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
+    # postgres is the system of record. Reservations (2026-04-20)
+    # guarantee shared_buffers + work_mem cannot be starved by a
+    # noisy neighbour. 384M reservation = 75% of limit; the 25%
+    # headroom absorbs query bursts without pushing into OOM risk.
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: '1.0'
+        reservations:
+          memory: 384M
+          cpus: '0.25'
 
   # ---------------------------------------------------------------------------
   # Redis — Cache, rate limiting, job queue
@@ -250,14 +310,23 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
+    # redis holds rate-limit counters, login tracker state, and job
+    # queue. Reservations (2026-04-20) guarantee it cannot be squeezed
+    # below its configured maxmemory (256M). 256M reservation ==
+    # maxmemory so redis never has to evict under host memory
+    # pressure; the 128M limit headroom covers command buffers.
     deploy:
       resources:
         limits:
           memory: 384M
           cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.15'
 
   # ---------------------------------------------------------------------------
   # Prometheus — Metrics collection & alerting
@@ -270,6 +339,13 @@ services:
     container_name: fxlab-prometheus
     expose:
       - "9090"
+    # 127.0.0.1:9090:9090 (2026-04-20): loopback-only host binding so
+    # operators SSH'd into the host can reach the Prometheus UI for
+    # diagnostics (e.g. query cost, TSDB cardinality) without
+    # publishing the UI to the network. Public operator access should
+    # still go through an authenticated reverse proxy if needed.
+    ports:
+      - "127.0.0.1:9090:9090"
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -288,7 +364,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
     depends_on:
@@ -338,7 +415,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
     deploy:
@@ -410,7 +488,8 @@ services:
       # Anything shorter produces 'starting' → 'unhealthy' flapping
       # that compounds with scrape-side RSTs.
       start_period: 30s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
     deploy:
@@ -499,7 +578,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    restart: unless-stopped
+    restart: "on-failure:3"
+    logging: *default-logging
     networks:
       - fxlab-net
     deploy:
