@@ -433,9 +433,25 @@ services:
     privileged: true
     expose:
       - "8080"
-    # N1 remediation (2026-04-15): the original flag set produced
-    # usage-like output and restart-looping on minitux (kernel 6.x,
-    # cgroupsv2). The shape below pins a known-good invocation:
+    # N1 remediation (2026-04-15) + 2026-04-20 accelerator fix:
+    #
+    # The original flag set produced usage-like output and
+    # restart-looping on minitux (kernel 6.x, cgroupsv2). Two edits
+    # reached this shape:
+    #
+    #   2026-04-15 — pinned --docker_only, --store_container_labels,
+    #                --disable_metrics, and a fixed 30 s
+    #                --housekeeping_interval.
+    #   2026-04-20 — removed `accelerator` from --disable_metrics.
+    #                `accelerator` is NOT a valid metric name in
+    #                cAdvisor v0.49.1 (Nvidia GPU support was reworked
+    #                in v0.47). Passing it caused cAdvisor's Go flag
+    #                parser to reject the entire flag set, dump usage
+    #                to stderr, and exit with code 2 — which the
+    #                unless-stopped restart policy then looped
+    #                forever.
+    #
+    # Flag-by-flag justification:
     #   --docker_only=true           — skip LXC / systemd-nspawn /
     #                                  raw-cgroup discovery so cadvisor
     #                                  does not log warnings every
@@ -448,19 +464,24 @@ services:
     #                                  (labels × containers), saving
     #                                  both cadvisor memory and
     #                                  Prometheus storage.
-    #   --disable_metrics=...        — silences accelerator/cpu_topology/
+    #   --disable_metrics=...        — silences cpu_topology and
     #                                  resctrl collectors that probe
     #                                  /sys paths not present on these
-    #                                  kernels.
+    #                                  kernels. Every token here MUST
+    #                                  be in cAdvisor v0.49.1's valid-
+    #                                  metrics set (see the enum in
+    #                                  tests/unit/test_cadvisor_command_hygiene.py).
     # --max_housekeeping_interval removed: we pin a fixed 30 s cadence
     # via --housekeeping_interval and do not need dynamic housekeeping.
-    # See tests/unit/test_cadvisor_command_hygiene.py for the contract.
+    # See tests/unit/test_cadvisor_command_hygiene.py for the contract
+    # and the defensive validator that prevents reintroducing an
+    # unknown metric name.
     command:
       - '--port=8080'
       - '--housekeeping_interval=30s'
       - '--docker_only=true'
       - '--store_container_labels=false'
-      - '--disable_metrics=accelerator,cpu_topology,resctrl'
+      - '--disable_metrics=cpu_topology,resctrl'
     devices:
       - /dev/kmsg:/dev/kmsg
     volumes:

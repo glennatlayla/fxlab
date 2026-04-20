@@ -155,26 +155,48 @@ install-smoke:  ## Spin up prod compose, verify health, tear down
 	@echo ""
 	@# --- 2. Wait for healthchecks ---
 	@echo "[2/5] Waiting for services to become healthy (up to $(SMOKE_TIMEOUT)s)..."
-	@# The Python helper emits "<total> <unhealthy>" on one line. We
-	@# explicitly require total > 0 so a silently-empty stack (daemon
-	@# died between preflight and here, or compose up was a no-op) is
-	@# never classified as healthy. A zero-services result is fatal.
+	@# Drives the poll loop via scripts/smoke_health_eval.py (extracted
+	@# 2026-04-20). The evaluator's exit codes are:
+	@#   0 — all services healthy; break and proceed to probes.
+	@#   1 — at least one service is in a terminal failure state
+	@#       (restart-looping, exhausted, unhealthy, blocked, dead,
+	@#       unexpected clean exit). Abort polling immediately — no
+	@#       amount of waiting will recover.
+	@#   2 — no terminal failures yet, but some services are still
+	@#       starting. Sleep and retry.
+	@# This replaces the previous Health-only one-liner which silently
+	@# passed through State=restarting containers (the 2026-04-20
+	@# cAdvisor crashloop bug). See tests/unit/test_smoke_health_eval.py
+	@# for the contract.
 	@elapsed=0; \
 	while [ $$elapsed -lt $(SMOKE_TIMEOUT) ]; do \
-		counts=$$($(SMOKE_COMPOSE) ps --format json 2>/dev/null | \
-			python3 -c "import sys,json; lines=[json.loads(l) for l in sys.stdin if l.strip()]; total=len(lines); unhealthy=sum(1 for s in lines if s.get('Health','') not in ('healthy','')); print(f'{total} {unhealthy}')" 2>/dev/null || echo "0 99"); \
-		total=$$(echo "$$counts" | cut -d' ' -f1); \
-		unhealthy=$$(echo "$$counts" | cut -d' ' -f2); \
-		if [ "$$total" = "0" ]; then \
-			echo "  FAIL: compose reports zero services running. Stack never started."; \
-			echo "    This usually means 'docker compose up' failed silently. Inspect:"; \
-			echo "      docker compose -f docker-compose.prod.yml ps"; \
-			echo "      docker compose -f docker-compose.prod.yml logs --tail=50"; \
-			exit 1; \
-		fi; \
-		if [ "$$unhealthy" = "0" ]; then \
-			echo "  All $$total services healthy after $${elapsed}s."; \
+		set +e; \
+		$(SMOKE_COMPOSE) ps --format json 2>/dev/null | \
+			python3 scripts/smoke_health_eval.py poll; \
+		verdict=$$?; \
+		set -e; \
+		if [ $$verdict -eq 0 ]; then \
+			echo "  All services healthy after $${elapsed}s."; \
 			break; \
+		fi; \
+		if [ $$verdict -eq 1 ]; then \
+			echo ""; \
+			echo "  FAIL: terminal failure detected after $${elapsed}s — further waiting will not recover."; \
+			$(SMOKE_COMPOSE) ps; \
+			echo ""; \
+			echo "Failing service logs (with flag-parse scan):"; \
+			$(SMOKE_COMPOSE) ps --format json 2>/dev/null | \
+				python3 -c "import sys,json; [print(json.loads(l).get('Service','')) for l in sys.stdin if l.strip() and json.loads(l).get('State','').lower() != 'running']" 2>/dev/null | \
+				while read svc; do \
+					echo "--- $$svc ---"; \
+					logs=$$($(SMOKE_COMPOSE) logs --tail=60 "$$svc" 2>/dev/null); \
+					echo "$$logs" | tail -60; \
+					echo ""; \
+					echo "  [smoke-eval] scanning $$svc logs for flag-parse failure..."; \
+					echo "$$logs" | python3 scripts/smoke_health_eval.py scan-logs || true; \
+				done; \
+			$(SMOKE_COMPOSE) down --timeout 10 2>/dev/null || true; \
+			exit 1; \
 		fi; \
 		sleep 5; \
 		elapsed=$$((elapsed + 5)); \

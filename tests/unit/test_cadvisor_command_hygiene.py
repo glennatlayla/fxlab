@@ -51,6 +51,57 @@ import yaml
 # but, if present, must be in the known-good form validated below.
 # ---------------------------------------------------------------------------
 
+#: Image tag we pin in docker-compose.prod.yml. When the image is
+#: bumped, the valid-metrics enum below MUST be re-derived from the
+#: matching cAdvisor source (container/container.go :: MetricKind)
+#: and this constant updated. A mismatch between the pinned tag and
+#: this constant is itself a test failure (see
+#: ``test_pinned_cadvisor_version_matches_valid_metrics_table`` below).
+PINNED_CADVISOR_VERSION: str = "v0.49.1"
+
+#: The complete set of metric names that cAdvisor v0.49.1 accepts as
+#: values for ``--disable_metrics`` and ``--enable_metrics``.
+#:
+#: Source: https://github.com/google/cadvisor/blob/v0.49.1/docs/runtime_options.md
+#: (the ``--disable_metrics`` table). Cross-verified against
+#: ``container/container.go`` in the same tag.
+#:
+#: This set is the single source of truth for validating any flag
+#: value we pass to cAdvisor. The 2026-04-20 minitux incident was
+#: caused by ``accelerator`` — a metric name removed when Nvidia GPU
+#: support was reworked — appearing in ``--disable_metrics``. cAdvisor
+#: rejected it at flag-parse time, dumped usage, and exited 2; the
+#: restart policy then looped it. This constant + the parametrised
+#: test below is the structural guarantee that the same class of
+#: typo cannot reach prod again without a failing pytest run.
+CADVISOR_V0_49_1_VALID_METRICS: frozenset[str] = frozenset(
+    {
+        "advtcp",
+        "app",
+        "cpu",
+        "cpuLoad",
+        "cpu_topology",
+        "cpuset",
+        "disk",
+        "diskIO",
+        "hugetlb",
+        "memory",
+        "memory_numa",
+        "network",
+        "oom_event",
+        "percpu",
+        "perf_event",
+        "process",
+        "psi_avg",
+        "psi_total",
+        "referenced_memory",
+        "resctrl",
+        "sched",
+        "tcp",
+        "udp",
+    }
+)
+
 #: Flags that must be present in every cadvisor invocation on this
 #: platform. Each is justified in a comment so reviewers see the
 #: reasoning at the assertion site without chasing a separate doc.
@@ -76,12 +127,16 @@ REQUIRED_CADVISOR_FLAGS: tuple[tuple[str, str], ...] = (
         "--store_container_labels=false",
         "prevent label-cardinality explosion in Prometheus",
     ),
-    # Disable metrics that either require hardware we do not have
-    # (accelerator), access /sys paths that are not present on
-    # containerised kernels (resctrl), or duplicate information
+    # Disable metrics that access /sys paths not present on
+    # containerised kernels (resctrl) or duplicate information
     # Prometheus already gets from node-exporter (cpu_topology).
+    #
+    # Historical note: ``accelerator`` appeared here before 2026-04-20
+    # but was removed — it is NOT a valid metric in cAdvisor v0.49.1
+    # (see CADVISOR_V0_49_1_VALID_METRICS above). Passing it caused
+    # cAdvisor to exit 2 with a usage dump on every restart attempt.
     (
-        "--disable_metrics=accelerator,cpu_topology,resctrl",
+        "--disable_metrics=cpu_topology,resctrl",
         "silence metrics that do not apply on minitux / Azure VMs",
     ),
 )
@@ -290,4 +345,154 @@ def test_cadvisor_image_is_pinned_to_specific_tag(
     assert tag.startswith("v") or tag.startswith("sha256:"), (
         f"cadvisor image tag {tag!r} does not look like a version or "
         "digest. Pin to e.g. v0.49.1 or sha256:... ."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Defensive flag-value validation (2026-04-20 remediation)
+# ---------------------------------------------------------------------------
+#
+# The ``REQUIRED_CADVISOR_FLAGS`` contract above locks the shape of the
+# command list, but it treats each flag as an opaque string — so a
+# reviewer who swapped one valid metric name for another (e.g. typo'd
+# ``cpu_topology`` → ``cpu_topo``, or left behind a removed metric
+# like ``accelerator``) would slip past it.
+#
+# The tests below add a second layer: every token in ``--disable_metrics``
+# must be a member of the known-good set for the pinned cAdvisor image.
+# This is the exact gate the 2026-04-20 minitux failure would have
+# tripped.
+# ---------------------------------------------------------------------------
+
+
+def _extract_flag_value(command: list[str], flag_name: str) -> str | None:
+    """Return the value of ``--flag=value`` from a command list, or None.
+
+    Args:
+        command: the cadvisor command list (already validated to be
+            list-shaped by fixtures above).
+        flag_name: the flag to search for, e.g. ``--disable_metrics``.
+
+    Returns:
+        The string after ``=`` if the flag is present in ``--flag=value``
+        form, else None. Does not support the space-separated form
+        (``--flag value``) because the hygiene contract already
+        mandates ``key=value`` shape for every flag — see
+        ``test_cadvisor_command_flags_all_start_with_dash``.
+
+    Example:
+        _extract_flag_value(["--port=8080"], "--port") == "8080"
+    """
+    prefix = flag_name + "="
+    for entry in command:
+        if entry.startswith(prefix):
+            return entry[len(prefix) :]
+    return None
+
+
+def test_pinned_cadvisor_version_matches_valid_metrics_table(
+    cadvisor_service: dict[str, Any],
+) -> None:
+    """The compose image tag must match the version backing the enum.
+
+    If an engineer bumps the cAdvisor image tag without also updating
+    ``CADVISOR_V0_49_1_VALID_METRICS`` (and this test's PINNED_*
+    constant), the defensive validation below would be comparing
+    against a stale metric enum. This test makes the dependency
+    explicit so the bump is a two-line change, not a silent drift.
+    """
+    image = cadvisor_service.get("image", "")
+    assert ":" in image, f"cadvisor image must be pinned. Got: {image!r}."
+    tag = image.split(":", 1)[1]
+    assert tag == PINNED_CADVISOR_VERSION, (
+        f"cAdvisor image tag {tag!r} no longer matches "
+        f"PINNED_CADVISOR_VERSION={PINNED_CADVISOR_VERSION!r} in this "
+        "test module. If you intentionally bumped the image, also "
+        "update PINNED_CADVISOR_VERSION and re-derive "
+        "CADVISOR_V0_49_1_VALID_METRICS from the new tag's "
+        "container/container.go (MetricKind) or runtime_options.md."
+    )
+
+
+def test_disable_metrics_flag_is_present_and_well_formed(
+    cadvisor_command: list[str],
+) -> None:
+    """``--disable_metrics=<csv>`` must be present and non-empty.
+
+    Guards against a drift where the flag is removed (re-enabling
+    noisy collectors) or left empty (ambiguous — Go's flag parser
+    accepts empty CSV and the behaviour is version-dependent).
+    """
+    value = _extract_flag_value(cadvisor_command, "--disable_metrics")
+    assert value is not None, (
+        "cadvisor command must include --disable_metrics=<csv>. "
+        "Without it, metrics that access /sys paths not present on "
+        "containerised kernels (e.g. resctrl) are collected and fail "
+        "noisily every housekeeping tick. "
+        f"Full command: {cadvisor_command!r}."
+    )
+    assert value.strip() != "", (
+        "cadvisor --disable_metrics value is empty. Pass at least "
+        "'cpu_topology,resctrl' for minitux / Azure VM kernels."
+    )
+    # No whitespace tolerated inside the CSV — cAdvisor's parser does
+    # not strip whitespace and would treat ' cpu_topology' as an
+    # unknown metric name.
+    assert " " not in value and "\t" not in value, (
+        f"cadvisor --disable_metrics value {value!r} contains whitespace. "
+        "cAdvisor's flag parser does not strip whitespace from CSV "
+        "entries; use the exact form 'a,b,c' with no spaces."
+    )
+
+
+def test_disable_metrics_values_are_all_valid_for_pinned_cadvisor_version(
+    cadvisor_command: list[str],
+) -> None:
+    """Every token in ``--disable_metrics`` must be a known v0.49.1 metric.
+
+    This is the specific guard that would have caught the 2026-04-20
+    minitux failure. ``accelerator`` was in the CSV but is not a
+    valid metric name in v0.49.1 — cAdvisor's flag parser rejected
+    it, dumped usage, and exited 2 on every start attempt.
+
+    The assertion message lists the offending tokens so the operator
+    can fix the compose file in one edit without consulting docs.
+    """
+    value = _extract_flag_value(cadvisor_command, "--disable_metrics")
+    # The previous test asserts non-None / non-empty; we gate here
+    # defensively so a failure of one test does not cascade.
+    if not value:
+        pytest.skip("--disable_metrics absent or empty; see previous test")
+
+    tokens = [t for t in value.split(",") if t]
+    invalid = [t for t in tokens if t not in CADVISOR_V0_49_1_VALID_METRICS]
+
+    assert not invalid, (
+        f"cadvisor --disable_metrics contains tokens that are NOT valid "
+        f"metric names in cAdvisor {PINNED_CADVISOR_VERSION}: {invalid!r}. "
+        f"Passing an unknown metric name causes cAdvisor's Go flag "
+        f"parser to reject the entire flag set, dump usage to stderr, "
+        f"and exit 2. The restart policy then loops the container "
+        f"forever. "
+        f"Valid metrics are: {sorted(CADVISOR_V0_49_1_VALID_METRICS)!r}. "
+        f"(2026-04-20 minitux post-mortem)."
+    )
+
+
+def test_disable_metrics_has_no_duplicates(
+    cadvisor_command: list[str],
+) -> None:
+    """Each metric may appear at most once in ``--disable_metrics``.
+
+    Duplicates are a reviewer-error smell (two edits both adding the
+    same name) and, while cAdvisor tolerates them today, the
+    tolerance is not part of its documented contract. Fail fast.
+    """
+    value = _extract_flag_value(cadvisor_command, "--disable_metrics")
+    if not value:
+        pytest.skip("--disable_metrics absent; see earlier test")
+    tokens = [t for t in value.split(",") if t]
+    dupes = sorted({t for t in tokens if tokens.count(t) > 1})
+    assert not dupes, (
+        f"cadvisor --disable_metrics contains duplicate entries: {dupes!r}. Full CSV: {value!r}."
     )
