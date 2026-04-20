@@ -95,6 +95,40 @@ scrape_configs:
     scrape_timeout: 25s
     metrics_path: '/metrics'
 
+  # =========================================================================
+  # postgres-exporter — PostgreSQL metrics
+  # =========================================================================
+  # Added 2026-04-20 (Tranche B). Provides pg_database_size_bytes,
+  # pg_stat_database_*, pg_stat_bgwriter_*, pg_stat_replication_*,
+  # and the connection-count gauges used by the Postgres alerts.
+  - job_name: 'postgres-exporter'
+    scheme: 'http'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          service: 'postgres-exporter'
+          layer: 'infrastructure'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+
+  # =========================================================================
+  # redis-exporter — Redis metrics
+  # =========================================================================
+  # Added 2026-04-20 (Tranche B). Provides redis_memory_used_bytes,
+  # redis_maxmemory, redis_evicted_keys_total, redis_connected_clients,
+  # and the command-latency gauges used by the Redis alerts.
+  - job_name: 'redis-exporter'
+    scheme: 'http'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: 'redis-exporter'
+          layer: 'infrastructure'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+
 # Remote storage (optional — commented out by default)
 # Uncomment to enable long-term metric storage in an external backend
 # (e.g., Prometheus remote storage, Thanos, or cloud provider).

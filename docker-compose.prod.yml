@@ -588,6 +588,86 @@ services:
           memory: 256M
           cpus: '0.5'
 
+  # ---------------------------------------------------------------------------
+  # postgres-exporter — PostgreSQL metrics for Prometheus
+  # ---------------------------------------------------------------------------
+  # Added 2026-04-20 (Tranche B) so the PostgresDiskUsage*, Postgres
+  # connection-saturation, and replication-lag alerts in alerts.yml
+  # actually have metrics to evaluate against. Before this exporter,
+  # those alerts referenced pg_database_size_bytes etc. that had no
+  # scrape target → never fired → false sense of coverage.
+  #
+  # Authentication: uses the main POSTGRES_PASSWORD from .env. For
+  # tighter least-privilege, create a dedicated 'fxlab_monitor' role
+  # with pg_monitor membership and swap DATA_SOURCE_NAME; tracked as
+  # tech debt, not blocking this tranche.
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: fxlab-postgres-exporter
+    expose:
+      - "9187"
+    environment:
+      # scratch-based image; env-var DSN is the only supported config path.
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-fxlab}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fxlab}?sslmode=${POSTGRES_SSLMODE:-require}
+      - PG_EXPORTER_EXTEND_QUERY_PATH=
+      - TZ=UTC
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # NOTE: no healthcheck declared — postgres_exporter ships on a
+    # scratch base (no shell, no wget, no curl) so the only possible
+    # docker healthcheck probe would be CMD /postgres_exporter
+    # --version which reports binary presence, not serving readiness.
+    # We rely on Prometheus's own up{job="postgres-exporter"} metric
+    # and the smoke_health_eval tool's State-based classification
+    # (State=running + Health='' = HEALTHY) which exactly models
+    # "service is up but declares no healthcheck".
+    restart: "on-failure:3"
+    logging: *default-logging
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+  # ---------------------------------------------------------------------------
+  # redis-exporter — Redis metrics for Prometheus
+  # ---------------------------------------------------------------------------
+  # Added 2026-04-20 (Tranche B). Powers the RedisMemoryHigh and
+  # RedisEvictions alerts which reference redis_memory_used_bytes,
+  # redis_maxmemory, and redis_evicted_keys_total — all exposed
+  # by this exporter from a single scrape of redis at /metrics.
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.59.0
+    container_name: fxlab-redis-exporter
+    expose:
+      - "9121"
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - TZ=UTC
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # redis_exporter's alpine base has wget, so a real healthcheck
+      # is possible here (unlike postgres-exporter's scratch base).
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9121/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: "on-failure:3"
+    logging: *default-logging
+    networks:
+      - fxlab-net
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.15'
+
 networks:
   fxlab-net:
     driver: bridge

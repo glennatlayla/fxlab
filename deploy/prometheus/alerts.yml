@@ -550,12 +550,23 @@ groups:
       # -----------------------------------------------------------------------
       # PostgreSQL disk usage warning (> 80%) — WARNING
       # -----------------------------------------------------------------------
+      # Rewritten 2026-04-20 (Tranche B): the previous expression
+      # used pg_disk_usage_bytes / pg_disk_capacity_bytes, neither of
+      # which is a standard postgres_exporter metric. The alert could
+      # never evaluate. The replacement uses node_exporter's
+      # filesystem metrics for the host filesystem that backs the
+      # docker volume (postgres-data). mountpoint="/" matches the
+      # minitux and Azure VM host layout. If postgres is moved to a
+      # dedicated volume mount (e.g. /var/lib/postgresql/data on its
+      # own LVM), adjust the mountpoint label selector accordingly.
       - alert: PostgresDiskUsageWarning
         expr: |
           (
-            pg_disk_usage_bytes
-            /
-            pg_disk_capacity_bytes
+            1 - (
+              node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+              /
+              node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+            )
           ) > 0.8
         for: 5m
         labels:
@@ -581,11 +592,15 @@ groups:
       # PostgreSQL disk usage critical (> 90%) — CRITICAL
       # -----------------------------------------------------------------------
       - alert: PostgresDiskUsageCritical
+        # Rewritten 2026-04-20 (Tranche B): see PostgresDiskUsageWarning
+        # above for the full rationale. Threshold raised from 0.8 to 0.9.
         expr: |
           (
-            pg_disk_usage_bytes
-            /
-            pg_disk_capacity_bytes
+            1 - (
+              node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+              /
+              node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+            )
           ) > 0.9
         for: 2m
         labels:
@@ -903,33 +918,44 @@ groups:
       # -----------------------------------------------------------------------
       # Container restarting frequently (> 3 restarts in 15m) — WARNING
       # -----------------------------------------------------------------------
-      # Frequent restarts indicate:
-      # - Crash loop (likely OOM, panic, or unhandled exception)
-      # - Kubernetes eviction (node pressure, resource limits)
-      # - Liveness probe too aggressive
+      # Rewritten 2026-04-20 (Tranche B): the previous expression used
+      # ``kube_pod_container_status_restarts_total`` which is a
+      # Kubernetes kube-state-metrics series. It does not exist on
+      # this docker-compose deployment and the alert could never
+      # fire — giving operators a false sense of coverage.
+      #
+      # The replacement uses cAdvisor's ``container_start_time_seconds``:
+      # each time a container starts, its start-time timestamp jumps.
+      # ``changes()`` over a 15m window counts the distinct start
+      # timestamps — i.e. the number of times the container restarted
+      # in that window. > 3 restarts in 15m is the same semantic
+      # threshold the old k8s rule had.
+      #
+      # Label ``name`` is what cAdvisor emits for the container name
+      # (the docker container_name, e.g. fxlab-api). The alert body
+      # surfaces it so operators see which container is looping.
       - alert: ContainerRestarting
         expr: |
-          rate(kube_pod_container_status_restarts_total[15m]) > (3 / 900)
+          changes(container_start_time_seconds{name=~"fxlab-.+"}[15m]) > 3
         for: 5m
         labels:
           severity: warning
           team: infrastructure
-          component: kubernetes
+          component: docker
         annotations:
-          summary: "Container {{ $labels.pod }} restarting frequently ({{ $value | humanize }} restarts/sec)"
+          summary: "Container {{ $labels.name }} restarting frequently ({{ $value | humanize }} restarts in 15m)"
           description: |
-            Container {{ $labels.pod }} in namespace {{ $labels.namespace }} is restarting frequently.
-            Restart rate: {{ $value | humanize }} per second
-            This indicates the container is crashing or being evicted repeatedly.
+            Container {{ $labels.name }} has restarted {{ $value | humanize }} times in the last 15 minutes.
+            This indicates a crashloop — likely OOM, unhandled exception, or a bad config
+            (the 2026-04-20 cAdvisor accelerator-flag bug was exactly this class of failure).
             Investigate:
-            - Check pod logs: kubectl logs -f <pod> --previous (to see last crash)
-            - Check pod events: kubectl describe pod <pod> (shows evictions, OOM, etc)
-            - Review deployment resource limits (may be too low)
-            - Check for recent code deployments
+            - Check container logs: docker compose -f docker-compose.prod.yml logs --tail=200 <service>
+            - Check resource usage vs limits: docker stats {{ $labels.name }}
+            - Look for stderr flag-parse errors via: docker logs {{ $labels.name }} 2>&1 | python3 scripts/smoke_health_eval.py scan-logs
+            - Review recent compose / image changes that could have introduced a bad flag or config.
             Action items:
-            - If OOM: increase memory limit in deployment
-            - If crash: fix the bug in code and redeploy
-            - If eviction: check node pressure (kubectl describe node)
-            - Adjust liveness probe timeout if false positives
-            Runbook: https://docs.internal.fxlab.ai/runbooks/kubernetes/pod_restarting/
-          runbook_url: https://docs.internal.fxlab.ai/runbooks/kubernetes/pod_restarting/
+            - If OOM: raise the service's deploy.resources.limits.memory in docker-compose.prod.yml (and re-assess reservations).
+            - If flag-parse error: fix the command list and re-run `make install-smoke` to verify before deploying.
+            - If dependency failure: check depends_on chain via `docker compose ps` + logs of the upstream service.
+            Runbook: https://docs.internal.fxlab.ai/runbooks/docker/container_restarting/
+          runbook_url: https://docs.internal.fxlab.ai/runbooks/docker/container_restarting/
