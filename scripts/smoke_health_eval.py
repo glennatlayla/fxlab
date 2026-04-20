@@ -75,11 +75,13 @@ Example (import)
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -146,6 +148,15 @@ class ServiceStatus(str, Enum):
     #: silent passthrough on unknown states is precisely how the
     #: 2026-04-16 postmortem bug manifested.
     UNKNOWN = "UNKNOWN"
+
+    #: Service is declared in the compose file but is NOT present in
+    #: ``docker compose ps`` output. Happens when:
+    #:   - compose reaped a container after a failed ``up`` attempt
+    #:     (the 2026-04-20 evening api-no-env incident).
+    #:   - a dependent service never reached the ``created`` state
+    #:     because its ``depends_on: service_healthy`` chain broke.
+    #: Terminal — the stack is demonstrably incomplete.
+    MISSING = "MISSING"
 
 
 @dataclass(frozen=True)
@@ -294,25 +305,121 @@ def classify(service: dict[str, Any]) -> ClassificationResult:
 
 
 # ---------------------------------------------------------------------------
+# Compose file parser (service names only)
+# ---------------------------------------------------------------------------
+#
+# Kept stdlib-only on purpose — this module's portability promise
+# (runs unmodified on minitux, macOS, Azure VM) rules out pyyaml.
+# The compose file structure is constrained enough that a minimal
+# line-by-line parser is reliable for the one thing we need here:
+# the list of top-level keys inside the ``services:`` block.
+# ---------------------------------------------------------------------------
+
+#: Matches a service-name line at exactly 2 spaces of indentation.
+#: Service names in docker-compose are ASCII lowercase with dashes /
+#: underscores; they sit directly under the ``services:`` mapping.
+_SERVICE_NAME_RE: re.Pattern[str] = re.compile(r"^  ([a-z][a-z0-9_-]*):\s*$")
+
+
+def expected_services_from_compose(path: str | Path) -> list[str]:
+    """Return the sorted list of service names declared in a compose file.
+
+    Args:
+        path: filesystem path to a ``docker-compose*.yml`` file.
+
+    Returns:
+        Sorted list of service names. Sorted so downstream diffing
+        against ``docker compose ps`` output is order-independent.
+
+    Raises:
+        FileNotFoundError: if the path does not exist. Silent skip
+            would re-introduce the exact 2026-04-20 evening failure
+            class (evaluator running with no expected list, declaring
+            "healthy" when half the stack is absent).
+        ValueError: if the file exists but declares no services under
+            a ``services:`` key.
+
+    Parsing approach:
+        Stdlib-only (regex, not pyyaml) so the module's portability
+        promise holds on minitux and Azure VM images. We detect the
+        top-level ``services:`` block and then collect keys at exactly
+        2 spaces of indentation until the block ends. YAML anchors
+        and other top-level keys (``networks:``, ``volumes:``,
+        ``x-*:`` anchor definitions) are skipped correctly because
+        they sit at 0 indentation.
+
+    Example:
+        >>> names = expected_services_from_compose("docker-compose.prod.yml")
+        >>> "api" in names
+        True
+    """
+    p = Path(path) if not isinstance(path, Path) else path
+    if not p.is_file():
+        raise FileNotFoundError(f"compose file not found: {p}")
+
+    services: list[str] = []
+    in_services_block = False
+    with p.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            # Strip inline comments. YAML permits '#' at any column
+            # preceded by whitespace or at column 0; a '#' inside a
+            # quoted string would not trip this because service-name
+            # lines don't contain quoted strings.
+            line = raw_line.split("#", 1)[0].rstrip()
+            if not line:
+                continue
+            # Top-level key (no indentation) — either enters or exits
+            # the services block depending on which key this is.
+            if not line[0].isspace():
+                key = line.split(":", 1)[0].strip()
+                in_services_block = key == "services"
+                continue
+            if not in_services_block:
+                continue
+            m = _SERVICE_NAME_RE.match(line)
+            if m:
+                services.append(m.group(1))
+
+    if not services:
+        raise ValueError(
+            f"No services declared in {p}. Expected a top-level "
+            "'services:' mapping with at least one service."
+        )
+    return sorted(services)
+
+
+# ---------------------------------------------------------------------------
 # Aggregate verdict
 # ---------------------------------------------------------------------------
 
 
-def overall_verdict(services: list[dict[str, Any]]) -> OverallVerdict:
+def overall_verdict(
+    services: list[dict[str, Any]],
+    expected_services: list[str] | None = None,
+) -> OverallVerdict:
     """Aggregate classifications into a single exit-code/summary pair.
 
     Args:
         services: list of ``docker compose ps --format json`` objects
             (one per service).
+        expected_services: optional list of service names that MUST
+            be present. Any name in this list that does not appear
+            in ``services`` is classified as MISSING and is terminal.
+            This catches the 2026-04-20 evening failure class where
+            compose reaped a failed container and the evaluator only
+            saw the survivors.
 
     Returns:
         OverallVerdict with ``exit_code`` in {0, 1, 2}, a human-
-        readable ``summary`` string, and per-service details.
+        readable ``summary`` string, and per-service details
+        (including synthetic ServiceVerdict entries for MISSING
+        services so operators see the full picture).
 
     Decision table:
         - Empty services list → ``EXIT_FAILED`` (an empty stack cannot
           be healthy; specifically the 2026-04-16 minitux bug).
         - Any service is terminal-failed → ``EXIT_FAILED``.
+        - Any expected_services entry is missing → ``EXIT_FAILED``.
         - Else, any service is STARTING → ``EXIT_WAITING``.
         - Else → ``EXIT_HEALTHY``.
     """
@@ -332,8 +439,11 @@ def overall_verdict(services: list[dict[str, Any]]) -> OverallVerdict:
     any_starting = False
     terminal_names: list[str] = []
 
+    observed_names: set[str] = set()
+
     for svc in services:
         name = str(svc.get("Service") or svc.get("Name") or "<unknown>")
+        observed_names.add(name)
         result = classify(svc)
         verdicts.append(
             ServiceVerdict(
@@ -348,14 +458,36 @@ def overall_verdict(services: list[dict[str, Any]]) -> OverallVerdict:
         if result.status == ServiceStatus.STARTING:
             any_starting = True
 
+    # Missing-service detection (Tranche D). Synthesise a MISSING
+    # verdict entry for every expected-but-absent name so operators
+    # see the full picture in one pass.
+    missing_names: list[str] = []
+    if expected_services:
+        for name in expected_services:
+            if name not in observed_names:
+                missing_names.append(name)
+                verdicts.append(
+                    ServiceVerdict(
+                        name=name,
+                        status=ServiceStatus.MISSING,
+                        reason=(
+                            "declared in compose file but not in "
+                            "'docker compose ps' output — likely reaped after "
+                            "a failed start or never reached 'created' state"
+                        ),
+                    )
+                )
+        if missing_names:
+            any_terminal = True
+            terminal_names.append(
+                f"MISSING: {', '.join(sorted(missing_names))} (declared in compose but not running)"
+            )
+
     if any_terminal:
         return OverallVerdict(
             exit_code=EXIT_FAILED,
             summary=(
-                "FAILED — "
-                + str(len(terminal_names))
-                + " service(s) in terminal failure state: "
-                + "; ".join(terminal_names)
+                "FAILED — " + str(len(terminal_names)) + " issue(s): " + "; ".join(terminal_names)
             ),
             services=verdicts,
         )
@@ -484,8 +616,15 @@ def scan_logs_for_flag_parse_failure(log_text: str) -> list[str]:
 _LINE_FMT: str = "[smoke-eval] {status:<22} {name:<20} {reason}"
 
 
-def _print_verdict(verdict: OverallVerdict, stream: Any = sys.stdout) -> None:
-    """Emit human-readable verdict to ``stream``."""
+def _print_verdict(verdict: OverallVerdict, stream: Any = None) -> None:
+    """Emit human-readable verdict to ``stream`` (default: sys.stdout).
+
+    ``stream`` is resolved inside the function rather than bound at
+    definition time so pytest's ``capsys`` / monkeypatch.setattr on
+    ``sys.stdout`` works without a stream= override at the callsite.
+    """
+    if stream is None:
+        stream = sys.stdout
     for svc in verdict.services:
         print(
             _LINE_FMT.format(
@@ -498,15 +637,60 @@ def _print_verdict(verdict: OverallVerdict, stream: Any = sys.stdout) -> None:
     print(f"[smoke-eval] verdict: {verdict.summary}", file=stream)
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the argparse tree. Factored out so tests can introspect it."""
+    parser = argparse.ArgumentParser(
+        prog="smoke_health_eval.py",
+        description=(
+            "Evaluate docker-compose stack health from 'docker compose "
+            "ps --format json' output piped on stdin."
+        ),
+    )
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+
+    poll_p = sub.add_parser(
+        "poll",
+        help=(
+            "Read compose ps JSON on stdin, classify services, exit 0/1/2 (healthy/failed/waiting)."
+        ),
+    )
+    poll_p.add_argument(
+        "--compose-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to docker-compose*.yml. When provided, any service "
+            "declared in the compose file but missing from stdin is "
+            "classified as MISSING (terminal failure). Catches the "
+            "2026-04-20 evening scenario where compose reaped a failed "
+            "container and the evaluator only saw the survivors."
+        ),
+    )
+
+    sub.add_parser(
+        "scan-logs",
+        help=(
+            "Read container logs on stdin, exit 1 if a flag-parse failure "
+            "signature is detected (e.g. the 2026-04-20 cAdvisor bug)."
+        ),
+    )
+    return parser
+
+
 def main(argv: list[str]) -> int:
     """CLI entrypoint.
 
-    Subcommand:
-        poll    Read ``docker compose ps --format json`` from stdin,
+    Subcommands:
+        poll [--compose-file PATH]
+                Read ``docker compose ps --format json`` from stdin,
                 emit classifications, and exit with EXIT_HEALTHY (0),
                 EXIT_FAILED (1), or EXIT_WAITING (2) per the contract
-                at the top of this module. This is the mode the
-                Makefile poll loop calls.
+                at the top of this module. When ``--compose-file`` is
+                provided, any service declared in the compose file
+                but absent from stdin is classified as MISSING
+                (terminal). This is the mode the Makefile poll loop
+                calls.
         scan-logs
                 Read container logs from stdin, exit 0 if no flag-
                 parse failure signature is found, exit 1 otherwise.
@@ -515,27 +699,35 @@ def main(argv: list[str]) -> int:
     Returns:
         Process exit code. Never raises on well-formed input.
     """
-    if len(argv) < 2:
-        print(
-            "usage: smoke_health_eval.py {poll|scan-logs}",
-            file=sys.stderr,
-        )
-        return 2  # EX_USAGE-ish; caller distinguishes from STARTING by message.
+    parser = _build_arg_parser()
+    try:
+        args = parser.parse_args(argv[1:])
+    except SystemExit as exc:
+        # argparse exits 2 on bad args; preserve that semantics.
+        return int(exc.code) if exc.code is not None else 2
 
-    subcmd = argv[1]
-
-    if subcmd == "poll":
+    if args.subcommand == "poll":
+        expected: list[str] | None = None
+        if args.compose_file is not None:
+            try:
+                expected = expected_services_from_compose(args.compose_file)
+            except (FileNotFoundError, ValueError) as exc:
+                print(
+                    f"[smoke-eval] --compose-file error: {exc}",
+                    file=sys.stderr,
+                )
+                return EXIT_FAILED
         text = sys.stdin.read()
         try:
             services = parse_ps_ndjson(text)
         except ValueError as exc:
             print(f"[smoke-eval] malformed input: {exc}", file=sys.stderr)
             return EXIT_FAILED
-        verdict = overall_verdict(services)
+        verdict = overall_verdict(services, expected_services=expected)
         _print_verdict(verdict)
         return verdict.exit_code
 
-    if subcmd == "scan-logs":
+    if args.subcommand == "scan-logs":
         text = sys.stdin.read()
         hits = scan_logs_for_flag_parse_failure(text)
         if hits:
@@ -548,7 +740,9 @@ def main(argv: list[str]) -> int:
             return EXIT_FAILED
         return EXIT_HEALTHY
 
-    print(f"[smoke-eval] unknown subcommand: {subcmd}", file=sys.stderr)
+    # argparse with required=True on subparsers prevents reaching here,
+    # but keep a fail-fast for defence-in-depth.
+    print(f"[smoke-eval] unknown subcommand: {args.subcommand}", file=sys.stderr)
     return 2
 
 

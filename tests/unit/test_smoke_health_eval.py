@@ -426,3 +426,217 @@ def test_log_scanner_ignores_legitimate_help_word(mod: Any) -> None:
     """Do not false-positive on the word 'usage' in structured log lines."""
     sample = '{"level":"INFO","msg":"CPU usage normal","ts":"2026-04-20T12:00:00Z"}'
     assert not mod.scan_logs_for_flag_parse_failure(sample)
+
+
+# ---------------------------------------------------------------------------
+# Tranche D — Missing-service detection (2026-04-20 evening)
+# ---------------------------------------------------------------------------
+#
+# Background:
+#
+# When the 2026-04-20 evening deploy on minitux ran `docker compose up -d`
+# without a populated .env, the api container exited with code 1 at
+# lifespan startup (no POSTGRES_PASSWORD). Compose removed the failed
+# container, so `docker compose ps --format json` showed only the 7
+# services that were running. The evaluator saw 7 services all in
+# healthy-or-starting states and returned EXIT_WAITING — completely
+# missing that 4 services were not running at all.
+#
+# The fix is to compare the list of services observed on stdin against
+# the list of services declared in the compose file. Any expected-but-
+# absent service is classified as MISSING → terminal failure.
+# ---------------------------------------------------------------------------
+
+
+def _write_compose_fixture(tmp_path: Any, service_names: list[str]) -> Any:
+    """Write a minimal valid compose file containing the given service names."""
+    lines = ["services:"]
+    for name in service_names:
+        lines += [f"  {name}:", "    image: example/dummy:v1", ""]
+    path = tmp_path / "docker-compose.prod.yml"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_expected_services_from_compose_reads_service_names(mod: Any, tmp_path: Any) -> None:
+    """``expected_services_from_compose(path)`` returns the sorted service list."""
+    path = _write_compose_fixture(tmp_path, ["api", "postgres", "redis"])
+    names = mod.expected_services_from_compose(path)
+    assert sorted(names) == ["api", "postgres", "redis"]
+
+
+def test_expected_services_from_compose_raises_on_missing_file(mod: Any, tmp_path: Any) -> None:
+    """Non-existent compose path raises FileNotFoundError (no silent skip)."""
+    bogus = tmp_path / "does-not-exist.yml"
+    with pytest.raises(FileNotFoundError):
+        mod.expected_services_from_compose(bogus)
+
+
+def test_expected_services_from_compose_raises_on_missing_services_key(
+    mod: Any, tmp_path: Any
+) -> None:
+    """A compose file without a ``services:`` mapping raises ValueError.
+
+    Silent return of an empty list would reintroduce the exact
+    2026-04-20 failure mode: evaluator has nothing to compare against
+    and declares the stack 'healthy' when it is in fact absent.
+    """
+    path = tmp_path / "empty.yml"
+    path.write_text("version: '3.9'\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        mod.expected_services_from_compose(path)
+
+
+def test_missing_service_status_exists(mod: Any) -> None:
+    """The new ServiceStatus.MISSING member is present and stringifies."""
+    assert hasattr(mod.ServiceStatus, "MISSING")
+    assert mod.ServiceStatus.MISSING.value == "MISSING"
+
+
+def test_overall_verdict_flags_missing_services_as_terminal_failure(
+    mod: Any,
+) -> None:
+    """Services declared in compose but absent from stdin are terminal-fail.
+
+    Regression guard for the 2026-04-20 evening minitux failure.
+    Before Tranche D, this scenario would return EXIT_WAITING because
+    the 5 visible services were all healthy-or-starting.
+    """
+    observed = [
+        _svc("alertmanager", state="running", health="healthy"),
+        _svc("postgres", state="running", health="healthy"),
+        _svc("redis", state="running", health="healthy"),
+        _svc("cadvisor", state="running", health="starting"),
+        _svc("node-exporter", state="running", health="healthy"),
+    ]
+    expected = [
+        "alertmanager",
+        "api",  # missing (the one that actually crashed)
+        "cadvisor",
+        "nginx",  # missing (blocked on api)
+        "node-exporter",
+        "postgres",
+        "prometheus",  # missing (blocked on api)
+        "redis",
+        "web",  # missing (blocked on api)
+    ]
+    verdict = mod.overall_verdict(observed, expected_services=expected)
+    assert verdict.exit_code == EXIT_FAILED, (
+        f"verdict must be FAILED when services are missing; got {verdict.summary!r}"
+    )
+    # The summary must name every missing service so the operator
+    # sees the full picture in one line.
+    for missing in ("api", "nginx", "prometheus", "web"):
+        assert missing in verdict.summary, (
+            f"missing service {missing!r} not surfaced in verdict summary: {verdict.summary!r}"
+        )
+
+
+def test_overall_verdict_no_false_missing_when_expected_matches_observed(
+    mod: Any,
+) -> None:
+    """All-healthy with expected_services matching observed is still HEALTHY."""
+    services = [
+        _svc("api", state="running", health="healthy"),
+        _svc("postgres", state="running", health="healthy"),
+    ]
+    verdict = mod.overall_verdict(services, expected_services=["api", "postgres"])
+    assert verdict.exit_code == EXIT_HEALTHY
+
+
+def test_overall_verdict_ignores_expected_services_when_none(mod: Any) -> None:
+    """Backwards compatibility — evaluator still works without expected list.
+
+    Callers that do not pass expected_services (the existing Makefile
+    before Tranche D wire-up) must continue to get their previous
+    behaviour unchanged.
+    """
+    services = [
+        _svc("api", state="running", health="healthy"),
+    ]
+    # No expected_services arg at all:
+    verdict = mod.overall_verdict(services)
+    assert verdict.exit_code == EXIT_HEALTHY
+    # Explicit None:
+    verdict2 = mod.overall_verdict(services, expected_services=None)
+    assert verdict2.exit_code == EXIT_HEALTHY
+
+
+def test_overall_verdict_extra_observed_service_is_not_penalised(
+    mod: Any,
+) -> None:
+    """An observed service not in the expected list is fine.
+
+    A compose file might legitimately include services not in the
+    expected list (operator-added ad-hoc tools, for example). We
+    only fail on MISSING, not on EXTRA.
+    """
+    observed = [
+        _svc("api", state="running", health="healthy"),
+        _svc("postgres", state="running", health="healthy"),
+        _svc("someone-added-this", state="running", health="healthy"),
+    ]
+    verdict = mod.overall_verdict(observed, expected_services=["api", "postgres"])
+    assert verdict.exit_code == EXIT_HEALTHY
+
+
+# ---------------------------------------------------------------------------
+# CLI integration — --compose-file flag
+# ---------------------------------------------------------------------------
+
+
+def test_cli_poll_accepts_compose_file_flag_and_reports_missing(
+    mod: Any, tmp_path: Any, monkeypatch: Any, capsys: Any
+) -> None:
+    """``smoke_health_eval.py poll --compose-file <path>`` fails on missing services."""
+    # Fixture compose file declares 3 services.
+    compose = _write_compose_fixture(tmp_path, ["api", "postgres", "redis"])
+    # But stdin only reports 2 — api is missing.
+    ndjson = "\n".join(
+        [
+            json.dumps(_svc("postgres", state="running", health="healthy")),
+            json.dumps(_svc("redis", state="running", health="healthy")),
+        ]
+    )
+    monkeypatch.setattr("sys.stdin", _StringIO(ndjson))
+    exit_code = mod.main(["smoke_health_eval.py", "poll", "--compose-file", str(compose)])
+    assert exit_code == EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "api" in out, f"CLI output must name missing 'api': {out!r}"
+    assert "MISSING" in out, f"CLI output must show MISSING status: {out!r}"
+
+
+def test_cli_poll_without_compose_file_flag_is_unchanged(
+    mod: Any, monkeypatch: Any, capsys: Any
+) -> None:
+    """Back-compat: absent --compose-file behaves like before Tranche D."""
+    ndjson = json.dumps(_svc("api", state="running", health="healthy"))
+    monkeypatch.setattr("sys.stdin", _StringIO(ndjson))
+    exit_code = mod.main(["smoke_health_eval.py", "poll"])
+    assert exit_code == EXIT_HEALTHY
+
+
+def test_cli_poll_rejects_nonexistent_compose_file(
+    mod: Any, tmp_path: Any, monkeypatch: Any, capsys: Any
+) -> None:
+    """A bogus compose path is a fail-fast error, not a silent skip."""
+    monkeypatch.setattr("sys.stdin", _StringIO("{}"))
+    bogus = tmp_path / "nope.yml"
+    exit_code = mod.main(["smoke_health_eval.py", "poll", "--compose-file", str(bogus)])
+    assert exit_code == EXIT_FAILED
+
+
+class _StringIO:
+    """Minimal stdin-replacement that read() drains in one call.
+
+    The ``io.StringIO`` class would work too, but ``read()`` plus
+    ``readline()`` semantics differ subtly across Python versions in
+    monkeypatch.setattr. A tiny purpose-built class eliminates
+    any surprise.
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def read(self) -> str:
+        return self._text

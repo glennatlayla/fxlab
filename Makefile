@@ -171,8 +171,9 @@ install-smoke:  ## Spin up prod compose, verify health, tear down
 	@elapsed=0; \
 	while [ $$elapsed -lt $(SMOKE_TIMEOUT) ]; do \
 		set +e; \
-		$(SMOKE_COMPOSE) ps --format json 2>/dev/null | \
-			python3 scripts/smoke_health_eval.py poll; \
+		$(SMOKE_COMPOSE) ps --all --format json 2>/dev/null | \
+			python3 scripts/smoke_health_eval.py poll \
+				--compose-file docker-compose.prod.yml; \
 		verdict=$$?; \
 		set -e; \
 		if [ $$verdict -eq 0 ]; then \
