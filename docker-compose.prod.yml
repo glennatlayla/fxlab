@@ -79,6 +79,12 @@ services:
     # smoke_health_eval State=restarting detection, this is the shape
     # the install-smoke path exercises end-to-end.
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -147,6 +153,12 @@ services:
       retries: 5
       start_period: 15s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -189,6 +201,12 @@ services:
       retries: 3
       start_period: 15s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -272,6 +290,12 @@ services:
       retries: 5
       start_period: 10s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -311,6 +335,12 @@ services:
       retries: 5
       start_period: 5s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -365,6 +395,12 @@ services:
       retries: 3
       start_period: 30s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -416,6 +452,12 @@ services:
       retries: 3
       start_period: 20s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -433,6 +475,14 @@ services:
   node-exporter:
     image: prom/node-exporter:v1.7.0
     container_name: fxlab-node-exporter
+    # read_only (2026-04-20 Tranche C): node-exporter reads host
+    # metrics via the /host/proc, /host/sys, /rootfs read-only bind
+    # mounts; it does not need to write to its own rootfs. Making
+    # the rootfs read-only prevents an attacker who achieves RCE
+    # from modifying the binary / libraries / config in place.
+    # The --path.* flags already point at the bind mounts, so no
+    # tmpfs is needed for runtime state.
+    read_only: true
     expose:
       - "9100"
     # N2 remediation (2026-04-15): node-exporter v1.7.0 enables ~44
@@ -489,6 +539,12 @@ services:
       # that compounds with scrape-side RSTs.
       start_period: 30s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -579,6 +635,12 @@ services:
       retries: 3
       start_period: 30s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -623,6 +685,12 @@ services:
     # (State=running + Health='' = HEALTHY) which exactly models
     # "service is up but declares no healthcheck".
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
@@ -659,6 +727,12 @@ services:
       retries: 3
       start_period: 10s
     restart: "on-failure:3"
+    # Block privilege escalation via any setuid binary inside the
+    # container image. A cheap, blanket security win (2026-04-20
+    # Tranche C) that only breaks services that legitimately depend
+    # on setuid — none of ours do.
+    security_opt:
+      - "no-new-privileges:true"
     logging: *default-logging
     networks:
       - fxlab-net
