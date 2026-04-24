@@ -38,6 +38,7 @@
  */
 
 import { apiClient } from "@/api/client";
+import { randomUUID } from "@/utils/uuid";
 
 /**
  * Enumeration of audit event types supported by the backend.
@@ -108,7 +109,7 @@ export async function logAuditEvent(
     event,
     actor,
     timestamp: new Date().toISOString(),
-    correlationId: crypto.randomUUID(),
+    correlationId: randomUUID(),
     ...(metadata && { metadata }),
   };
 

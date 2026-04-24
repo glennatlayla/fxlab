@@ -20,6 +20,7 @@
  */
 
 import axios from "axios";
+import { randomUUID } from "@/utils/uuid";
 
 // Production default: "/api" (relative). The nginx edge proxy and the
 // frontend's own nginx both route /api/* → fxlab-api:8000, so a relative
@@ -75,7 +76,7 @@ apiClient.interceptors.request.use((config) => {
 
   const existing = config.headers[CORRELATION_HEADER] ?? config.headers[CORRELATION_HEADER_LEGACY];
   if (!existing) {
-    config.headers[CORRELATION_HEADER] = crypto.randomUUID();
+    config.headers[CORRELATION_HEADER] = randomUUID();
   }
 
   // Inject client source for audit tracking (web-desktop for now, will be web-mobile when mobile is detected)

@@ -31,6 +31,7 @@
  */
 
 import { apiClient } from "@/api/client";
+import { randomUUID } from "@/utils/uuid";
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -114,7 +115,7 @@ export class RunLogger {
    *   correlationId: UUID for distributed tracing. Auto-generated if omitted.
    */
   constructor(correlationId?: string) {
-    this.correlationId = correlationId ?? crypto.randomUUID();
+    this.correlationId = correlationId ?? randomUUID();
   }
 
   // ── Polling events ──────────────────────────────────────────────────

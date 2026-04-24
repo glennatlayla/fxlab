@@ -43,6 +43,7 @@ import {
 import { useAuth } from "@/auth/useAuth";
 import { useChartEngine } from "@/hooks/useChartEngine";
 import { pnlApi, PnlNotFoundError, PnlAuthError, PnlValidationError } from "@/features/pnl/api";
+import { randomUUID } from "@/utils/uuid";
 import type {
   PnlSummary,
   PnlTimeseriesPoint,
@@ -444,7 +445,7 @@ export default function StrategyPnL() {
 
     setLoading(true);
     setError(null);
-    const correlationId = crypto.randomUUID();
+    const correlationId = randomUUID();
 
     try {
       const [summaryData, timeseriesData, attributionData] = await Promise.all([

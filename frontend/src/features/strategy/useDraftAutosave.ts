@@ -42,6 +42,7 @@ import {
   BACKEND_SYNC_INTERVAL_MS,
 } from "./constants";
 import type { StrategyDraftFormData, StrategyWizardStep } from "@/types/strategy";
+import { randomUUID } from "@/utils/uuid";
 
 // ---------------------------------------------------------------------------
 // Session ID — stable per browser tab
@@ -51,7 +52,7 @@ let _sessionId: string | null = null;
 
 function getSessionId(): string {
   if (!_sessionId) {
-    _sessionId = crypto.randomUUID();
+    _sessionId = randomUUID();
   }
   return _sessionId;
 }
