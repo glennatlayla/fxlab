@@ -13,7 +13,8 @@ PRECOMMIT   := .venv/bin/pre-commit
         test test-unit test-integration test-acceptance \
         test-shell compose-check install-smoke \
         coverage quality ci clean \
-        verify minitux-ps minitux-logs minitux-diag
+        verify minitux-ps minitux-logs minitux-diag \
+        admin-reset
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -346,3 +347,64 @@ minitux-diag:  ## Read-only ssh: diagnostic bundle (ps + every service's tail) (
 	@echo ""
 	@echo "--- smoke-eval verdict ---"
 	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) ps --all --format json | python3 $(MINITUX_SMOKE_EVAL) poll --compose-file $(MINITUX_COMPOSE_FILE) || true"
+
+# ---------------------------------------------------------------------------
+# admin-reset — password reset via the services/api/cli/reset_password CLI
+# ---------------------------------------------------------------------------
+# Tranche I (2026-04-24): surfaces a single approved operator entrypoint
+# for resetting an admin password. Wraps the existing
+# `docker compose exec api python -m services.api.cli.reset_password`
+# invocation so the operator command is stable, validated, and tested.
+#
+# CLAUDE.md §17 lists this under "Claude MUST ask explicit operator
+# approval before" — it mutates user state in postgres and the CLI
+# emits a plaintext password to stdout. Claude never invokes it
+# autonomously; the operator types it themselves when needed.
+#
+# Usage:
+#   make admin-reset EMAIL=admin@fxlab.io                      # local
+#   make admin-reset EMAIL=admin@fxlab.io HOST=minitux         # via ssh
+#
+# Safety envelope:
+#   - EMAIL is required; missing EMAIL fails with a usage message.
+#   - EMAIL is validated against an RFC-shape regex BEFORE it reaches
+#     docker/ssh. Shell metacharacters are rejected (prevents remote
+#     command injection through `EMAIL='a@b; rm -rf /'`).
+#   - No sudo in the recipe.
+#   - Locked by tests/shell/test_make_admin_reset.sh.
+
+# Local-compose file path. Same path the install-smoke target uses.
+ADMIN_RESET_COMPOSE    ?= docker-compose.prod.yml
+# Pattern permitted for EMAIL: basic RFC-5322 subset sufficient for
+# fxlab admin emails. Rejects whitespace, quotes, shell metachars
+# (;, &, |, $, `, (, ), <, >, \, etc.).
+_VALID_EMAIL_RE        := ^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$$
+
+admin-reset:  ## Reset an admin password via the reset_password CLI (requires EMAIL=; HOST=local|minitux)
+	@if [ -z "$(EMAIL)" ]; then \
+		echo "usage: make admin-reset EMAIL=<email> [HOST=local|minitux]"; \
+		echo ""; \
+		echo "Resets an admin user's password via the services/api/cli/"; \
+		echo "reset_password CLI. Prints the new password ONCE — save it"; \
+		echo "immediately."; \
+		echo ""; \
+		echo "HOST=local   (default) runs against the stack on this host"; \
+		echo "             (dev Mac or wherever \`docker compose -f"; \
+		echo "             $(ADMIN_RESET_COMPOSE) ps\` returns the api container)."; \
+		echo "HOST=minitux runs via ssh against the minitux deploy at"; \
+		echo "             $(MINITUX_INSTALL_DIR) (override with"; \
+		echo "             MINITUX_SSH_ALIAS= / MINITUX_INSTALL_DIR=)."; \
+		exit 2; \
+	fi
+	@echo "$(EMAIL)" | grep -qE '$(_VALID_EMAIL_RE)' || { \
+		echo "error: EMAIL='$(EMAIL)' is not a valid email address."; \
+		echo "Allowed shape: local@domain.tld (letters, digits, ._+- in local part;"; \
+		echo "letters, digits, .- in domain; 2+ letter TLD)."; \
+		echo "Shell metacharacters rejected to prevent remote command injection."; \
+		exit 2; \
+	}
+	@if [ "$(HOST)" = "minitux" ]; then \
+		ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) exec -T api python -m services.api.cli.reset_password --email $(EMAIL)"; \
+	else \
+		docker compose -f $(ADMIN_RESET_COMPOSE) exec -T api python -m services.api.cli.reset_password --email $(EMAIL); \
+	fi

@@ -1905,6 +1905,29 @@ print_summary() {
         echo ""
         echo -e "${YELLOW}  IMPORTANT: Back up your .env file — it contains production secrets.${NC}"
         echo ""
+    else
+        # --refresh path (Tranche I 2026-04-24): refresh preserves the
+        # existing admin, so there's no fresh credential block to show.
+        # But the complete silence observed on 2026-04-24 left the
+        # operator wondering how to get into the system. Surface the
+        # approved password-reset entrypoint instead — same single-
+        # entrypoint shape as the rest of the operator workflow.
+        local admin_email="admin@fxlab.io"
+        if [[ -f "${FXLAB_HOME}/.env" ]]; then
+            local env_admin
+            env_admin="$(grep -E '^FXLAB_ADMIN_EMAIL=' "${FXLAB_HOME}/.env" 2>/dev/null \
+                | head -1 | cut -d= -f2- | tr -d '\"' | tr -d "'")"
+            if [[ -n "$env_admin" ]]; then
+                admin_email="$env_admin"
+            fi
+        fi
+        echo -e "  ${BOLD}Admin access:${NC}"
+        echo "    Email:    ${admin_email}"
+        echo "    (password preserved from the original fresh install)"
+        echo ""
+        echo "    If you have lost the password, reset it via the approved entrypoint:"
+        echo "      make admin-reset EMAIL=${admin_email}"
+        echo ""
     fi
 }
 

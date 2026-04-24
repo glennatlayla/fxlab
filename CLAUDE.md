@@ -924,6 +924,12 @@ The envelope is enforced by two gates:
 - `make install-smoke` (spins up the full local compose stack — mutates the
   dev Mac's docker daemon). Safe but heavy; the operator should know a smoke
   is about to run.
+- `make admin-reset EMAIL=<...> [HOST=local|minitux]` (Tranche I 2026-04-24).
+  Mutates user state in postgres and emits a plaintext password to stdout.
+  Claude must never invoke this autonomously; the operator types it themselves
+  when needed. Locked safe by tests/shell/test_make_admin_reset.sh
+  (EMAIL validation, shell-metachar rejection, no sudo, no mutating docker
+  ops).
 - Adding new infrastructure dependencies (new cloud provider, new third-party
   service, new MCP server). See `feedback_ask_before_infra_choices` memory.
 - Writing anything outside the fxlab folder or `/sessions/.../mnt/.auto-memory/`.
