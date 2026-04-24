@@ -437,6 +437,132 @@ check_resources() {
     log INFO "Free disk: ${free_disk_gb} GB (minimum: ${MIN_DISK_GB} GB)"
 }
 
+# ---------------------------------------------------------------------------
+# Port-verification helpers (Tranche E — 2026-04-24 hardening)
+# ---------------------------------------------------------------------------
+#
+# Background — the 2026-04-24 minitux install failure: teardown_existing
+# logged "Teardown complete — ports and volumes are free." and then
+# check_ports immediately failed with "Port 80 is already in use by
+# docker-proxy". The teardown message was a lie: docker compose down
+# only removes services in the current compose project, so orphan
+# containers from previous projects, stopped-but-not-reaped containers
+# still publishing the port, and stale docker-proxy processes are all
+# invisible to it.
+#
+# _assert_ports_actually_free is the defense-in-depth gate that must
+# succeed before "ports are free" can be truthfully claimed. It is
+# called at the end of teardown_existing BEFORE the success log line
+# so that message is honest.
+# ---------------------------------------------------------------------------
+
+# _port_is_bound <port>
+#     Exit 0 if something is listening on <port>, 1 otherwise.
+#     Tries ss first (more reliable on modern Linux), falls back to netstat.
+_port_is_bound() {
+    local port="$1"
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        return 0
+    fi
+    if netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
+        return 0
+    fi
+    return 1
+}
+
+# _port_holder_process <port>
+#     Emit the process descriptor for whatever is listening on <port>.
+#     Typical outputs:
+#         users:(("docker-proxy",pid=12345,fd=7))
+#         users:(("apache2",pid=6789,fd=4))
+#     Returns "unknown" if we cannot determine the holder.
+_port_holder_process() {
+    local port="$1"
+    local info
+    info="$(ss -tlnp 2>/dev/null | awk -v p=":${port} " '$0 ~ p {print $NF}' | head -1)"
+    if [[ -z "$info" ]]; then
+        info="$(netstat -tlnp 2>/dev/null | awk -v p=":${port} " '$0 ~ p {print $NF}' | head -1)"
+    fi
+    echo "${info:-unknown}"
+}
+
+# _containers_publishing_port <port>
+#     Emit one line per container (running OR stopped) publishing <port>,
+#     formatted as "<container_id> <container_name>". Works across all
+#     compose projects, not just fxlab — orphan containers from prior
+#     projects that happen to still be holding port 80 show up here.
+_containers_publishing_port() {
+    local port="$1"
+    docker ps -a --filter "publish=${port}" \
+        --format '{{.ID}} {{.Names}}' 2>/dev/null || true
+}
+
+# _assert_ports_actually_free <port1> [<port2> ...]
+#     Defense-in-depth verification used after teardown. Guarantees the
+#     ports are actually free before the caller can claim so.
+#
+#     Per-port behaviour:
+#       1. If the port is already free → log confirmation and continue.
+#       2. If a container is still publishing the port, force-remove it
+#          (logged by name).
+#       3. Retry up to 5 times with 1s backoff — the docker daemon
+#          needs a moment to release the proxy after container removal.
+#       4. If the port is STILL bound, identify the holder via ss and
+#          fail loudly with a specific, actionable error:
+#            - docker-proxy → tell operator to `systemctl restart docker`
+#              (this is the stale-proxy daemon bug).
+#            - Any other binary → name the binary and tell the operator
+#              to stop that service (apache2, system nginx, caddy, etc.).
+#     Never retries on daemon/host-binary failures — retry would just
+#     delay the inevitable fail() with the same message.
+_assert_ports_actually_free() {
+    local ports=("$@")
+    if [[ ${#ports[@]} -eq 0 ]]; then
+        fail "_assert_ports_actually_free called with no ports."
+    fi
+
+    local max_attempts=5
+    local port
+    for port in "${ports[@]}"; do
+        local attempt=0
+        while (( attempt < max_attempts )); do
+            if ! _port_is_bound "$port"; then
+                break
+            fi
+
+            # Port is bound. Try to remove any container publishing it.
+            local holders
+            holders="$(_containers_publishing_port "$port")"
+            if [[ -n "$holders" ]]; then
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    local cid="${line%% *}"
+                    local cname="${line#* }"
+                    log INFO "Removing container ${cname} (${cid:0:12}) that is still publishing port ${port}..."
+                    docker rm -f "$cid" >/dev/null 2>>"$LOG_FILE" || true
+                done <<< "$holders"
+            fi
+
+            attempt=$((attempt + 1))
+            if (( attempt < max_attempts )); then
+                sleep 1
+            fi
+        done
+
+        # Final verification.
+        if _port_is_bound "$port"; then
+            local holder
+            holder="$(_port_holder_process "$port")"
+            if [[ "$holder" == *docker-proxy* ]]; then
+                fail "Port ${port} is held by a stale docker-proxy (${holder}) after cleanup. This is a docker daemon leak. Run: sudo systemctl restart docker"
+            else
+                fail "Port ${port} is held by host process ${holder} after teardown. Stop that service (or set FXLAB_HTTP_PORT / FXLAB_HTTPS_PORT to different values in your environment) before re-running install.sh."
+            fi
+        fi
+        log INFO "Port ${port} is confirmed free."
+    done
+}
+
 check_ports() {
     log STEP "Checking port availability..."
 
@@ -1164,6 +1290,14 @@ teardown_existing() {
         log INFO "Removing old .env (fresh secrets will be generated)."
         rm -f "${FXLAB_HOME}/.env"
     fi
+
+    # --- Verify ports are ACTUALLY free (Tranche E 2026-04-24) ---
+    # docker compose down only removes services in the current project.
+    # Orphan containers, stale docker-proxy, or host binaries still on
+    # the ports slip past it. The guard below removes orphan containers
+    # publishing our ports and fails loudly with an actionable error
+    # if a host binary is holding them.
+    _assert_ports_actually_free "$FXLAB_HTTP_PORT" "$FXLAB_HTTPS_PORT"
 
     log INFO "Teardown complete — ports and volumes are free."
 }
