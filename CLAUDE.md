@@ -874,3 +874,94 @@ When generating a distilled/compressed workplan derivative:
 
 **These six rules are the structural guarantee that a compressed context cannot silently
 produce an incomplete implementation.**
+
+
+---
+
+## 17. CLAUDE OPERATIONAL ENVELOPE — WHAT CLAUDE MAY AND MAY NOT DO
+
+This section documents the contract between Claude (running in the Cowork sandbox
+on the operator's dev Mac) and the operator. It exists so neither party has to
+guess what Claude is allowed to invoke without explicit approval.
+
+The envelope is enforced by two gates:
+
+1. **Test-locked Makefile targets.** The `verify`, `minitux-ps`, `minitux-logs`,
+   and `minitux-diag` targets are the ONLY operations Claude may invoke against
+   remote state autonomously. `tests/shell/test_make_minitux_safety.sh` asserts
+   these recipes contain no mutating commands (sudo, docker rm/stop/kill/restart,
+   systemctl, etc.). If anyone edits one of those targets to mutate remote state,
+   the shell test fails.
+
+2. **This written contract.** Operators reviewing Claude's actions should be
+   able to check any command Claude ran against the allowlist below and know
+   whether Claude exceeded scope.
+
+### Claude MAY invoke autonomously (no operator approval needed)
+
+- Any read-only filesystem operation in the mounted fxlab folder (Read, Grep,
+  Glob, `ls`, `cat`, `wc`, `git status`, `git log`, `git diff`, `git show`).
+- The `verify` target (`make verify`) — local pre-commit gate: format-check,
+  lint, test-unit, compose-check. Runs only in the Mac sandbox. Does not touch
+  the network, docker daemon, or minitux.
+- Any individual local test command that `verify` chains (`make format-check`,
+  `make lint`, `make test-unit`, `make test-shell`, `make compose-check`,
+  `pytest tests/unit/...`, `npx vitest run <file>`).
+- The `minitux-ps`, `minitux-logs SERVICE=<svc>`, and `minitux-diag` targets.
+  These run read-only ssh against minitux and fetch `docker compose ps` or
+  `docker compose logs`. Never mutate remote state.
+- Creating, editing, and archiving files inside the fxlab folder and inside
+  `.archive/`. Always archive before modifying (see §1 prime directive).
+- Writing to auto-memory files under `/sessions/.../mnt/.auto-memory/`.
+
+### Claude MUST ask explicit operator approval before
+
+- `git push` of any kind, to any branch. The operator reviews commits before
+  they leave the dev box.
+- `git rebase`, `git reset --hard`, `git checkout --`, `git clean`, or any
+  destructive git operation. Even when the operator asked for a fix, rewriting
+  history or discarding work requires explicit confirmation.
+- `make install-smoke` (spins up the full local compose stack — mutates the
+  dev Mac's docker daemon). Safe but heavy; the operator should know a smoke
+  is about to run.
+- Adding new infrastructure dependencies (new cloud provider, new third-party
+  service, new MCP server). See `feedback_ask_before_infra_choices` memory.
+- Writing anything outside the fxlab folder or `/sessions/.../mnt/.auto-memory/`.
+
+### Claude MUST NOT under any circumstance
+
+- Invoke `sudo` anywhere. The dev Mac operator runs sudo operations themselves.
+- Open a shell on minitux or any non-local host, or run any mutating command
+  on minitux. The `minitux-*` Makefile targets are the ONLY remote path, and
+  they are read-only.
+- Execute `docker rm`, `docker stop`, `docker kill`, `docker restart`,
+  `docker rmi`, `docker volume rm`, `docker system prune`, or `docker exec`
+  against the Mac's docker daemon. Only `make install-smoke` may touch the
+  docker daemon, and only via docker compose's own lifecycle (up / down).
+- Modify `.env` files anywhere (production secrets). Generation of .env is
+  install.sh's job; Claude must not hand-edit secret values.
+- Suggest manual docker/ss/systemctl commands to the operator as a workaround
+  for a failing script. See `feedback_fix_scripts_not_work_around_them`
+  memory — patch the script, don't route around it.
+
+### When a scenario is not covered by the above
+
+Claude should ask the operator rather than guess. The envelope is deliberately
+conservative; it can be widened incrementally as trust accumulates, but an
+accidental breach erodes that trust faster than conservative asking slows the
+work down.
+
+### Prerequisites the operator must configure once
+
+For the `minitux-*` targets to work, the operator needs an SSH alias for the
+minitux host in `~/.ssh/config`, e.g.:
+
+```
+Host minitux
+    HostName 192.168.1.5
+    User gjohnson
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Override the alias via `make minitux-ps MINITUX_SSH_ALIAS=other-host` if the
+canonical alias is named differently on a given operator's machine.

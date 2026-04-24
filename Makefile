@@ -12,7 +12,8 @@ PRECOMMIT   := .venv/bin/pre-commit
 .PHONY: help install-dev hooks format format-check lint type-check \
         test test-unit test-integration test-acceptance \
         test-shell compose-check install-smoke \
-        coverage quality ci clean
+        coverage quality ci clean \
+        verify minitux-ps minitux-logs minitux-diag
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -265,3 +266,76 @@ clean:  ## Remove build artefacts and caches
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	rm -rf .coverage htmlcov .pytest_cache .mypy_cache .ruff_cache
+
+# ---------------------------------------------------------------------------
+# Claude operational envelope (Tranche G — 2026-04-24)
+# ---------------------------------------------------------------------------
+# The targets below are the ONLY operations Claude (running in the
+# Cowork sandbox on the dev Mac) is permitted to invoke autonomously
+# against remote state. They are strictly read-only: `ssh` is used
+# only to fetch diagnostic output, never to mutate. The shell tests
+# in tests/shell/test_make_minitux_safety.sh lock this envelope and
+# FAIL if any of these recipes is modified to include a mutating
+# command (sudo, docker rm/stop/kill/restart, systemctl, etc.).
+#
+# See CLAUDE.md §17 for the full capability contract.
+# ---------------------------------------------------------------------------
+
+# verify — fast local pre-commit gate. Safe for Claude to run after
+# every code change without operator approval. Chains the same checks
+# the pre-commit hook enforces so regressions are caught before they
+# reach a branch push.
+verify: format-check lint test-unit compose-check  ## Run local pre-commit gate (safe for Claude to invoke autonomously)
+
+# ---------------------------------------------------------------------------
+# minitux read-only diagnostics
+# ---------------------------------------------------------------------------
+# Prerequisites: the operator must have an SSH alias for the minitux
+# host configured in ~/.ssh/config. Default alias is "minitux".
+# Override with MINITUX_SSH_ALIAS=... on the make command line.
+#
+#   Host minitux
+#       HostName 192.168.1.5
+#       User gjohnson
+#       IdentityFile ~/.ssh/id_ed25519
+#
+# Connection is read-only — these targets never invoke sudo, and the
+# remote docker commands are strictly ps / logs (no write subcommands).
+MINITUX_SSH_ALIAS      ?= minitux
+MINITUX_COMPOSE_FILE   ?= ~/Documents/Coding_Projects/fxlab/docker-compose.prod.yml
+MINITUX_LOG_TAIL       ?= 100
+
+# Allowed SERVICE values — docker-compose service-name convention:
+# lowercase letters, digits, dashes, underscores. Rejects shell
+# metachars (;, |, &, `, $, etc.) that could enable remote shell
+# injection through the SERVICE= make variable.
+_VALID_SERVICE_NAME_RE := ^[a-z][a-z0-9_-]*$$
+
+minitux-ps:  ## Read-only ssh: docker compose ps on minitux (Claude-safe)
+	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) ps --format json"
+
+minitux-logs:  ## Read-only ssh: docker compose logs --tail=N SERVICE (requires SERVICE=)
+	@if [ -z "$(SERVICE)" ]; then \
+		echo "usage: make minitux-logs SERVICE=<service-name> [MINITUX_LOG_TAIL=N]"; \
+		echo ""; \
+		echo "SERVICE must be one of the services declared in docker-compose.prod.yml"; \
+		echo "(e.g. api, postgres, redis, nginx, web, prometheus, alertmanager,"; \
+		echo " node-exporter, cadvisor, postgres-exporter, redis-exporter)."; \
+		exit 2; \
+	fi
+	@echo "$(SERVICE)" | grep -qE '$(_VALID_SERVICE_NAME_RE)' || { \
+		echo "error: SERVICE='$(SERVICE)' is not a valid docker-compose service name."; \
+		echo "Allowed: lowercase letters, digits, dashes, underscores (must start with letter)."; \
+		echo "Shell metacharacters rejected to prevent remote injection."; \
+		exit 2; \
+	}
+	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) logs --tail=$(MINITUX_LOG_TAIL) $(SERVICE)"
+
+minitux-diag:  ## Read-only ssh: diagnostic bundle (ps + every service's tail) (Claude-safe)
+	@echo "=== minitux diagnostic bundle ==="
+	@echo ""
+	@echo "--- docker compose ps ---"
+	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) ps"
+	@echo ""
+	@echo "--- smoke-eval verdict ---"
+	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) ps --all --format json | python3 ~/Documents/Coding_Projects/fxlab/scripts/smoke_health_eval.py poll --compose-file $(MINITUX_COMPOSE_FILE) || true"
