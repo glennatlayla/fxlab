@@ -718,14 +718,16 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    healthcheck:
-      # redis_exporter's alpine base has wget, so a real healthcheck
-      # is possible here (unlike postgres-exporter's scratch base).
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9121/metrics"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+    # NOTE (2026-04-24 correction): no healthcheck declared.
+    # oliver006/redis_exporter:v1.59.0 ships on a scratch-style base
+    # (just the redis_exporter binary — no wget, no curl, no shell).
+    # The earlier `wget` healthcheck marked this container unhealthy
+    # on every deploy because the CMD could not execute — the stack
+    # was otherwise fine, but the cosmetic unhealthy state was
+    # misleading. Same constraint as postgres-exporter. Rely on
+    # Prometheus's own `up{job="redis-exporter"}` metric and
+    # smoke_health_eval's State-based classification (State=running +
+    # Health='' = HEALTHY) for liveness signals.
     restart: "on-failure:3"
     # Block privilege escalation via any setuid binary inside the
     # container image. A cheap, blanket security win (2026-04-20

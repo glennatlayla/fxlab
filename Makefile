@@ -302,7 +302,14 @@ verify: format-check lint test-unit compose-check  ## Run local pre-commit gate 
 # Connection is read-only — these targets never invoke sudo, and the
 # remote docker commands are strictly ps / logs (no write subcommands).
 MINITUX_SSH_ALIAS      ?= minitux
-MINITUX_COMPOSE_FILE   ?= ~/Documents/Coding_Projects/fxlab/docker-compose.prod.yml
+# install.sh deploys the full fxlab tree to /opt/fxlab on the target
+# host (FXLAB_HOME default). Both the compose file and scripts/ live
+# underneath this root. Override with
+#   make minitux-ps MINITUX_INSTALL_DIR=/some/other/path
+# if the operator ran install.sh with a non-default FXLAB_HOME.
+MINITUX_INSTALL_DIR    ?= /opt/fxlab
+MINITUX_COMPOSE_FILE   ?= $(MINITUX_INSTALL_DIR)/docker-compose.prod.yml
+MINITUX_SMOKE_EVAL     ?= $(MINITUX_INSTALL_DIR)/scripts/smoke_health_eval.py
 MINITUX_LOG_TAIL       ?= 100
 
 # Allowed SERVICE values — docker-compose service-name convention:
@@ -338,4 +345,4 @@ minitux-diag:  ## Read-only ssh: diagnostic bundle (ps + every service's tail) (
 	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) ps"
 	@echo ""
 	@echo "--- smoke-eval verdict ---"
-	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) ps --all --format json | python3 ~/Documents/Coding_Projects/fxlab/scripts/smoke_health_eval.py poll --compose-file $(MINITUX_COMPOSE_FILE) || true"
+	@ssh $(MINITUX_SSH_ALIAS) "docker compose -f $(MINITUX_COMPOSE_FILE) ps --all --format json | python3 $(MINITUX_SMOKE_EVAL) poll --compose-file $(MINITUX_COMPOSE_FILE) || true"
