@@ -13,6 +13,7 @@
  *   /                — authenticated shell with sidebar
  *     /              — Dashboard (index, no scope required)
  *     /strategy-studio — M25 Strategy Studio (strategies:write scope)
+ *     /strategy-studio/:id — M2.D2/D3 Strategy Detail + backtest launcher
  *     /runs          — M26 Run Monitor (runs:write scope)
  *     /runs/:runId/readiness — M28 Readiness Report (runs:write scope)
  *     /feeds         — M30 Feed Operations (feeds:read scope)
@@ -60,6 +61,7 @@ import Dashboard from "./pages/Dashboard";
 
 // Lazy-loaded page components — each gets its own code split bundle
 const StrategyStudio = lazy(() => import("./pages/StrategyStudio"));
+const StrategyDetail = lazy(() => import("./pages/StrategyDetail"));
 const Runs = lazy(() => import("./pages/Runs"));
 const RunReadiness = lazy(() => import("./pages/RunReadiness"));
 const Feeds = lazy(() => import("./pages/Feeds"));
@@ -113,6 +115,22 @@ export const router = createBrowserRouter(
               <FeatureErrorBoundary featureName="Strategy Studio">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <StrategyStudio />
+                </Suspense>
+              </FeatureErrorBoundary>
+            </AuthGuard>
+          ),
+        },
+        // Strategy Detail (M2.D2 + M2.D3 wiring): renders the parsed IR
+        // and the "Execute backtest" affordance for an IR-imported
+        // strategy. ImportIrPanel navigates here on a 201 from
+        // POST /strategies/import-ir. Same scope as the studio root.
+        {
+          path: "strategy-studio/:id",
+          element: (
+            <AuthGuard requiredScope="strategies:write">
+              <FeatureErrorBoundary featureName="Strategy Detail">
+                <Suspense fallback={<PageLoadingFallback />}>
+                  <StrategyDetail />
                 </Suspense>
               </FeatureErrorBoundary>
             </AuthGuard>

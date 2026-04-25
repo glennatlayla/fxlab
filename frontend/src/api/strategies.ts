@@ -35,6 +35,7 @@
 
 import { AxiosError } from "axios";
 import { apiClient } from "@/api/client";
+import type { StrategyIR } from "@/types/strategy_ir";
 
 // ---------------------------------------------------------------------------
 // Types — match the M2.C1 backend response shape
@@ -148,6 +149,132 @@ export async function importStrategyIr(file: File): Promise<ImportStrategyIrResp
           ? err.response.data.detail
           : "Strategy IR import failed";
       throw new ImportIrError(detail, status, detail);
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /strategies/{id} — M2.C4 strategy detail (parsed IR + draft view)
+// ---------------------------------------------------------------------------
+
+/**
+ * Strategy source discriminator returned by ``GET /strategies/{id}``.
+ *
+ * - ``"ir_upload"``  → ``parsed_ir`` is populated (full StrategyIR).
+ * - ``"draft_form"`` → ``draft_fields`` is populated (form payload).
+ *
+ * The API contract guarantees exactly one of the two is non-null per
+ * row; the discriminator tells the UI which view to render.
+ */
+export type StrategySource = "ir_upload" | "draft_form";
+
+/**
+ * Strategy record returned by ``GET /strategies/{id}`` (M2.C4).
+ *
+ * Mirrors the response body shape from
+ * ``services/api/services/strategy_service.py::get_with_parsed_ir``.
+ *
+ * ``parsed_ir`` is the canonical :class:`StrategyIR` re-validated server-
+ * side from the persisted ``code`` column. ``draft_fields`` carries the
+ * draft-form payload for non-IR strategies. Exactly one of those is
+ * populated; the ``source`` discriminator drives which view renders.
+ */
+export interface StrategyDetail {
+  /** ULID of the persisted strategy. */
+  id: string;
+  /** Display name (mirrors metadata.strategy_name for IR uploads). */
+  name: string;
+  /** Raw ``code`` column — stringified IR JSON or DSL payload. */
+  code: string;
+  /** Semver-style version string. */
+  version: string;
+  /** ``"ir_upload"`` or ``"draft_form"`` — drives the render branch. */
+  source: StrategySource;
+  /** ULID of the user who created the strategy. */
+  created_by: string;
+  /** Whether the strategy is active (soft-delete flag). */
+  is_active: boolean;
+  /** Optimistic concurrency version (server-managed). */
+  row_version: number;
+  /** ISO-8601 creation timestamp. */
+  created_at: string;
+  /** ISO-8601 last-update timestamp. */
+  updated_at: string;
+  /** Re-validated StrategyIR for ``source==="ir_upload"``. */
+  parsed_ir: StrategyIR | null;
+  /** Draft form payload for ``source==="draft_form"``. */
+  draft_fields: Record<string, unknown> | null;
+}
+
+/** Envelope returned by ``GET /strategies/{id}``. */
+export interface GetStrategyResponse {
+  strategy: StrategyDetail;
+}
+
+/**
+ * Typed error for ``GET /strategies/{id}`` failures.
+ *
+ * Carries the HTTP status and the backend ``detail`` string so the page
+ * can distinguish 404 (strategy missing) from 422 (stored IR fails
+ * re-validation, schema drift) without parsing free-form messages.
+ */
+export class GetStrategyError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "GetStrategyError";
+  }
+}
+
+/**
+ * GET ``/strategies/{strategyId}`` and unwrap the ``{strategy: ...}``
+ * envelope into a typed :class:`StrategyDetail`.
+ *
+ * Args:
+ *   strategyId: ULID of the strategy to load.
+ *
+ * Returns:
+ *   The :class:`StrategyDetail` record (already envelope-unwrapped).
+ *
+ * Raises:
+ *   GetStrategyError (statusCode=404) when the strategy does not exist.
+ *   GetStrategyError (statusCode=422) when the persisted IR fails
+ *     server-side re-validation (schema drift without backfill).
+ *   AxiosError on network failure or other non-2xx HTTP errors.
+ *
+ * Example:
+ *   try {
+ *     const strat = await getStrategy("01HZ...");
+ *     if (strat.source === "ir_upload" && strat.parsed_ir) {
+ *       // render IrDetailView
+ *     }
+ *   } catch (err) {
+ *     if (err instanceof GetStrategyError) setError(err.detail ?? err.message);
+ *   }
+ */
+export async function getStrategy(strategyId: string): Promise<StrategyDetail> {
+  try {
+    const resp = await apiClient.get<GetStrategyResponse>(`/strategies/${strategyId}`);
+    return resp.data.strategy;
+  } catch (err) {
+    if (err instanceof AxiosError && err.response) {
+      const status = err.response.status;
+      const detailRaw = err.response.data?.detail;
+      const detail =
+        typeof detailRaw === "string"
+          ? detailRaw
+          : status === 404
+            ? `Strategy ${strategyId} not found`
+            : `Failed to load strategy (status ${status})`;
+      throw new GetStrategyError(
+        detail,
+        status,
+        typeof detailRaw === "string" ? detailRaw : undefined,
+      );
     }
     throw err;
   }
