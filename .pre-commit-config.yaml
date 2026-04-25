@@ -6,6 +6,9 @@
 #   - .archive/         CLAUDE.md §1.6 backups; never auto-modify.
 #   - _archived/        Same.
 #   - User Spec/        Source-of-truth specs; never auto-modify.
+#                       (Only the Algo Specfication and Examples/
+#                       subdirectory is committed; the rest is the
+#                       operator's private working notes.)
 #   - Strategy Repo/    Production IR / experiment_plan / search_space
 #                       fixtures consumed by M1+M2 unit tests as
 #                       canonical valid shapes; auto-modifying them

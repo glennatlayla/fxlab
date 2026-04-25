@@ -85,18 +85,21 @@ frontend/dist/
 *.pdf
 
 # User specification folders.
-# `User Spec/` is excluded — it's the operator's working space for spec
-# revisions, snapshots, and notes that don't belong in the repo.
-# `Strategy Repo/` is INCLUDED in the repo because:
-#   - The 5 *.strategy_ir.json files are test fixtures referenced by
-#     M1.A1, M1.A2, M1.A3, M1.A4, M1.B6, M2.C1, M2.C2, M2.C4, and
-#     M2.D2 unit tests. Without them in the working tree, CI's fresh
-#     checkout fails verify (this happened on 2026-04-25 run #41).
-#   - They are the canonical examples of valid IR shapes; the parser
-#     and compiler implementations are validated against them.
-# .DS_Store noise inside Strategy Repo/ is excluded by the global
+# `User Spec/` is excluded — operator's working space for spec
+# revisions, snapshots, phase plan ZIPs, and personal notes. EXCEPT
+# the `Algo Specfication and Examples/` subdirectory, which contains
+# the canonical example *.example.json files (strategy_ir,
+# experiment_plan, search_space) referenced by:
+#   - tests/unit/libs/contracts/test_experiment_plan.py
+#   - libs/contracts/experiment_plan.py / strategy_ir.py docstrings
+# Without those in CI's fresh checkout, `make verify` fails on the
+# canonical-example parse tests (2026-04-25 run #42 surfaced this).
+# `Strategy Repo/` is also INCLUDED in the repo for the 5 production
+# IR / experiment_plan / search_space fixtures.
+# .DS_Store noise inside any of these is excluded by the global
 # .DS_Store rule below.
-User Spec/
+User Spec/*
+!User Spec/Algo Specfication and Examples/
 
 # Temporary / debug files
 ship.errors.txt

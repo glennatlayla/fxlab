@@ -137,6 +137,27 @@ _DEFAULT_DATASET_SEED: dict[str, list[str]] = {
         "USDCHF",
         "AUDUSD",
     ],
+    # Spread companion datasets — referenced by the
+    # `spread_dataset_ref` field on every production experiment plan.
+    # Same symbol coverage as the bar datasets they pair with.
+    "fx-majors-spread-certified-v1": [
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY",
+        "USDCHF",
+        "AUDUSD",
+        "USDCAD",
+        "NZDUSD",
+    ],
+    "fx-majors-spread-h1-certified-v1": [
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY",
+        "USDCHF",
+        "AUDUSD",
+        "USDCAD",
+        "NZDUSD",
+    ],
 }
 
 
