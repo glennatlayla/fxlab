@@ -625,3 +625,35 @@ def test_production_meanreversion_subset_is_deterministic() -> None:
     signals_b = _run_strategy(strategy_b, candles, indicator_arrays)
     assert len(signals_a) == len(signals_b)
     assert [s.model_dump() for s in signals_a] == [s.model_dump() for s in signals_b]
+
+
+# ---------------------------------------------------------------------------
+# M1.A5 — compiled risk model is wired onto IRStrategy
+# ---------------------------------------------------------------------------
+
+
+def test_compiled_irstrategy_exposes_risk_model_bundle() -> None:
+    """The compiler must wire a :class:`CompiledRiskModel` onto the
+    returned :class:`IRStrategy` so :class:`BacktestEngine` can read
+    ``strategy.risk_model.position_sizer``,
+    ``strategy.risk_model.pre_trade_gate``, and
+    ``strategy.risk_model.post_trade_gate`` without touching the IR
+    again. This test exercises the M1.A5 integration boundary.
+    """
+    from libs.strategy_ir.risk_translator import CompiledRiskModel
+
+    ir = _build_handcomputed_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    bundle = strategy.risk_model
+    assert isinstance(bundle, CompiledRiskModel)
+    # The fixture IR uses risk_pct_of_equity=0.5 / daily=2.0 / max_dd=10.0.
+    assert bundle.risk_pct_of_equity == 0.5
+    assert bundle.daily_loss_limit_pct == 2.0
+    assert bundle.max_drawdown_halt_pct == 10.0
+    # The sizer honours the risk budget exactly: 0.5% of 100k / stop=0.005 -> 100,000 units.
+    size = bundle.position_sizer(1.10, 1.095, 100_000.0)
+    used_risk = abs(1.10 - 1.095) * size
+    budget = (0.5 / 100.0) * 100_000.0
+    assert used_risk <= budget + 1e-6

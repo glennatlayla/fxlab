@@ -117,7 +117,12 @@ from libs.contracts.strategy_ir import (
 )
 from libs.strategy_ir.broker import Broker
 from libs.strategy_ir.clock import BarClock, Clock
+from libs.strategy_ir.lookback import LookbackBuffer, LookbackPlan, LookbackResolver
 from libs.strategy_ir.reference_resolver import IRReferenceError, ReferenceResolver
+from libs.strategy_ir.risk_translator import (
+    CompiledRiskModel,
+    RiskModelTranslator,
+)
 
 if TYPE_CHECKING:
     from libs.contracts.execution import PositionSnapshot
@@ -160,11 +165,20 @@ class _EvalContext:
             when flat. Exit checks consult ``position.quantity`` to
             decide whether the long_condition or short_condition
             applies.
+        lookback_buffers: per-base ``_prev_N`` ring buffers
+            (e.g. ``{"close": LookbackBuffer(2), "bb_upper_1":
+            LookbackBuffer(1)}``). Empty when the IR has no
+            ``_prev_N`` references. Read by identifier evaluators
+            compiled for ``<base>_prev_<N>`` tokens; populated by
+            :meth:`IRStrategy.evaluate` AFTER the bar's conditions
+            have been evaluated, so the buffer holds prior-bar
+            values when the next bar is evaluated.
     """
 
     candle: Candle
     indicator_values: dict[str, float]
     position: PositionSnapshot | None
+    lookback_buffers: dict[str, LookbackBuffer]
 
 
 @dataclass(frozen=True)
@@ -297,6 +311,8 @@ class IRStrategy(SignalStrategyInterface):
         short_entry_evaluator: LeafEvaluator | None,
         exit_checks: tuple[_ExitCheck, ...],
         indicator_ids: tuple[str, ...],
+        lookback_buffers: dict[str, LookbackBuffer] | None = None,
+        risk_model: CompiledRiskModel | None = None,
     ) -> None:
         """
         Construct the compiled strategy. Normally called by
@@ -323,6 +339,19 @@ class IRStrategy(SignalStrategyInterface):
                 checks. Walk in order; first ``True`` wins.
             indicator_ids: tuple of every IR indicator id, used to
                 build :meth:`required_indicators` deterministically.
+            lookback_buffers: per-base ``_prev_N`` ring buffers, keyed
+                by the base name (e.g. ``bb_upper_1`` for a
+                ``bb_upper_1_prev_1`` reference, ``close`` for
+                ``close_prev_2``). Sized at compile time to the MAX(N)
+                seen across all conditions. ``None`` when the IR
+                contains no ``_prev_N`` references at all.
+            risk_model: compiled :class:`CompiledRiskModel` produced by
+                :class:`RiskModelTranslator`. Wires the position sizer
+                + pre-trade gate + post-trade gate produced from the
+                IR's ``risk_model`` block. ``None`` is permitted only
+                for callers constructing :class:`IRStrategy` directly
+                with no risk-management requirement (tests using the
+                pre-M1.A5 surface).
         """
         self._ir = ir
         self._deployment_id = deployment_id
@@ -332,6 +361,13 @@ class IRStrategy(SignalStrategyInterface):
         self._short_entry = short_entry_evaluator
         self._exit_checks = exit_checks
         self._indicator_ids = indicator_ids
+        # Buffers are stored as a plain dict (immutable from outside
+        # by convention -- _push_lookback_values is the only mutator).
+        # Empty when the IR has no _prev_N references.
+        self._lookback_buffers: dict[str, LookbackBuffer] = (
+            dict(lookback_buffers) if lookback_buffers else {}
+        )
+        self._risk_model = risk_model
 
     # ---------- SignalStrategyInterface metadata ----------
 
@@ -358,6 +394,18 @@ class IRStrategy(SignalStrategyInterface):
         ``same_bar_priority`` was honoured.
         """
         return tuple(check.name for check in self._exit_checks)
+
+    @property
+    def risk_model(self) -> CompiledRiskModel | None:
+        """
+        The :class:`CompiledRiskModel` translated from the IR's
+        ``risk_model`` block, or ``None`` when the strategy was
+        constructed without one (legacy/test path).
+
+        BacktestEngine reads this to obtain the position sizer +
+        pre-trade gate + post-trade gate.
+        """
+        return self._risk_model
 
     def required_indicators(self) -> list[IndicatorRequest]:
         """
@@ -415,51 +463,68 @@ class IRStrategy(SignalStrategyInterface):
         # Pre-extract latest indicator scalar values into a float dict.
         indicator_values = self._extract_latest_indicator_values(indicators)
         ctx = _EvalContext(
-            candle=candle, indicator_values=indicator_values, position=current_position
+            candle=candle,
+            indicator_values=indicator_values,
+            position=current_position,
+            lookback_buffers=self._lookback_buffers,
         )
 
-        # 1. Exit checks (only when a position exists).
-        if current_position is not None and current_position.quantity != 0:
-            for check in self._exit_checks:
-                if check.evaluator(ctx):
-                    direction = (
-                        SignalDirection.SHORT
-                        if current_position.quantity > 0
-                        else SignalDirection.LONG
-                    )
+        # ``_prev_N`` references must read PRIOR-bar values during this
+        # bar's condition evaluation. We therefore evaluate first and
+        # push the latest values into the buffers AFTER all conditions
+        # have run (see ``_push_lookback_values`` below). The push
+        # happens unconditionally on every evaluate() call so the
+        # buffers stay in lock-step with the bar stream regardless of
+        # whether a signal fires.
+        try:
+            # 1. Exit checks (only when a position exists).
+            if current_position is not None and current_position.quantity != 0:
+                for check in self._exit_checks:
+                    if check.evaluator(ctx):
+                        direction = (
+                            SignalDirection.SHORT
+                            if current_position.quantity > 0
+                            else SignalDirection.LONG
+                        )
+                        return self._build_signal(
+                            symbol=symbol,
+                            candle=candle,
+                            direction=direction,
+                            signal_type=SignalType.EXIT,
+                            indicator_values=indicator_values,
+                            correlation_id=correlation_id,
+                            metadata={"exit_reason": check.name},
+                        )
+
+            # 2. Entry checks (only when flat).
+            if current_position is None or current_position.quantity == 0:
+                if self._long_entry is not None and self._long_entry(ctx):
                     return self._build_signal(
                         symbol=symbol,
                         candle=candle,
-                        direction=direction,
-                        signal_type=SignalType.EXIT,
+                        direction=SignalDirection.LONG,
+                        signal_type=SignalType.ENTRY,
                         indicator_values=indicator_values,
                         correlation_id=correlation_id,
-                        metadata={"exit_reason": check.name},
+                        metadata={"side": "long"},
                     )
-
-        # 2. Entry checks (only when flat).
-        if current_position is None or current_position.quantity == 0:
-            if self._long_entry is not None and self._long_entry(ctx):
-                return self._build_signal(
-                    symbol=symbol,
-                    candle=candle,
-                    direction=SignalDirection.LONG,
-                    signal_type=SignalType.ENTRY,
-                    indicator_values=indicator_values,
-                    correlation_id=correlation_id,
-                    metadata={"side": "long"},
-                )
-            if self._short_entry is not None and self._short_entry(ctx):
-                return self._build_signal(
-                    symbol=symbol,
-                    candle=candle,
-                    direction=SignalDirection.SHORT,
-                    signal_type=SignalType.ENTRY,
-                    indicator_values=indicator_values,
-                    correlation_id=correlation_id,
-                    metadata={"side": "short"},
-                )
-        return None
+                if self._short_entry is not None and self._short_entry(ctx):
+                    return self._build_signal(
+                        symbol=symbol,
+                        candle=candle,
+                        direction=SignalDirection.SHORT,
+                        signal_type=SignalType.ENTRY,
+                        indicator_values=indicator_values,
+                        correlation_id=correlation_id,
+                        metadata={"side": "short"},
+                    )
+            return None
+        finally:
+            # Update lookback buffers with THIS bar's values so the
+            # NEXT bar's evaluator sees them as "prev". Done in a
+            # finally block so an early return above still advances
+            # the buffers in lock-step with the bar stream.
+            self._push_lookback_values(candle, indicator_values)
 
     # ---------- internal helpers ----------
 
@@ -493,6 +558,28 @@ class IRStrategy(SignalStrategyInterface):
                 continue
             out[ir_id] = float(values[-1])
         return out
+
+    def _push_lookback_values(self, candle: Candle, indicator_values: dict[str, float]) -> None:
+        """
+        Append THIS bar's value of every tracked base into its
+        :class:`LookbackBuffer`.
+
+        The base is either an IR indicator id (read from
+        ``indicator_values``) or one of the supported price-field
+        names (read directly from the candle via
+        :data:`_PRICE_FIELD_GETTERS`). A base whose value is unknown
+        on this bar (e.g. an indicator that was never supplied)
+        contributes NaN -- the buffer's :meth:`get` will then yield
+        NaN at the corresponding lag and the leaf evaluator will
+        short-circuit cleanly.
+        """
+        if not self._lookback_buffers:
+            return
+        for base, buffer in self._lookback_buffers.items():
+            if base in _PRICE_FIELD_GETTERS:
+                buffer.push(_PRICE_FIELD_GETTERS[base](candle))
+                continue
+            buffer.push(indicator_values.get(base, float("nan")))
 
     def _build_signal(
         self,
@@ -603,6 +690,11 @@ class StrategyIRCompiler:
         """
         self._clock = clock
         self._broker = broker
+        # Per-compile-call scratchpad. Populated at the top of
+        # :meth:`compile` and cleared in its ``finally`` block so two
+        # back-to-back compile() calls cannot leak buffers across
+        # compilations.
+        self._current_lookback_buffers: dict[str, LookbackBuffer] | None = None
 
     # ---------- public API ----------
 
@@ -631,23 +723,47 @@ class StrategyIRCompiler:
         # 2. Build the indicator-id whitelist used by leaf compilers.
         indicator_ids: frozenset[str] = frozenset(ind.id for ind in ir.indicators)
 
-        # 3. Compile entry-side evaluators.
-        long_eval = (
-            self._compile_directional_entry(ir.entry_logic.long, indicator_ids, "long")
-            if ir.entry_logic.long is not None
-            else None
-        )
-        short_eval = (
-            self._compile_directional_entry(ir.entry_logic.short, indicator_ids, "short")
-            if ir.entry_logic.short is not None
-            else None
-        )
+        # 3. Scan the IR for ``_prev_N`` references and allocate one
+        #    ring buffer per base, sized to MAX(N) across all
+        #    references to that base. Empty when the IR has no
+        #    ``_prev_N`` references at all.
+        lookback_plan: LookbackPlan = LookbackResolver(ir).resolve()
+        lookback_buffers = self._allocate_lookback_buffers(lookback_plan, indicator_ids)
+        # Stash the freshly-allocated buffers on the compiler instance
+        # so identifier compilation downstream can close over the
+        # right buffer per ``<base>_prev_<N>`` token without having
+        # to thread the dict through every helper signature. Cleared
+        # in the finally block at the end of compile() so two
+        # consecutive compile() calls cannot share state by accident.
+        self._current_lookback_buffers = lookback_buffers
+        try:
+            # 4. Compile entry-side evaluators.
+            long_eval = (
+                self._compile_directional_entry(ir.entry_logic.long, indicator_ids, "long")
+                if ir.entry_logic.long is not None
+                else None
+            )
+            short_eval = (
+                self._compile_directional_entry(ir.entry_logic.short, indicator_ids, "short")
+                if ir.entry_logic.short is not None
+                else None
+            )
 
-        # 4. Compile exit checks and freeze in priority order.
-        compiled_exits = self._compile_exit_logic(ir.exit_logic, indicator_ids)
-        ordered_exits = self._freeze_exit_priority(compiled_exits, ir.exit_logic)
+            # 5. Compile exit checks and freeze in priority order.
+            compiled_exits = self._compile_exit_logic(ir.exit_logic, indicator_ids)
+            ordered_exits = self._freeze_exit_priority(compiled_exits, ir.exit_logic)
+        finally:
+            self._current_lookback_buffers = None
 
-        # 5. Wrap and return.
+        # 6. Translate the IR's risk_model into a compiled bundle
+        #    (sizer + pre-trade gate + post-trade gate). M1.A5 only
+        #    supports ``fixed_fractional_risk``; the translator raises
+        #    UnsupportedRiskMethodError loudly for the deferred basket
+        #    methods so a misconfigured IR fails at compile time, not
+        #    at first trade.
+        compiled_risk_model = RiskModelTranslator(ir).translate()
+
+        # 7. Wrap and return.
         return IRStrategy(
             ir=ir,
             deployment_id=deployment_id,
@@ -657,7 +773,44 @@ class StrategyIRCompiler:
             short_entry_evaluator=short_eval,
             exit_checks=ordered_exits,
             indicator_ids=tuple(ind.id for ind in ir.indicators),
+            risk_model=compiled_risk_model,
+            lookback_buffers=lookback_buffers,
         )
+
+    # ---------- lookback planning ----------
+
+    def _allocate_lookback_buffers(
+        self,
+        plan: LookbackPlan,
+        indicator_ids: frozenset[str],
+    ) -> dict[str, LookbackBuffer]:
+        """
+        Allocate one :class:`LookbackBuffer` per base in ``plan``.
+
+        Args:
+            plan: result of :meth:`LookbackResolver.resolve`.
+            indicator_ids: set of declared IR indicator ids; bases
+                outside this set must be a supported price field,
+                otherwise we raise :class:`IRReferenceError`.
+
+        Returns:
+            ``{base_name: LookbackBuffer}`` keyed by base. Empty when
+            the IR has no ``_prev_N`` references.
+
+        Raises:
+            IRReferenceError: when a ``_prev_N`` base resolves to
+                neither an indicator id nor a supported price field.
+        """
+        buffers: dict[str, LookbackBuffer] = {}
+        for base, lag in plan.capacities.items():
+            if base not in indicator_ids and base not in _PRICE_FIELD_GETTERS:
+                raise IRReferenceError(
+                    f"_prev_N reference base {base!r} is neither a declared "
+                    f"indicator id nor a supported price field "
+                    f"(supported: {sorted(_PRICE_FIELD_GETTERS.keys())})"
+                )
+            buffers[base] = LookbackBuffer(capacity=lag)
+        return buffers
 
     # ---------- entry compilation ----------
 
@@ -892,6 +1045,36 @@ class StrategyIRCompiler:
                 return ctx.indicator_values[_name]
 
             return _ind
+        # ``<base>_prev_<N>`` references read from the per-base ring
+        # buffer allocated at the top of compile(). The base name MUST
+        # have a buffer entry by now (the LookbackResolver walked the
+        # same conditions we are compiling, and _allocate_lookback
+        # rejected unknown bases). The lag MUST fit within the
+        # buffer's capacity (by construction of MAX(N) the buffer is
+        # always exactly large enough, but we still validate
+        # defensively in case the helpers are called via an
+        # unexpected path).
+        prev_split = LookbackResolver.split_prev_suffix(ident)
+        if prev_split is not None:
+            base, lag = prev_split
+            buffers = self._current_lookback_buffers or {}
+            buffer = buffers.get(base)
+            if buffer is None:
+                raise IRReferenceError(
+                    f"_prev_N reference {ident!r} at {location} has no allocated "
+                    f"LookbackBuffer for base {base!r}; ensure compile() ran the "
+                    f"LookbackResolver on this IR before compiling identifiers"
+                )
+            if lag > buffer.capacity:
+                raise IRReferenceError(
+                    f"_prev_N reference {ident!r} at {location} requires lag {lag} "
+                    f"but buffer for base {base!r} was sized to {buffer.capacity}"
+                )
+
+            def _prev(_ctx: _EvalContext, _buffer: LookbackBuffer = buffer, _n: int = lag) -> float:
+                return _buffer.get(_n)
+
+            return _prev
         # Anything else is a hard error -- the resolver should have
         # caught it, but if compilation is ever invoked without the
         # resolver-based identity guarantee we still fail loudly.
