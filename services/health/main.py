@@ -129,9 +129,12 @@ async def liveness_check():
 if __name__ == "__main__":
     import uvicorn
 
+    # Containerized health-check service. Binding to 0.0.0.0 is required so
+    # docker can reach it on the internal network; the port is not published
+    # to the host externally (see compose files).
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host="0.0.0.0",  # nosec B104
         port=8000,
         log_config=None,  # Use our structured logging
     )

@@ -297,7 +297,10 @@ class KeycloakTokenValidator:
             )
             # Use SSL context for certificate verification on HTTPS endpoints.
             # For HTTP (dev/docker-internal), ssl_context is ignored by urllib.
-            with urllib.request.urlopen(req, timeout=10, context=self._ssl_context) as response:
+            # URL is the configured Keycloak JWKS endpoint, not user input.
+            # Scheme is constrained to http/https by Keycloak's public OIDC
+            # contract; file://, data://, etc. cannot reach this code path.
+            with urllib.request.urlopen(req, timeout=10, context=self._ssl_context) as response:  # nosec B310
                 jwks_data = json.loads(response.read())
 
             new_keys: dict[str, Any] = {}

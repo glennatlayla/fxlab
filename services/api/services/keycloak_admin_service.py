@@ -272,7 +272,9 @@ class KeycloakAdminService(KeycloakAdminServiceInterface):
 
         ctx = self._log_context()
         try:
-            with urllib.request.urlopen(req, timeout=10) as response:
+            # URL is the configured Keycloak admin token endpoint, not user
+            # input. Scheme is constrained by Keycloak's deployment URL.
+            with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
                 token_data = json.loads(response.read())
         except urllib.error.URLError as exc:
             logger.error(
@@ -310,7 +312,9 @@ class KeycloakAdminService(KeycloakAdminServiceInterface):
         )
         ctx = self._log_context()
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
+            # url is built internally from the configured Keycloak base URL
+            # + a fixed admin-API path, never from user input.
+            with urllib.request.urlopen(req, timeout=15) as response:  # nosec B310
                 return json.loads(response.read())
         except urllib.error.URLError as exc:
             logger.error("keycloak_admin.get_failed", url=url, error=str(exc), **ctx)
@@ -332,7 +336,9 @@ class KeycloakAdminService(KeycloakAdminServiceInterface):
         )
         ctx = self._log_context()
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
+            # url is built internally from the configured Keycloak base URL
+            # + a fixed admin-API path, never from user input.
+            with urllib.request.urlopen(req, timeout=15) as response:  # nosec B310
                 return dict(response.headers)
         except urllib.error.URLError as exc:
             logger.error("keycloak_admin.post_failed", url=url, error=str(exc), **ctx)
@@ -353,7 +359,9 @@ class KeycloakAdminService(KeycloakAdminServiceInterface):
         )
         ctx = self._log_context()
         try:
-            with urllib.request.urlopen(req, timeout=15):
+            # url is built internally from the configured Keycloak base URL
+            # + a fixed admin-API path, never from user input.
+            with urllib.request.urlopen(req, timeout=15):  # nosec B310
                 pass  # 204 No Content expected
         except urllib.error.URLError as exc:
             logger.error("keycloak_admin.put_failed", url=url, error=str(exc), **ctx)

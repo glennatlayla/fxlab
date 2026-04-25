@@ -450,8 +450,12 @@ def _validate_cors_origins(
         classification = _classify_cors_origin(origin)
         if classification == "ok":
             continue
+        # CORS policy error message string (not a SQL query). bandit's
+        # hardcoded_sql_expressions matcher false-positives on any
+        # f-string with variable interpolation. The string is raised as
+        # an exception, never executed against a database.
         raise CorsOriginPolicyError(
-            f"CORS origin {origin!r} violates production policy "
+            f"CORS origin {origin!r} violates production policy "  # nosec B608
             f"(reason: {classification}). Production allows only origins "
             "with scheme=https AND a non-private / non-loopback host. "
             "Update CORS_ALLOWED_ORIGINS to an HTTPS public origin "

@@ -257,7 +257,11 @@ class RealDependencyHealthRepository(DependencyHealthRepositoryInterface):
                     return "DOWN"
             else:
                 # Local artifact storage
-                local_path = os.environ.get("ARTIFACT_LOCAL_PATH", "/tmp/fxlab")
+                # /tmp/fxlab is the documented dev fallback for the local
+                # artifact store path; production sets ARTIFACT_LOCAL_PATH to
+                # a non-tmp persistent volume. We only os.path.exists() check
+                # this path for a health probe — never write secrets here.
+                local_path = os.environ.get("ARTIFACT_LOCAL_PATH", "/tmp/fxlab")  # nosec B108
                 try:
                     if os.path.exists(local_path) and os.path.isdir(local_path):
                         return "OK"

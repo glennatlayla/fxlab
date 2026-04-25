@@ -179,6 +179,17 @@ jobs:
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
+      - name: Bootstrap node + frontend deps (mirrors `make bootstrap`)
+        # tests/unit/test_m0_frontend_structure.py::test_ac8_npm_build_succeeds
+        # is a unit test that requires frontend/node_modules to exist (it
+        # hard-fails, does not skip, when missing). The verify job has the
+        # same step; this brings the Tests job into parity. Without this,
+        # the Tests job runs all 4742 unit tests but fails on this single
+        # frontend-build-validation test even though everything else passes.
+        run: |
+          .venv/bin/python -m nodeenv --python-virtualenv --node=lts --prebuilt
+          cd frontend && PATH="${GITHUB_WORKSPACE}/.venv/bin:$PATH" npm install --silent
+
       - name: Run tests
         # Scope explicitly to tests/unit/. Without this, pytest's default
         # collection sweeps in tests/integration/ which includes
