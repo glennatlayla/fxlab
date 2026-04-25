@@ -44,8 +44,8 @@ Track B integration commit (default_registry wiring): `d11c83c`.
 |--------|--------------------------------------------|-------------|---------|-------------|
 | M2.C1  | POST /strategies/import-ir                 | DONE        | a4169c3 | orchestrator |
 | M2.C2  | POST /runs/from-ir                         | DONE        | c43205f | orchestrator |
-| M2.C3  | Results endpoints expansion                | NOT_STARTED |         |             |
-| M2.C4  | Strategy detail with parsed IR             | NOT_STARTED |         |             |
+| M2.C3  | Results endpoints expansion                | DONE        | d8737d0 | orchestrator |
+| M2.C4  | Strategy detail with parsed IR             | DONE        | e49a217 | orchestrator |
 
 ## Track D — Frontend (parallel after C contracts)
 
