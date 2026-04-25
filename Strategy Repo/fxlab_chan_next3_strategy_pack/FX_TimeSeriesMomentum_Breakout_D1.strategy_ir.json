@@ -1,0 +1,257 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "strategy_ir",
+  "metadata": {
+    "strategy_name": "FX_TimeSeriesMomentum_Breakout_D1",
+    "strategy_version": "1.0.0",
+    "author": "OpenAI",
+    "created_utc": "2026-04-11T22:15:00Z",
+    "objective": "Time-series momentum breakout strategy for major FX pairs using Donchian-style breakout confirmation with ATR-based risk control",
+    "status": "research_candidate",
+    "notes": [
+      "Built from publicly available descriptions of Ernest P. Chan's momentum strategy category.",
+      "FXLab schema inferred from user-provided examples; field names may need adaptation to exact product schema.",
+      "Implementation assumptions are explicit where public materials do not provide engine-native details."
+    ]
+  },
+  "universe": {
+    "asset_class": "spot_fx",
+    "symbols": [
+      "EURUSD",
+      "GBPUSD",
+      "USDJPY",
+      "AUDUSD",
+      "USDCAD"
+    ],
+    "selection_mode": "independent_symbols",
+    "direction": "both"
+  },
+  "data_requirements": {
+    "primary_timeframe": "1d",
+    "required_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "spread"
+    ],
+    "timezone": "America/New_York",
+    "session_rules": {
+      "allowed_entry_days": [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday"
+      ],
+      "blocked_entry_windows": [
+        {
+          "day": "Friday",
+          "start_time": "16:00",
+          "end_time": "23:59"
+        }
+      ]
+    },
+    "warmup_bars": 250,
+    "missing_bar_policy": "reject_symbol_window_if_gaps_exceed_threshold"
+  },
+  "indicators": [
+    {
+      "id": "donchian_high",
+      "type": "rolling_high",
+      "source": "high",
+      "length_bars": 55,
+      "timeframe": "1d"
+    },
+    {
+      "id": "donchian_low",
+      "type": "rolling_low",
+      "source": "low",
+      "length_bars": 55,
+      "timeframe": "1d"
+    },
+    {
+      "id": "exit_high",
+      "type": "rolling_high",
+      "source": "high",
+      "length_bars": 20,
+      "timeframe": "1d"
+    },
+    {
+      "id": "exit_low",
+      "type": "rolling_low",
+      "source": "low",
+      "length_bars": 20,
+      "timeframe": "1d"
+    },
+    {
+      "id": "atr_20",
+      "type": "atr",
+      "length": 20,
+      "timeframe": "1d"
+    },
+    {
+      "id": "adx_14",
+      "type": "adx",
+      "length": 14,
+      "timeframe": "1d"
+    },
+    {
+      "id": "ema_200",
+      "type": "ema",
+      "source": "close",
+      "length": 200,
+      "timeframe": "1d"
+    }
+  ],
+  "entry_logic": {
+    "evaluation_timing": "on_bar_close",
+    "execution_timing": "next_bar_open",
+    "long": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "close",
+            "operator": ">",
+            "rhs": "donchian_high"
+          },
+          {
+            "lhs": "adx_14",
+            "operator": ">=",
+            "rhs": 18
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.5,
+            "units": "pips"
+          },
+          {
+            "lhs": "close",
+            "operator": ">=",
+            "rhs": "ema_200"
+          }
+        ]
+      },
+      "order_type": "market"
+    },
+    "short": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "close",
+            "operator": "<",
+            "rhs": "donchian_low"
+          },
+          {
+            "lhs": "adx_14",
+            "operator": ">=",
+            "rhs": 18
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.5,
+            "units": "pips"
+          },
+          {
+            "lhs": "close",
+            "operator": "<=",
+            "rhs": "ema_200"
+          }
+        ]
+      },
+      "order_type": "market"
+    },
+    "signal_expiration_bars": 1
+  },
+  "exit_logic": {
+    "initial_stop": {
+      "type": "atr_multiple",
+      "indicator": "atr_20",
+      "multiple": 2.0
+    },
+    "trailing_exit": {
+      "type": "channel_exit",
+      "long_condition": {
+        "lhs": "close",
+        "operator": "<",
+        "rhs": "exit_low"
+      },
+      "short_condition": {
+        "lhs": "close",
+        "operator": ">",
+        "rhs": "exit_high"
+      }
+    },
+    "time_exit": {
+      "enabled": true,
+      "max_bars_in_trade": 60
+    },
+    "friday_close_exit": {
+      "enabled": true,
+      "close_time": "16:30",
+      "timezone": "America/New_York"
+    },
+    "same_bar_priority": [
+      "initial_stop",
+      "trailing_exit",
+      "time_exit",
+      "friday_close_exit"
+    ]
+  },
+  "risk_model": {
+    "position_sizing": {
+      "method": "fixed_fractional_risk",
+      "risk_pct_of_equity": 0.5,
+      "stop_distance_source": "initial_stop"
+    },
+    "max_open_positions": 2,
+    "max_positions_per_symbol": 1,
+    "gross_exposure_cap_pct_of_equity": 100.0,
+    "daily_loss_limit_pct": 2.0,
+    "max_drawdown_halt_pct": 10.0,
+    "pyramiding": false
+  },
+  "execution_model": {
+    "fill_model": "next_bar_open",
+    "spread_model_ref": "historical_spread_snapshot_v1",
+    "slippage_model_ref": "fx_major_default_v1",
+    "commission_model_ref": "retail_fx_commission_v1",
+    "swap_model_ref": "broker_swap_default_v1",
+    "partial_fill_policy": "not_applicable_for_market_orders",
+    "reject_policy": "log_and_skip_signal"
+  },
+  "filters": [
+    {
+      "id": "cooldown_after_exit",
+      "type": "bars_since_last_exit",
+      "operator": ">=",
+      "rhs": 2
+    },
+    {
+      "id": "min_atr_floor",
+      "lhs": "atr_20",
+      "operator": ">=",
+      "rhs": 0.0035,
+      "units": "price"
+    },
+    {
+      "id": "no_inside_bar_breakout_reentry_same_day",
+      "type": "one_signal_per_symbol_per_bar",
+      "rhs": 1
+    }
+  ],
+  "ambiguities_and_defaults": {
+    "breakout_reference_rule": "Use completed-bar breakout beyond rolling channel; no intrabar stop entries assumed.",
+    "trend_filter_choice": "200 EMA and ADX filters added as explicit assumptions to reduce noise in FX daily breakouts.",
+    "same_bar_conflict_rule": "apply exit priority list",
+    "indicator_alignment_rule": "all calculations use completed bars only",
+    "missing_data_fallback": "reject_run",
+    "notes": [
+      "This is an FX-adapted research candidate, not a verbatim reproduction of a single book code sample."
+    ]
+  }
+}

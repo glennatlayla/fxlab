@@ -1,0 +1,279 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "strategy_ir",
+  "metadata": {
+    "strategy_name": "FX_SingleAsset_MeanReversion_H1",
+    "strategy_version": "1.0.0",
+    "author": "OpenAI",
+    "created_utc": "2026-04-11T22:15:00Z",
+    "objective": "Single-asset mean reversion strategy for major FX pairs using Bollinger z-score stretch with RSI confirmation and EMA trend blocker",
+    "status": "research_candidate",
+    "notes": [
+      "Built from publicly available descriptions of Ernest P. Chan's mean-reverting strategy category.",
+      "FXLab schema inferred from user-provided examples; field names may need adaptation to exact product schema.",
+      "Implementation assumptions are explicit where public materials do not provide engine-native details."
+    ]
+  },
+  "universe": {
+    "asset_class": "spot_fx",
+    "symbols": [
+      "EURUSD",
+      "GBPUSD",
+      "AUDUSD",
+      "NZDUSD",
+      "USDCAD"
+    ],
+    "selection_mode": "independent_symbols",
+    "direction": "both"
+  },
+  "data_requirements": {
+    "primary_timeframe": "1h",
+    "required_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "spread"
+    ],
+    "timezone": "America/New_York",
+    "session_rules": {
+      "allowed_entry_days": [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday"
+      ],
+      "blocked_entry_windows": [
+        {
+          "day": "Friday",
+          "start_time": "16:00",
+          "end_time": "23:59"
+        }
+      ]
+    },
+    "warmup_bars": 250,
+    "missing_bar_policy": "reject_symbol_window_if_gaps_exceed_threshold"
+  },
+  "indicators": [
+    {
+      "id": "bb_mid",
+      "type": "sma",
+      "source": "close",
+      "length": 20,
+      "timeframe": "1h"
+    },
+    {
+      "id": "bb_std",
+      "type": "rolling_stddev",
+      "source": "close",
+      "length_bars": 20,
+      "timeframe": "1h"
+    },
+    {
+      "id": "bb_upper",
+      "type": "bollinger_upper",
+      "source": "close",
+      "length": 20,
+      "stddev": 2.0,
+      "timeframe": "1h"
+    },
+    {
+      "id": "bb_lower",
+      "type": "bollinger_lower",
+      "source": "close",
+      "length": 20,
+      "stddev": 2.0,
+      "timeframe": "1h"
+    },
+    {
+      "id": "rsi_14",
+      "type": "rsi",
+      "source": "close",
+      "length": 14,
+      "timeframe": "1h"
+    },
+    {
+      "id": "atr_14",
+      "type": "atr",
+      "length": 14,
+      "timeframe": "1h"
+    },
+    {
+      "id": "ema_100",
+      "type": "ema",
+      "source": "close",
+      "length": 100,
+      "timeframe": "1h"
+    },
+    {
+      "id": "price_zscore",
+      "type": "zscore",
+      "source": "close",
+      "mean_source": "bb_mid",
+      "std_source": "bb_std",
+      "timeframe": "1h"
+    }
+  ],
+  "entry_logic": {
+    "evaluation_timing": "on_bar_close",
+    "execution_timing": "next_bar_open",
+    "long": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "price_zscore",
+            "operator": "<=",
+            "rhs": -2.0
+          },
+          {
+            "lhs": "rsi_14",
+            "operator": "<=",
+            "rhs": 30
+          },
+          {
+            "lhs": "close",
+            "operator": ">=",
+            "rhs": "ema_100 * 0.985"
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.0,
+            "units": "pips"
+          }
+        ]
+      },
+      "order_type": "market"
+    },
+    "short": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "price_zscore",
+            "operator": ">=",
+            "rhs": 2.0
+          },
+          {
+            "lhs": "rsi_14",
+            "operator": ">=",
+            "rhs": 70
+          },
+          {
+            "lhs": "close",
+            "operator": "<=",
+            "rhs": "ema_100 * 1.015"
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.0,
+            "units": "pips"
+          }
+        ]
+      },
+      "order_type": "market"
+    },
+    "signal_expiration_bars": 1
+  },
+  "exit_logic": {
+    "primary_exit": {
+      "type": "mean_reversion_to_mid",
+      "long_condition": {
+        "lhs": "close",
+        "operator": ">=",
+        "rhs": "bb_mid"
+      },
+      "short_condition": {
+        "lhs": "close",
+        "operator": "<=",
+        "rhs": "bb_mid"
+      }
+    },
+    "initial_stop": {
+      "type": "atr_multiple",
+      "indicator": "atr_14",
+      "multiple": 1.5
+    },
+    "catastrophic_zscore_stop": {
+      "type": "zscore_stop",
+      "condition": {
+        "lhs": "abs(price_zscore)",
+        "operator": ">=",
+        "rhs": 3.5
+      }
+    },
+    "time_exit": {
+      "enabled": true,
+      "max_bars_in_trade": 24
+    },
+    "friday_close_exit": {
+      "enabled": true,
+      "close_time": "16:30",
+      "timezone": "America/New_York"
+    },
+    "same_bar_priority": [
+      "initial_stop",
+      "catastrophic_zscore_stop",
+      "primary_exit",
+      "time_exit",
+      "friday_close_exit"
+    ]
+  },
+  "risk_model": {
+    "position_sizing": {
+      "method": "fixed_fractional_risk",
+      "risk_pct_of_equity": 0.35,
+      "stop_distance_source": "initial_stop"
+    },
+    "max_open_positions": 2,
+    "max_positions_per_symbol": 1,
+    "gross_exposure_cap_pct_of_equity": 100.0,
+    "daily_loss_limit_pct": 1.5,
+    "max_drawdown_halt_pct": 10.0,
+    "pyramiding": false
+  },
+  "execution_model": {
+    "fill_model": "next_bar_open",
+    "spread_model_ref": "historical_spread_snapshot_v1",
+    "slippage_model_ref": "fx_major_default_v1",
+    "commission_model_ref": "retail_fx_commission_v1",
+    "swap_model_ref": "broker_swap_default_v1",
+    "partial_fill_policy": "not_applicable_for_market_orders",
+    "reject_policy": "log_and_skip_signal"
+  },
+  "filters": [
+    {
+      "id": "atr_floor",
+      "lhs": "atr_14",
+      "operator": ">=",
+      "rhs": 0.0005,
+      "units": "price"
+    },
+    {
+      "id": "cooldown_after_exit",
+      "type": "bars_since_last_exit",
+      "operator": ">=",
+      "rhs": 3
+    },
+    {
+      "id": "session_block_late_friday",
+      "type": "no_new_entries_after_time",
+      "day": "Friday",
+      "time": "15:00",
+      "timezone": "America/New_York"
+    }
+  ],
+  "ambiguities_and_defaults": {
+    "reference_mean_choice": "Bollinger middle band used as explicit mean reference; z-score uses rolling standard deviation of close.",
+    "trend_blocker_choice": "100 EMA distance guard added to avoid fading strong one-directional trends too aggressively.",
+    "same_bar_conflict_rule": "apply exit priority list",
+    "indicator_alignment_rule": "all calculations use completed bars only",
+    "missing_data_fallback": "reject_run",
+    "notes": [
+      "This is a generic single-asset Chan-style mean reversion research candidate, not a verbatim code listing from the book."
+    ]
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "experiment_plan",
+  "strategy_ref": {
+    "strategy_name": "FX_TimeSeriesMomentum_Breakout_D1",
+    "strategy_version": "1.0.0"
+  },
+  "run_metadata": {
+    "run_purpose": "baseline_research_and_parameter_search",
+    "owner": "OpenAI",
+    "random_seed": 424242
+  },
+  "data_selection": {
+    "dataset_ref": "fx-majors-d1-certified-v1",
+    "dataset_version": "2026.04",
+    "spread_dataset_ref": "fx-majors-spread-certified-v1",
+    "calendar_ref": "ny_federal_and_major_fx_holidays_v1"
+  },
+  "cost_models": {
+    "commission_model_ref": "retail_fx_commission_v1",
+    "slippage_model_ref": "fx_major_default_v1",
+    "swap_model_ref": "broker_swap_default_v1"
+  },
+  "splits": {
+    "in_sample": {
+      "start": "2015-01-01",
+      "end": "2021-12-31"
+    },
+    "out_of_sample": {
+      "start": "2022-01-01",
+      "end": "2024-12-31"
+    },
+    "holdout": {
+      "start": "2025-01-01",
+      "end": "2026-03-31"
+    }
+  },
+  "validation": {
+    "walk_forward": {
+      "enabled": true,
+      "train_window_months": 36,
+      "test_window_months": 6,
+      "step_months": 3
+    },
+    "monte_carlo": {
+      "enabled": true,
+      "iterations": 500,
+      "method": "trade_sequence_resampling"
+    },
+    "regime_segmentation": {
+      "enabled": true,
+      "dimensions": [
+        "volatility",
+        "usd_trend",
+        "carry_proxy"
+      ]
+    }
+  },
+  "ranking": {
+    "primary_metric": "out_of_sample_sharpe",
+    "secondary_metrics": [
+      "profit_factor",
+      "net_profit",
+      "max_drawdown_pct",
+      "trade_count"
+    ]
+  },
+  "acceptance_thresholds": {
+    "min_trade_count": 50,
+    "min_profit_factor": 1.1,
+    "max_drawdown_pct": 15.0,
+    "min_out_of_sample_sharpe": 0.7,
+    "min_holdout_profit_factor": 1.0
+  },
+  "outputs": {
+    "required": [
+      "run_summary",
+      "trade_blotter",
+      "equity_curve",
+      "parameter_trials",
+      "walk_forward_summary",
+      "readiness_report"
+    ],
+    "persist_artifacts": true
+  },
+  "notes": [
+    "Daily breakout strategies can have lower trade counts than intraday systems; thresholds reflect that."
+  ]
+}

@@ -1,0 +1,221 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "strategy_ir",
+  "metadata": {
+    "strategy_name": "FX_TurnOfMonth_USDSeasonality_D1",
+    "strategy_version": "1.0.0",
+    "author": "OpenAI",
+    "created_utc": "2026-04-11T22:15:00Z",
+    "objective": "Calendar-effect strategy for spot FX using fixed turn-of-month holding windows on a USD-cross basket",
+    "status": "research_candidate",
+    "notes": [
+      "Built from publicly available descriptions of Ernest P. Chan's seasonal/calendar strategy category.",
+      "FXLab schema inferred from user-provided examples; field names may need adaptation to exact product schema.",
+      "Implementation assumptions are explicit because the book category is public but exact FX instrument rules are not."
+    ]
+  },
+  "universe": {
+    "asset_class": "spot_fx",
+    "symbols": [
+      "EURUSD",
+      "GBPUSD",
+      "AUDUSD",
+      "NZDUSD",
+      "USDJPY",
+      "USDCAD"
+    ],
+    "selection_mode": "fixed_basket",
+    "direction": "basket_rules"
+  },
+  "data_requirements": {
+    "primary_timeframe": "1d",
+    "required_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "spread"
+    ],
+    "timezone": "America/New_York",
+    "session_rules": {
+      "allowed_entry_days": [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday"
+      ]
+    },
+    "warmup_bars": 60,
+    "missing_bar_policy": "skip_missing_calendar_event_if_required_bar_missing",
+    "calendar_dependencies": [
+      "month_end_trading_day_index"
+    ]
+  },
+  "indicators": [
+    {
+      "id": "business_day_of_month",
+      "type": "calendar_business_day_index",
+      "timeframe": "1d"
+    },
+    {
+      "id": "days_to_month_end",
+      "type": "calendar_days_to_month_end",
+      "timeframe": "1d"
+    },
+    {
+      "id": "atr_14",
+      "type": "atr",
+      "length": 14,
+      "timeframe": "1d"
+    },
+    {
+      "id": "ema_20",
+      "type": "ema",
+      "source": "close",
+      "length": 20,
+      "timeframe": "1d"
+    }
+  ],
+  "entry_logic": {
+    "evaluation_timing": "on_bar_close",
+    "execution_timing": "next_bar_open",
+    "basket_templates": [
+      {
+        "id": "usd_short_tom_basket",
+        "active_when": {
+          "lhs": "days_to_month_end",
+          "operator": "==",
+          "rhs": 1
+        },
+        "legs": [
+          {
+            "symbol": "EURUSD",
+            "side": "buy",
+            "weight": 1.0
+          },
+          {
+            "symbol": "GBPUSD",
+            "side": "buy",
+            "weight": 1.0
+          },
+          {
+            "symbol": "AUDUSD",
+            "side": "buy",
+            "weight": 0.75
+          },
+          {
+            "symbol": "NZDUSD",
+            "side": "buy",
+            "weight": 0.75
+          },
+          {
+            "symbol": "USDJPY",
+            "side": "sell",
+            "weight": 1.0
+          },
+          {
+            "symbol": "USDCAD",
+            "side": "sell",
+            "weight": 1.0
+          }
+        ]
+      }
+    ],
+    "entry_filters": {
+      "op": "and",
+      "conditions": [
+        {
+          "lhs": "spread_basket_average",
+          "operator": "<=",
+          "rhs": 2.5,
+          "units": "pips"
+        },
+        {
+          "lhs": "atr_14",
+          "operator": ">=",
+          "rhs": 0.003,
+          "units": "price"
+        }
+      ]
+    },
+    "signal_expiration_bars": 1
+  },
+  "exit_logic": {
+    "scheduled_exit": {
+      "type": "calendar_exit",
+      "condition": {
+        "lhs": "business_day_of_month",
+        "operator": ">=",
+        "rhs": 3
+      }
+    },
+    "initial_stop": {
+      "type": "basket_atr_multiple",
+      "indicator": "atr_14",
+      "multiple": 2.0
+    },
+    "equity_stop": {
+      "type": "basket_open_loss_pct",
+      "threshold_pct": 1.25
+    },
+    "friday_close_exit": {
+      "enabled": true,
+      "close_time": "16:30",
+      "timezone": "America/New_York"
+    },
+    "same_bar_priority": [
+      "equity_stop",
+      "initial_stop",
+      "scheduled_exit",
+      "friday_close_exit"
+    ]
+  },
+  "risk_model": {
+    "position_sizing": {
+      "method": "fixed_basket_risk",
+      "risk_pct_of_equity": 0.35,
+      "allocation_mode": "inverse_volatility_by_leg"
+    },
+    "max_open_baskets": 1,
+    "gross_exposure_cap_pct_of_equity": 150.0,
+    "daily_loss_limit_pct": 1.5,
+    "max_drawdown_halt_pct": 10.0,
+    "pyramiding": false
+  },
+  "execution_model": {
+    "fill_model": "next_bar_open_all_legs",
+    "spread_model_ref": "historical_spread_snapshot_v1",
+    "slippage_model_ref": "fx_major_default_v1",
+    "commission_model_ref": "retail_fx_commission_v1",
+    "swap_model_ref": "broker_swap_default_v1",
+    "partial_fill_policy": "reject_basket_entry_if_any_required_leg_unfilled",
+    "reject_policy": "log_and_skip_basket_signal"
+  },
+  "filters": [
+    {
+      "id": "skip_december_year_end_window",
+      "type": "calendar_block",
+      "month": 12,
+      "business_day_start": -2,
+      "business_day_end": 3
+    },
+    {
+      "id": "one_basket_per_month",
+      "type": "cooldown_calendar",
+      "operator": "<=",
+      "rhs": 1,
+      "unit": "basket_entry_per_calendar_month"
+    }
+  ],
+  "ambiguities_and_defaults": {
+    "seasonal_effect_choice": "Turn-of-month basket selected as an explicit FX calendar-effect research candidate because public descriptions of seasonal strategies are generic rather than FX-specific.",
+    "basket_direction_choice": "USD-short bias basket used as a testable hypothesis, not a claimed universal edge.",
+    "same_bar_conflict_rule": "apply exit priority list",
+    "indicator_alignment_rule": "all calculations use completed bars only",
+    "missing_data_fallback": "skip affected month event",
+    "notes": [
+      "This artifact is best treated as a hypothesis template for FXLab, not a vetted production strategy."
+    ]
+  }
+}

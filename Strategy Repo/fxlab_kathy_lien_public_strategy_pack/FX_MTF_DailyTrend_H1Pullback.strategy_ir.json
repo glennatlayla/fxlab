@@ -1,0 +1,271 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "strategy_ir",
+  "metadata": {
+    "strategy_name": "FX_MTF_DailyTrend_H1Pullback",
+    "strategy_version": "1.0.0",
+    "author": "OpenAI",
+    "created_utc": "2026-04-11T20:30:00Z",
+    "objective": "Public-description-based implementation of Kathy Lien style multiple time frame FX analysis: use the daily chart to define trend and the hourly chart to time entries in the direction of that trend.",
+    "status": "research_candidate",
+    "notes": [
+      "Built from publicly available descriptions that the strategy uses a higher timeframe to define overall trend and a lower timeframe to determine entry levels.",
+      "Daily trend identification and hourly pullback trigger are explicit implementation assumptions added so the idea can compile in FXLab."
+    ]
+  },
+  "universe": {
+    "asset_class": "spot_fx",
+    "symbols": [
+      "EURUSD",
+      "GBPUSD",
+      "USDJPY",
+      "AUDUSD"
+    ],
+    "direction": "both"
+  },
+  "data_requirements": {
+    "primary_timeframe": "1h",
+    "confirmation_timeframes": [
+      "1d"
+    ],
+    "required_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "spread"
+    ],
+    "timezone": "America/New_York",
+    "session_rules": {
+      "allowed_entry_days": [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday"
+      ],
+      "blocked_entry_windows": [
+        {
+          "day": "Friday",
+          "start_time": "16:00",
+          "end_time": "23:59"
+        }
+      ]
+    },
+    "warmup_bars": 250,
+    "missing_bar_policy": "reject_run_if_gaps_exceed_threshold"
+  },
+  "indicators": [
+    {
+      "id": "ema_daily_fast",
+      "type": "ema",
+      "source": "close",
+      "length": 20,
+      "timeframe": "1d"
+    },
+    {
+      "id": "ema_daily_slow",
+      "type": "ema",
+      "source": "close",
+      "length": 50,
+      "timeframe": "1d"
+    },
+    {
+      "id": "ema_h1_fast",
+      "type": "ema",
+      "source": "close",
+      "length": 20,
+      "timeframe": "1h"
+    },
+    {
+      "id": "atr_h1",
+      "type": "atr",
+      "length": 14,
+      "timeframe": "1h"
+    },
+    {
+      "id": "swing_high_h1",
+      "type": "rolling_max",
+      "source": "high",
+      "length": 120,
+      "timeframe": "1h"
+    },
+    {
+      "id": "swing_low_h1",
+      "type": "rolling_min",
+      "source": "low",
+      "length": 120,
+      "timeframe": "1h"
+    }
+  ],
+  "derived_fields": [
+    {
+      "id": "fib_38_long",
+      "formula": "swing_high_h1 - ((swing_high_h1 - swing_low_h1) * 0.382)"
+    },
+    {
+      "id": "fib_61_long",
+      "formula": "swing_high_h1 - ((swing_high_h1 - swing_low_h1) * 0.618)"
+    },
+    {
+      "id": "fib_38_short",
+      "formula": "swing_low_h1 + ((swing_high_h1 - swing_low_h1) * 0.382)"
+    },
+    {
+      "id": "fib_61_short",
+      "formula": "swing_low_h1 + ((swing_high_h1 - swing_low_h1) * 0.618)"
+    }
+  ],
+  "entry_logic": {
+    "evaluation_timing": "on_bar_close",
+    "execution_timing": "next_bar_open",
+    "long": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "ema_daily_fast",
+            "operator": ">",
+            "rhs": "ema_daily_slow"
+          },
+          {
+            "lhs": "close_1d",
+            "operator": ">",
+            "rhs": "ema_daily_fast"
+          },
+          {
+            "lhs": "low",
+            "operator": "<=",
+            "rhs": "fib_61_long"
+          },
+          {
+            "lhs": "close",
+            "operator": ">=",
+            "rhs": "fib_38_long"
+          },
+          {
+            "lhs": "close",
+            "operator": ">",
+            "rhs": "ema_h1_fast"
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.0,
+            "units": "pips"
+          }
+        ]
+      },
+      "order_type": "market"
+    },
+    "short": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "ema_daily_fast",
+            "operator": "<",
+            "rhs": "ema_daily_slow"
+          },
+          {
+            "lhs": "close_1d",
+            "operator": "<",
+            "rhs": "ema_daily_fast"
+          },
+          {
+            "lhs": "high",
+            "operator": ">=",
+            "rhs": "fib_61_short"
+          },
+          {
+            "lhs": "close",
+            "operator": "<=",
+            "rhs": "fib_38_short"
+          },
+          {
+            "lhs": "close",
+            "operator": "<",
+            "rhs": "ema_h1_fast"
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.0,
+            "units": "pips"
+          }
+        ]
+      },
+      "order_type": "market"
+    }
+  },
+  "exit_logic": {
+    "initial_stop": {
+      "type": "atr_multiple",
+      "indicator": "atr_h1",
+      "multiple": 1.5
+    },
+    "take_profit": {
+      "type": "risk_reward_multiple",
+      "multiple": 2.0
+    },
+    "break_even": {
+      "enabled": true,
+      "trigger_r_multiple": 1.0,
+      "offset_pips": 0.1
+    },
+    "max_bars_in_trade": 48,
+    "session_close_exit": {
+      "enabled": true,
+      "friday_close_time": "16:30",
+      "timezone": "America/New_York"
+    },
+    "same_bar_priority": [
+      "stop_loss",
+      "take_profit",
+      "time_exit"
+    ]
+  },
+  "risk_model": {
+    "position_sizing": {
+      "method": "fixed_fractional_risk",
+      "risk_pct_of_equity": 0.5
+    },
+    "max_open_positions": 1,
+    "max_positions_per_symbol": 1,
+    "daily_loss_limit_pct": 2.0,
+    "max_drawdown_halt_pct": 10.0,
+    "pyramiding": false
+  },
+  "execution_model": {
+    "fill_model": "next_bar_open",
+    "slippage_model_ref": "fx_major_default_v1",
+    "spread_model_ref": "historical_spread_snapshot_v1",
+    "commission_model_ref": "retail_fx_commission_v1",
+    "swap_model_ref": "broker_swap_default_v1",
+    "partial_fill_policy": "not_applicable_for_market_orders",
+    "reject_policy": "log_and_skip_signal"
+  },
+  "filters": [
+    {
+      "id": "atr_floor",
+      "lhs": "atr_h1",
+      "operator": ">=",
+      "rhs": 0.0005
+    },
+    {
+      "id": "cooldown_after_exit",
+      "type": "bars_since_last_exit",
+      "operator": ">=",
+      "rhs": 4
+    }
+  ],
+  "ambiguities_and_defaults": {
+    "same_bar_conflict_rule": "apply exit priority list",
+    "indicator_alignment_rule": "all indicators computed on completed bars only",
+    "missing_data_fallback": "reject_run",
+    "notes": [
+      "Public sources describe the concept of using daily trend and hourly entries but do not provide a complete native ruleset.",
+      "EMA lengths, swing lookback, Fibonacci band usage, and risk rules are explicit implementation assumptions for testability."
+    ]
+  }
+}

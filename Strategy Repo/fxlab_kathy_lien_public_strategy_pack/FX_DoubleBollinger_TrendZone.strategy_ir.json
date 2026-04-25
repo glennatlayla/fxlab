@@ -1,0 +1,246 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "strategy_ir",
+  "metadata": {
+    "strategy_name": "FX_DoubleBollinger_TrendZone",
+    "strategy_version": "1.0.0",
+    "author": "OpenAI",
+    "created_utc": "2026-04-11T20:30:00Z",
+    "objective": "Public-description-based implementation of Kathy Lien's Double Bollinger Bands idea using 20-period Bollinger Bands at 1 and 2 standard deviations to identify trend zones and trade continuation.",
+    "status": "research_candidate",
+    "notes": [
+      "Built from publicly available descriptions that use two Bollinger Band sets with the same 20-period basis and 1- and 2-standard-deviation envelopes.",
+      "Entry and exit rules are explicit implementation assumptions so the concept can be backtested deterministically."
+    ]
+  },
+  "universe": {
+    "asset_class": "spot_fx",
+    "symbols": [
+      "EURUSD",
+      "GBPUSD",
+      "USDJPY",
+      "AUDUSD"
+    ],
+    "direction": "both"
+  },
+  "data_requirements": {
+    "primary_timeframe": "4h",
+    "confirmation_timeframes": [],
+    "required_fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "spread"
+    ],
+    "timezone": "America/New_York",
+    "session_rules": {
+      "allowed_entry_days": [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday"
+      ],
+      "blocked_entry_windows": [
+        {
+          "day": "Friday",
+          "start_time": "16:00",
+          "end_time": "23:59"
+        }
+      ]
+    },
+    "warmup_bars": 120,
+    "missing_bar_policy": "reject_run_if_gaps_exceed_threshold"
+  },
+  "indicators": [
+    {
+      "id": "bb_mid",
+      "type": "sma",
+      "source": "close",
+      "length": 20,
+      "timeframe": "4h"
+    },
+    {
+      "id": "bb_upper_1",
+      "type": "bollinger_upper",
+      "source": "close",
+      "length": 20,
+      "stddev": 1.0,
+      "timeframe": "4h"
+    },
+    {
+      "id": "bb_lower_1",
+      "type": "bollinger_lower",
+      "source": "close",
+      "length": 20,
+      "stddev": 1.0,
+      "timeframe": "4h"
+    },
+    {
+      "id": "bb_upper_2",
+      "type": "bollinger_upper",
+      "source": "close",
+      "length": 20,
+      "stddev": 2.0,
+      "timeframe": "4h"
+    },
+    {
+      "id": "bb_lower_2",
+      "type": "bollinger_lower",
+      "source": "close",
+      "length": 20,
+      "stddev": 2.0,
+      "timeframe": "4h"
+    },
+    {
+      "id": "atr_4h",
+      "type": "atr",
+      "length": 14,
+      "timeframe": "4h"
+    }
+  ],
+  "entry_logic": {
+    "evaluation_timing": "on_bar_close",
+    "execution_timing": "next_bar_open",
+    "long": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "close",
+            "operator": ">=",
+            "rhs": "bb_upper_1"
+          },
+          {
+            "lhs": "close",
+            "operator": "<=",
+            "rhs": "bb_upper_2"
+          },
+          {
+            "lhs": "bb_mid",
+            "operator": ">",
+            "rhs": "bb_mid_prev_1"
+          },
+          {
+            "lhs": "close_prev_1",
+            "operator": "<",
+            "rhs": "bb_upper_1_prev_1"
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.0,
+            "units": "pips"
+          }
+        ]
+      },
+      "order_type": "market"
+    },
+    "short": {
+      "logic": {
+        "op": "and",
+        "conditions": [
+          {
+            "lhs": "close",
+            "operator": "<=",
+            "rhs": "bb_lower_1"
+          },
+          {
+            "lhs": "close",
+            "operator": ">=",
+            "rhs": "bb_lower_2"
+          },
+          {
+            "lhs": "bb_mid",
+            "operator": "<",
+            "rhs": "bb_mid_prev_1"
+          },
+          {
+            "lhs": "close_prev_1",
+            "operator": ">",
+            "rhs": "bb_lower_1_prev_1"
+          },
+          {
+            "lhs": "spread",
+            "operator": "<=",
+            "rhs": 2.0,
+            "units": "pips"
+          }
+        ]
+      },
+      "order_type": "market"
+    }
+  },
+  "exit_logic": {
+    "initial_stop": {
+      "type": "atr_multiple",
+      "indicator": "atr_4h",
+      "multiple": 1.25
+    },
+    "take_profit": {
+      "type": "opposite_inner_band_touch"
+    },
+    "trailing_stop": {
+      "enabled": true,
+      "type": "middle_band_close_violation"
+    },
+    "time_exit": {
+      "enabled": true,
+      "max_bars_in_trade": 18
+    },
+    "session_close_exit": {
+      "enabled": true,
+      "friday_close_time": "16:30",
+      "timezone": "America/New_York"
+    },
+    "same_bar_priority": [
+      "stop_loss",
+      "take_profit",
+      "time_exit"
+    ]
+  },
+  "risk_model": {
+    "position_sizing": {
+      "method": "fixed_fractional_risk",
+      "risk_pct_of_equity": 0.5
+    },
+    "max_open_positions": 1,
+    "max_positions_per_symbol": 1,
+    "daily_loss_limit_pct": 2.0,
+    "max_drawdown_halt_pct": 10.0,
+    "pyramiding": false
+  },
+  "execution_model": {
+    "fill_model": "next_bar_open",
+    "slippage_model_ref": "fx_major_default_v1",
+    "spread_model_ref": "historical_spread_snapshot_v1",
+    "commission_model_ref": "retail_fx_commission_v1",
+    "swap_model_ref": "broker_swap_default_v1",
+    "partial_fill_policy": "not_applicable_for_market_orders",
+    "reject_policy": "log_and_skip_signal"
+  },
+  "filters": [
+    {
+      "id": "atr_floor",
+      "lhs": "atr_4h",
+      "operator": ">=",
+      "rhs": 0.001
+    },
+    {
+      "id": "cooldown_after_exit",
+      "type": "bars_since_last_exit",
+      "operator": ">=",
+      "rhs": 2
+    }
+  ],
+  "ambiguities_and_defaults": {
+    "same_bar_conflict_rule": "apply exit priority list",
+    "indicator_alignment_rule": "all indicators computed on completed bars only",
+    "missing_data_fallback": "reject_run",
+    "notes": [
+      "Public sources support the 20-period basis and the use of 1 and 2 standard deviation bands to identify trend or range states.",
+      "This compiled version assumes continuation entries when price moves from the middle zone into the trend zone and exits on opposite inner-band / middle-band deterioration."
+    ]
+  }
+}

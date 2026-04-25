@@ -1,0 +1,91 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "experiment_plan",
+  "strategy_ref": {
+    "strategy_name": "FX_DoubleBollinger_TrendZone",
+    "strategy_version": "1.0.0"
+  },
+  "run_metadata": {
+    "run_purpose": "baseline_research_and_parameter_search",
+    "owner": "OpenAI",
+    "random_seed": 424242
+  },
+  "data_selection": {
+    "dataset_ref": "fx-majors-4h-certified-v3",
+    "dataset_version": "2026.03",
+    "spread_dataset_ref": "fx-majors-spread-certified-v1",
+    "calendar_ref": "ny_federal_and_major_fx_holidays_v1"
+  },
+  "cost_models": {
+    "commission_model_ref": "retail_fx_commission_v1",
+    "slippage_model_ref": "fx_major_default_v1",
+    "swap_model_ref": "broker_swap_default_v1"
+  },
+  "splits": {
+    "in_sample": {
+      "start": "2020-01-01",
+      "end": "2022-12-31"
+    },
+    "out_of_sample": {
+      "start": "2023-01-01",
+      "end": "2024-12-31"
+    },
+    "holdout": {
+      "start": "2025-01-01",
+      "end": "2025-12-31"
+    }
+  },
+  "validation": {
+    "walk_forward": {
+      "enabled": true,
+      "train_window_months": 12,
+      "test_window_months": 3,
+      "step_months": 3
+    },
+    "monte_carlo": {
+      "enabled": true,
+      "iterations": 500,
+      "method": "trade_sequence_resampling"
+    },
+    "regime_segmentation": {
+      "enabled": true,
+      "dimensions": [
+        "volatility",
+        "trend",
+        "session",
+        "symbol"
+      ]
+    }
+  },
+  "ranking": {
+    "primary_metric": "out_of_sample_sharpe",
+    "secondary_metrics": [
+      "profit_factor",
+      "net_profit",
+      "max_drawdown_pct",
+      "trade_count"
+    ]
+  },
+  "acceptance_thresholds": {
+    "min_trade_count": 100,
+    "min_profit_factor": 1.1,
+    "max_drawdown_pct": 12.0,
+    "min_out_of_sample_sharpe": 0.75,
+    "min_holdout_profit_factor": 1.03
+  },
+  "outputs": {
+    "required": [
+      "run_summary",
+      "trade_blotter",
+      "equity_curve",
+      "parameter_trials",
+      "walk_forward_summary",
+      "readiness_report"
+    ],
+    "persist_artifacts": true
+  },
+  "notes": [
+    "Replace dataset references with exact platform-specific IDs.",
+    "Confirm the engine supports previous-value references like bb_upper_1_prev_1 or convert them to explicit lag operators in the native schema."
+  ]
+}

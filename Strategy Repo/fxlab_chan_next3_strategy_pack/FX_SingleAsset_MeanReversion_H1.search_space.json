@@ -1,0 +1,155 @@
+{
+  "schema_version": "0.1-inferred",
+  "artifact_type": "search_space",
+  "strategy_ref": {
+    "strategy_name": "FX_SingleAsset_MeanReversion_H1",
+    "strategy_version": "1.0.0"
+  },
+  "optimization": {
+    "method": "grid_then_random_refinement",
+    "primary_objective": "out_of_sample_sharpe",
+    "secondary_objectives": [
+      "profit_factor",
+      "max_drawdown_pct",
+      "trade_count"
+    ],
+    "max_trials": 300
+  },
+  "parameters": [
+    {
+      "name": "bb_length",
+      "path": "indicators[0].length",
+      "type": "integer",
+      "domain": {
+        "values": [
+          10,
+          20,
+          30
+        ]
+      },
+      "default": 20
+    },
+    {
+      "name": "bb_stddev",
+      "path": "indicators[2].stddev",
+      "type": "float",
+      "domain": {
+        "values": [
+          1.5,
+          2.0,
+          2.5
+        ]
+      },
+      "default": 2.0
+    },
+    {
+      "name": "entry_z_long",
+      "path": "entry_logic.long.logic.conditions[0].rhs",
+      "type": "float",
+      "domain": {
+        "values": [
+          -1.5,
+          -2.0,
+          -2.5,
+          -3.0
+        ]
+      },
+      "default": -2.0
+    },
+    {
+      "name": "entry_z_short",
+      "path": "entry_logic.short.logic.conditions[0].rhs",
+      "type": "float",
+      "domain": {
+        "values": [
+          1.5,
+          2.0,
+          2.5,
+          3.0
+        ]
+      },
+      "default": 2.0
+    },
+    {
+      "name": "rsi_long_max",
+      "path": "entry_logic.long.logic.conditions[1].rhs",
+      "type": "integer",
+      "domain": {
+        "values": [
+          25,
+          30,
+          35
+        ]
+      },
+      "default": 30
+    },
+    {
+      "name": "rsi_short_min",
+      "path": "entry_logic.short.logic.conditions[1].rhs",
+      "type": "integer",
+      "domain": {
+        "values": [
+          65,
+          70,
+          75
+        ]
+      },
+      "default": 70
+    },
+    {
+      "name": "atr_stop_multiple",
+      "path": "exit_logic.initial_stop.multiple",
+      "type": "float",
+      "domain": {
+        "values": [
+          1.0,
+          1.5,
+          2.0,
+          2.5
+        ]
+      },
+      "default": 1.5
+    },
+    {
+      "name": "risk_pct",
+      "path": "risk_model.position_sizing.risk_pct_of_equity",
+      "type": "float",
+      "domain": {
+        "values": [
+          0.2,
+          0.35,
+          0.5
+        ]
+      },
+      "default": 0.35
+    },
+    {
+      "name": "max_bars_in_trade",
+      "path": "exit_logic.time_exit.max_bars_in_trade",
+      "type": "integer",
+      "domain": {
+        "values": [
+          8,
+          12,
+          24,
+          36
+        ]
+      },
+      "default": 24
+    }
+  ],
+  "constraints": [
+    {
+      "expression": "entry_z_short == abs(entry_z_long)"
+    },
+    {
+      "expression": "bb_stddev > 0"
+    },
+    {
+      "expression": "risk_pct <= 0.75"
+    }
+  ],
+  "notes": [
+    "Mirror Bollinger stddev into upper/lower band definitions if your engine stores separate objects."
+  ]
+}
