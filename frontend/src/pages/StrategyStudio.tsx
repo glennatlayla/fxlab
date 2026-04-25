@@ -4,13 +4,17 @@
  * Purpose:
  *   Wire together the draft wizard form, autosave persistence, and
  *   draft recovery into a single page. This is the primary entry
- *   point for creating a new trading strategy.
+ *   point for creating a new trading strategy. M2.D1 adds a second
+ *   "Import from file" tab that delegates to ImportIrPanel for the
+ *   IR-upload flow exposed by the M2.C1 backend route.
  *
  * Responsibilities:
+ *   - Render the Draft / Import-from-file tab switcher.
  *   - Detect recoverable drafts (localStorage + backend) via useDraftRecovery.
  *   - Persist draft edits via useDraftAutosave (debounced local + periodic backend).
  *   - Render DraftRecoveryBanner when an abandoned draft is found.
- *   - Render StrategyDraftForm with autosave and submit callbacks.
+ *   - Render StrategyDraftForm with autosave and submit callbacks (Draft tab).
+ *   - Render ImportIrPanel for the Import-from-file tab.
  *   - Show loading state while checking for drafts.
  *
  * Does NOT:
@@ -25,6 +29,7 @@
  *   - StrategyDraftForm: multi-step wizard component.
  *   - DraftRecoveryBanner: UI banner for draft restoration.
  *   - LoadingState: centered spinner for loading states.
+ *   - ImportIrPanel: file-upload surface for the M2.C1 import-IR endpoint.
  *   - useAuth: authentication context.
  */
 
@@ -33,11 +38,23 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/auth/useAuth";
 import { DraftRecoveryBanner } from "@/components/ui/DraftRecoveryBanner";
 import { LoadingState } from "@/components/ui/LoadingState";
+import { ImportIrPanel } from "@/components/strategy_studio/ImportIrPanel";
 import { StrategyDraftForm } from "@/features/strategy/components/StrategyDraftForm";
 import { strategyApi, StrategyApiError } from "@/features/strategy/api";
 import { useDraftAutosave } from "@/features/strategy/useDraftAutosave";
 import { useDraftRecovery } from "@/features/strategy/useDraftRecovery";
 import type { StrategyDraftFormData, StrategyWizardStep } from "@/types/strategy";
+
+// ---------------------------------------------------------------------------
+// Tab definitions
+// ---------------------------------------------------------------------------
+
+type StudioTab = "draft" | "import";
+
+const TAB_DEFINITIONS: ReadonlyArray<{ id: StudioTab; label: string }> = [
+  { id: "draft", label: "Draft" },
+  { id: "import", label: "Import from file" },
+];
 
 // ---------------------------------------------------------------------------
 // Default form data — clean slate for new strategies
@@ -63,6 +80,9 @@ const DEFAULT_FORM_DATA: StrategyDraftFormData = {
 export default function StrategyStudio() {
   useAuth();
   const navigate = useNavigate();
+
+  // ---- Tab state — Draft vs Import-from-file ----
+  const [activeTab, setActiveTab] = useState<StudioTab>("draft");
 
   // ---- Submission state ----
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -177,33 +197,69 @@ export default function StrategyStudio() {
         </p>
       </div>
 
-      {/* Draft recovery banner — shown only when an abandoned draft is detected */}
-      {recoverableDraft && (
-        <DraftRecoveryBanner
-          savedAt={recoverableDraft.savedAt}
-          onRestore={handleRestore}
-          onDiscard={handleDiscard}
-        />
+      {/* Tab switcher: Draft form vs Import-from-file (M2.D1) */}
+      <div
+        role="tablist"
+        aria-label="Strategy creation method"
+        className="flex gap-1 border-b border-surface-200"
+        data-testid="strategy-studio-tabs"
+      >
+        {TAB_DEFINITIONS.map((tab) => {
+          const isActive = tab.id === activeTab;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => setActiveTab(tab.id)}
+              data-testid={`strategy-studio-tab-${tab.id}`}
+              className={
+                "-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors " +
+                (isActive
+                  ? "border-brand-600 text-brand-700"
+                  : "border-transparent text-surface-500 hover:text-surface-700")
+              }
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeTab === "draft" && (
+        <>
+          {/* Draft recovery banner — shown only when an abandoned draft is detected */}
+          {recoverableDraft && (
+            <DraftRecoveryBanner
+              savedAt={recoverableDraft.savedAt}
+              onRestore={handleRestore}
+              onDiscard={handleDiscard}
+            />
+          )}
+
+          {/* Submission error banner */}
+          {submitError && (
+            <div
+              className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+              data-testid="strategy-submit-error"
+            >
+              <strong>Error:</strong> {submitError}
+            </div>
+          )}
+
+          {/* Strategy draft wizard */}
+          <StrategyDraftForm
+            initialData={formData}
+            uncertainties={[]}
+            onAutosave={handleAutosave}
+            onSubmit={handleSubmit}
+            isSubmitting={isSubmitting}
+          />
+        </>
       )}
 
-      {/* Submission error banner */}
-      {submitError && (
-        <div
-          className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
-          data-testid="strategy-submit-error"
-        >
-          <strong>Error:</strong> {submitError}
-        </div>
-      )}
-
-      {/* Strategy draft wizard */}
-      <StrategyDraftForm
-        initialData={formData}
-        uncertainties={[]}
-        onAutosave={handleAutosave}
-        onSubmit={handleSubmit}
-        isSubmitting={isSubmitting}
-      />
+      {activeTab === "import" && <ImportIrPanel />}
     </div>
   );
 }
