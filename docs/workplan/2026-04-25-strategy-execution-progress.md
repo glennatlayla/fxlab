@@ -19,9 +19,11 @@ Per §16 Rule 4, phase completion requires
 |--------|--------------------------------------------|-------------|---------|-------------|
 | M1.A1  | Pydantic schema for strategy_ir.json       | DONE        | c64ab96 | orchestrator |
 | M1.A2  | Reference resolver                         | DONE        | c684dd2 | orchestrator |
-| M1.A3  | IR → SignalStrategy compiler               | NOT_STARTED |         |             |
-| M1.A4  | Lookback notation handler                  | NOT_STARTED |         |             |
-| M1.A5  | Risk model + sizing translation            | NOT_STARTED |         |             |
+| M1.A3  | IR → SignalStrategy compiler               | DONE        | 3a3e453 | orchestrator |
+| M1.A4  | Lookback notation handler                  | DONE        | 59b05a2 | orchestrator |
+| M1.A5  | Risk model + sizing translation            | DONE        | ca96e3e | orchestrator |
+
+A4+A5 compiler integration: `049e1dd`.
 
 ## Track B — Indicator coverage (parallel after A1)
 
@@ -38,12 +40,12 @@ Track B integration commit (default_registry wiring): `d11c83c`.
 
 ## Track C — API + run plumbing (after A3)
 
-| ID     | Milestone                                  | Status      | Commit | Owner |
-|--------|--------------------------------------------|-------------|--------|-------|
-| M2.C1  | POST /strategies/import-ir                 | NOT_STARTED |        |       |
-| M2.C2  | POST /runs/from-ir (DECISION GATE: dataset_ref syntax) | NOT_STARTED |        |       |
-| M2.C3  | Results endpoints expansion                | NOT_STARTED |        |       |
-| M2.C4  | Strategy detail with parsed IR             | NOT_STARTED |        |       |
+| ID     | Milestone                                  | Status      | Commit  | Owner       |
+|--------|--------------------------------------------|-------------|---------|-------------|
+| M2.C1  | POST /strategies/import-ir                 | DONE        | a4169c3 | orchestrator |
+| M2.C2  | POST /runs/from-ir                         | DONE        | c43205f | orchestrator |
+| M2.C3  | Results endpoints expansion                | NOT_STARTED |         |             |
+| M2.C4  | Strategy detail with parsed IR             | NOT_STARTED |         |             |
 
 ## Track D — Frontend (parallel after C contracts)
 
