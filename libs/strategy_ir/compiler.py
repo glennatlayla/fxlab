@@ -933,6 +933,15 @@ class StrategyIRCompiler:
                 f"failed to parse expression {expression!r} at {location}: {exc.msg}"
             ) from exc
 
+        # ``ast.parse`` is typed as returning ``ast.Module | ast.Expression
+        # | ast.Interactive | ast.FunctionType`` because the return type
+        # depends on the ``mode`` argument. We always pass ``mode='eval'``
+        # so the result is ``ast.Expression`` and ``.body`` is a single
+        # ``ast.expr`` node. Assert here so mypy can narrow the union.
+        assert isinstance(tree, ast.Expression), (
+            f"expected ast.Expression for mode={_AST_PARSE_EXPR_MODE!r}, got {type(tree).__name__}"
+        )
+
         # Walk + validate. We delegate to a recursive compile pass that
         # builds a Python lambda-equivalent closure per node.
         compiled = self._compile_ast_node(tree.body, indicator_ids, location, expression)
@@ -966,9 +975,21 @@ class StrategyIRCompiler:
         if isinstance(node, ast.UnaryOp):
             operand = self._compile_ast_node(node.operand, indicator_ids, location, source)
             if isinstance(node.op, ast.UAdd):
-                return lambda ctx, _f=operand: +_f(ctx)
+
+                def _uadd(
+                    ctx: _EvalContext, _f: Callable[[_EvalContext], float] = operand
+                ) -> float:
+                    return +_f(ctx)
+
+                return _uadd
             if isinstance(node.op, ast.USub):
-                return lambda ctx, _f=operand: -_f(ctx)
+
+                def _usub(
+                    ctx: _EvalContext, _f: Callable[[_EvalContext], float] = operand
+                ) -> float:
+                    return -_f(ctx)
+
+                return _usub
             raise ValueError(
                 f"unsupported unary operator {type(node.op).__name__} in "
                 f"expression {source!r} at {location}"
@@ -978,11 +999,35 @@ class StrategyIRCompiler:
             left = self._compile_ast_node(node.left, indicator_ids, location, source)
             right = self._compile_ast_node(node.right, indicator_ids, location, source)
             if isinstance(node.op, ast.Add):
-                return lambda ctx, _l=left, _r=right: _l(ctx) + _r(ctx)
+
+                def _add(
+                    ctx: _EvalContext,
+                    _l: Callable[[_EvalContext], float] = left,
+                    _r: Callable[[_EvalContext], float] = right,
+                ) -> float:
+                    return _l(ctx) + _r(ctx)
+
+                return _add
             if isinstance(node.op, ast.Sub):
-                return lambda ctx, _l=left, _r=right: _l(ctx) - _r(ctx)
+
+                def _sub(
+                    ctx: _EvalContext,
+                    _l: Callable[[_EvalContext], float] = left,
+                    _r: Callable[[_EvalContext], float] = right,
+                ) -> float:
+                    return _l(ctx) - _r(ctx)
+
+                return _sub
             if isinstance(node.op, ast.Mult):
-                return lambda ctx, _l=left, _r=right: _l(ctx) * _r(ctx)
+
+                def _mult(
+                    ctx: _EvalContext,
+                    _l: Callable[[_EvalContext], float] = left,
+                    _r: Callable[[_EvalContext], float] = right,
+                ) -> float:
+                    return _l(ctx) * _r(ctx)
+
+                return _mult
             if isinstance(node.op, ast.Div):
 
                 def _div(ctx: _EvalContext, _l=left, _r=right) -> float:
@@ -1036,7 +1081,14 @@ class StrategyIRCompiler:
         """Compile a bare identifier into a context-reader callable."""
         if ident in _PRICE_FIELD_GETTERS:
             getter = _PRICE_FIELD_GETTERS[ident]
-            return lambda ctx, _g=getter: _g(ctx.candle)
+
+            def _price(
+                ctx: _EvalContext,
+                _g: Callable[[Candle], float] = getter,
+            ) -> float:
+                return _g(ctx.candle)
+
+            return _price
         if ident in indicator_ids:
 
             def _ind(ctx: _EvalContext, _name: str = ident) -> float:

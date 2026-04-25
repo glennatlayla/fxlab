@@ -249,9 +249,18 @@ def _eval_node(node: ast.AST, values: dict[str, float]) -> float:
             unreachable in practice).
     """
     # Numeric literal - return its value directly. Bool/str/None were
-    # rejected at compile time.
+    # rejected at compile time, but `ast.Constant.value` is typed as a
+    # broad union (including ``EllipsisType`` and ``bytes``) so we narrow
+    # explicitly here for mypy and as a defence-in-depth check.
     if isinstance(node, ast.Constant):
-        return float(node.value)
+        value = node.value
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(
+                f"Disallowed literal at evaluate time: "
+                f"only int and float constants are permitted, "
+                f"got {type(value).__name__}."
+            )
+        return float(value)
 
     # Name reference - look up in the supplied values dict only. There
     # is no fallback to globals or builtins; the whitelist forbids any

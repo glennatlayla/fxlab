@@ -263,11 +263,29 @@ class ResearchRunService(ResearchRunServiceInterface):
             "experiment_plan_run_purpose": (experiment_plan.run_metadata.run_purpose),
         }
 
+        # Engine-config bodies (BacktestConfig / WalkForwardConfig /
+        # MonteCarloConfig) are intentionally left ``None`` at this
+        # tranche. A future tranche translates the plan's validation
+        # block into the concrete engine configs (see method docstring).
+        # ``strategy_version_id`` is None because ``ResearchRunConfig``
+        # documents that as "latest version if omitted" -- the
+        # experiment_plan's ``strategy_ref.strategy_version`` is a
+        # semver-style label, not the ULID this field expects, so we
+        # let the downstream resolver pick the latest version.
+        # ``signal_strategy_id`` mirrors ``strategy_id`` because at
+        # this tranche every IR-derived run uses the strategy's own
+        # signal pipeline (see WalkForwardConfig docstring example
+        # which uses the same pattern).
         config = ResearchRunConfig(
             run_type=run_type,
             strategy_id=strategy_id,
+            strategy_version_id=None,
+            signal_strategy_id=strategy_id,
             symbols=resolved_dataset.symbols,
             initial_equity=Decimal("100000"),
+            backtest_config=None,
+            walk_forward_config=None,
+            monte_carlo_config=None,
             metadata=metadata,
         )
 

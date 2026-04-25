@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 
 import structlog
-from requests import Session as HttpSession  # type: ignore[import-untyped]
+from requests import Session as HttpSession
 
 from libs.contracts.notification import (
     IncidentRecord,

@@ -59,13 +59,13 @@ from libs.contracts.indicator import IndicatorInfo, IndicatorParam
 # Calculators raise a clear RuntimeError at .calculate() time when either is
 # absent; .info() and module import remain safe for registry introspection.
 try:  # pragma: no cover - exercised only when the dependency is absent
-    import pandas as pd  # type: ignore[import-not-found]
-    import pandas_market_calendars as mcal  # type: ignore[import-not-found]
+    import pandas as pd
+    import pandas_market_calendars as mcal
 
     _MCAL_IMPORT_ERROR: ImportError | None = None
 except ImportError as exc:  # pragma: no cover - exercised at runtime
-    pd = None  # type: ignore[assignment]
-    mcal = None  # type: ignore[assignment]
+    pd = None
+    mcal = None
     _MCAL_IMPORT_ERROR = exc
 
 
