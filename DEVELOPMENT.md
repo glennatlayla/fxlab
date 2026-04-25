@@ -10,20 +10,23 @@ Local development environment setup for contributors.
 
 ## Setup
 
+One command does the full bootstrap on a fresh clone:
+
 ```bash
 git clone git@github.com:glennatlayla/fxlab.git
 cd fxlab
 
-# Create virtual environment and install dependencies
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Verify on Debian/Ubuntu that python3-venv is available (one-time, system-level):
+#   sudo apt install python3.12-venv
 
-# Copy environment config
-cp .env.example .env
+make bootstrap          # creates .venv, installs Python deps + pre-commit hooks,
+                        # bootstraps node LTS via nodeenv, runs frontend npm install
+make verify             # confirm everything is wired correctly (format + lint + tests + compose)
+
+cp .env.example .env    # copy environment config (one-time)
 ```
 
-Node.js is installed automatically into the venv by `ship.sh` via nodeenv. No system Node install required.
+`make bootstrap` is idempotent — re-running on an already-bootstrapped clone is safe and skips work that is already done. It is the canonical setup path; the manual `python3 -m venv .venv` / `pip install` recipe still works but is no longer the recommended starting point. Node.js is installed into the venv by nodeenv (no system Node install required).
 
 ## Running Tests
 

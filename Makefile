@@ -9,7 +9,7 @@ MYPY        := .venv/bin/mypy
 COVERAGE    := .venv/bin/coverage
 PRECOMMIT   := .venv/bin/pre-commit
 
-.PHONY: help install-dev hooks format format-check lint type-check \
+.PHONY: help bootstrap install-dev hooks format format-check lint type-check \
         test test-unit test-integration test-acceptance \
         test-shell compose-check install-smoke \
         coverage quality ci clean \
@@ -20,6 +20,64 @@ PRECOMMIT   := .venv/bin/pre-commit
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+bootstrap:  ## Full bootstrap on a fresh clone (.venv + deps + node + frontend + hooks)
+	@# Single-command bootstrap so a new dev clone reaches "make verify
+	@# green" without hunting through DEVELOPMENT.md. Documents the
+	@# system-level prerequisite (python3-venv) instead of failing
+	@# cryptically. Idempotent: re-running on an already-bootstrapped
+	@# clone is safe; nodeenv and npm install no-op when up to date.
+	@#
+	@# Sequencing rationale:
+	@#   1. Verify python3 -m venv works (catches the "apt install
+	@#      python3.12-venv missing" failure mode the 2026-04-25
+	@#      Linux clone hit).
+	@#   2. Create .venv and upgrade pip (newer pip resolves dep
+	@#      conflicts faster than the system-shipped one).
+	@#   3. Install Python dev deps via the existing install-dev
+	@#      target (pulls requirements.txt + requirements-dev.txt).
+	@#   4. Install pre-commit git hooks (catches format/lint locally
+	@#      before bad commits land — the Tranche L slip mode).
+	@#   5. Bootstrap node into .venv via nodeenv (so .venv/bin/node
+	@#      and .venv/bin/npm exist; required by the M0 frontend
+	@#      build test in tests/unit/test_m0_frontend_structure.py).
+	@#   6. Install frontend npm deps.
+	@#
+	@echo "=== FXLab bootstrap ==="
+	@if ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then \
+		echo ""; \
+		echo "ERROR: python3 venv module is not available."; \
+		echo ""; \
+		echo "  On Debian/Ubuntu: sudo apt install python3.12-venv"; \
+		echo "  On Fedora/RHEL:   sudo dnf install python3-venv"; \
+		echo "  On macOS:         python3 from python.org or Homebrew already includes it"; \
+		echo ""; \
+		echo "Re-run 'make bootstrap' after installing."; \
+		exit 1; \
+	fi
+	@if [ ! -d .venv ]; then \
+		echo "[1/6] Creating .venv ..."; \
+		python3 -m venv .venv; \
+	else \
+		echo "[1/6] .venv already exists — skipping create."; \
+	fi
+	@echo "[2/6] Upgrading pip in .venv ..."
+	@$(PIP) install --upgrade pip --quiet
+	@echo "[3/6] Installing Python dev dependencies (requirements-dev.txt) ..."
+	@$(MAKE) install-dev
+	@echo "[4/6] Installing git pre-commit hooks ..."
+	@$(MAKE) hooks
+	@if [ ! -x .venv/bin/node ] || [ ! -x .venv/bin/npm ]; then \
+		echo "[5/6] Bootstrapping node LTS into .venv via nodeenv ..."; \
+		$(PYTHON) -m nodeenv --python-virtualenv --node=lts --prebuilt; \
+	else \
+		echo "[5/6] node + npm already present in .venv — skipping nodeenv."; \
+	fi
+	@echo "[6/6] Installing frontend npm dependencies ..."
+	@cd frontend && PATH="$(CURDIR)/.venv/bin:$$PATH" npm install --silent
+	@echo ""
+	@echo "=== Bootstrap complete ==="
+	@echo "Verify with: make verify"
 
 install-dev:  ## Install all dependencies (prod + dev)
 	@# requirements-dev.txt has `-r requirements.txt` at the top, so
