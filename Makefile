@@ -14,7 +14,8 @@ PRECOMMIT   := .venv/bin/pre-commit
         test-shell compose-check install-smoke \
         coverage quality ci clean \
         verify minitux-ps minitux-logs minitux-diag \
-        admin-reset
+        admin-reset \
+        ps logs diag
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -408,3 +409,51 @@ admin-reset:  ## Reset an admin password via the reset_password CLI (requires EM
 	else \
 		docker compose -f $(ADMIN_RESET_COMPOSE) exec -T api python -m services.api.cli.reset_password --email $(EMAIL); \
 	fi
+
+# ---------------------------------------------------------------------------
+# Local-host read-only diagnostics (Tranche J — 2026-04-24)
+# ---------------------------------------------------------------------------
+# Companion to the minitux-* targets in Tranche G. When the operator is
+# already ON the deploy host (e.g., ssh'd into minitux at /opt/fxlab),
+# the minitux-* targets fail because they try to ssh root@minitux from
+# minitux itself. These local targets are purpose-built for that case:
+# they invoke `docker compose` against the LOCAL daemon, no ssh.
+#
+# Same safety envelope as the minitux-* targets: read-only, no sudo,
+# SERVICE values validated, locked by tests/shell/test_make_local_diagnostics.sh.
+# ---------------------------------------------------------------------------
+
+# Path to the compose file relative to PWD. Default works whether the
+# operator is in the dev-Mac clone or in /opt/fxlab on minitux.
+LOCAL_COMPOSE_FILE     ?= docker-compose.prod.yml
+LOCAL_LOG_TAIL         ?= 100
+
+ps:  ## Local docker compose ps (no ssh; safe for Claude on dev-Mac, safe for operator on deploy host)
+	@docker compose -f $(LOCAL_COMPOSE_FILE) ps
+
+logs:  ## Local docker compose logs --tail=N SERVICE (no ssh; requires SERVICE=)
+	@if [ -z "$(SERVICE)" ]; then \
+		echo "usage: make logs SERVICE=<service-name> [LOCAL_LOG_TAIL=N]"; \
+		echo ""; \
+		echo "SERVICE must be one of the services declared in $(LOCAL_COMPOSE_FILE)."; \
+		echo "Use this on the host where the stack is running (no ssh)."; \
+		echo "For cross-host (dev-Mac→minitux), use 'make minitux-logs SERVICE=...' instead."; \
+		exit 2; \
+	fi
+	@echo "$(SERVICE)" | grep -qE '$(_VALID_SERVICE_NAME_RE)' || { \
+		echo "error: SERVICE='$(SERVICE)' is not a valid docker-compose service name."; \
+		echo "Allowed: lowercase letters, digits, dashes, underscores (must start with letter)."; \
+		echo "Shell metacharacters rejected."; \
+		exit 2; \
+	}
+	@docker compose -f $(LOCAL_COMPOSE_FILE) logs --tail=$(LOCAL_LOG_TAIL) $(SERVICE)
+
+diag:  ## Local diagnostic bundle (no ssh): ps + smoke_health_eval verdict
+	@echo "=== local diagnostic bundle ==="
+	@echo ""
+	@echo "--- docker compose ps ---"
+	@docker compose -f $(LOCAL_COMPOSE_FILE) ps
+	@echo ""
+	@echo "--- smoke-eval verdict ---"
+	@docker compose -f $(LOCAL_COMPOSE_FILE) ps --all --format json \
+		| python3 scripts/smoke_health_eval.py poll --compose-file $(LOCAL_COMPOSE_FILE) || true

@@ -910,6 +910,11 @@ The envelope is enforced by two gates:
 - The `minitux-ps`, `minitux-logs SERVICE=<svc>`, and `minitux-diag` targets.
   These run read-only ssh against minitux and fetch `docker compose ps` or
   `docker compose logs`. Never mutate remote state.
+- The local-host counterparts: `make ps`, `make logs SERVICE=<svc>`, and
+  `make diag`. These invoke `docker compose` against the LOCAL daemon (no
+  ssh). They are the right call when the operator is already on the deploy
+  host (e.g. ssh'd into minitux at /opt/fxlab) — running the minitux-*
+  targets in that case fails because they try to ssh from a host to itself.
 - Creating, editing, and archiving files inside the fxlab folder and inside
   `.archive/`. Always archive before modifying (see §1 prime directive).
 - Writing to auto-memory files under `/sessions/.../mnt/.auto-memory/`.
