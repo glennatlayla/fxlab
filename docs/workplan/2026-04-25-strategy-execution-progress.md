@@ -1,7 +1,7 @@
 # FXLab Strategy Execution Buildout — Progress Tracker
 
-**Source:** `docs/workplan/2026-04-25-strategy-execution-agent-orchestration.md`
-**Total milestones:** 25
+**Source:** `docs/workplan/2026-04-25-strategy-execution-agent-orchestration.md` (v2.1)
+**Total milestones:** 27
 **Started:** (not yet)
 
 Per CLAUDE.md §16 Rule 3, this file is seeded from the source
@@ -52,14 +52,16 @@ Per §16 Rule 4, phase completion requires
 | M2.D3  | "Run backtest" flow                        | NOT_STARTED |        |       |
 | M2.D4  | Results viewer page                        | NOT_STARTED |        |       |
 
-## Track E — Forex market data (independent)
+## Track E — Oanda data + broker (independent)
 
 | ID     | Milestone                                  | Status      | Commit | Owner |
 |--------|--------------------------------------------|-------------|--------|-------|
-| M4.E1  | Forex provider selection (DECISION GATE)   | NOT_STARTED |        |       |
-| M4.E2  | ForexMarketDataProvider adapter            | NOT_STARTED |        |       |
+| M4.E1  | Oanda account + token verification         | NOT_STARTED |        |       |
+| M4.E2  | OandaMarketDataProvider adapter            | NOT_STARTED |        |       |
 | M4.E3  | Dataset versioning + DatasetService        | NOT_STARTED |        |       |
-| M4.E4  | Backfill all six majors                    | NOT_STARTED |        |       |
+| M4.E4  | Backfill all six majors via Oanda          | NOT_STARTED |        |       |
+| M4.E5  | OandaBrokerAdapter (fxpractice/fxtrade)    | NOT_STARTED |        |       |
+| M4.E6  | Broker registry + selection                | NOT_STARTED |        |       |
 
 ## Cross-track integration gates
 
@@ -73,7 +75,7 @@ Per §16 Rule 4, phase completion requires
 ## Reconciliation (per §16 Rule 4, run before declaring phase complete)
 
 ```
-source_count = 25            (from Milestone Index above)
+source_count = 27            (from Milestone Index above; v2.1)
 done_count   = ?             (count rows where status == DONE)
 open_count   = ?             (count rows where status in {NOT_STARTED, IN_PROGRESS})
 assert source_count == done_count + open_count

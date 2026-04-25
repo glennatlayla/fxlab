@@ -17,30 +17,62 @@ If you can complete this checklist, you can start the run.
 
 ## OPERATOR PRE-FLIGHT — required actions
 
-### 1. Forex data API key (operator action)
+### 1. Oanda demo account + API token (operator action)
 
-- Go to <https://twelvedata.com/pricing>.
-- Sign up for the **free tier**. No credit card required.
-- Copy the API key from the dashboard.
-- Add it to minitux's `.env` (and your dev-Mac smoke `.env` if you
-  test locally) as:
+This is the only operator action with any real friction, and it's
+required because Oanda is now the single provider for both
+historical FX data AND the paper-trading broker interface (per the
+v2.1 workplan revision after Glenn's "no manual CSV" directive).
 
-  ```
-  TWELVEDATA_API_KEY=your-real-key-here
-  ```
+**Steps (~10 minutes total):**
 
-- **Why this is required:** the Track E agent's first step is to
-  verify this env var is set. Without it, the forex data adapter
-  fails fast with a clear error and Track E blocks. The other four
-  tracks proceed but cannot reach their M3.X1 integration gate
-  without FX bars in the database.
+a. **Sign up for an Oanda fxpractice (demo) account** at
+   <https://www.oanda.com/account/v20/>. It's free; KYC is
+   minimal (name + email + country). Choose the **practice / demo**
+   account type — *not* live. Demo accounts get $100,000 in fake
+   USD and full API access.
 
-- **If you'd rather not sign up for TwelveData** and prefer
-  HistData.com CSVs only (slower backfill, more manual but truly
-  zero-key):
-  - Set `FXLAB_FOREX_PROVIDER=histdata` in `.env`.
-  - The Track E agent will skip TwelveData and use HistData
-    exclusively.
+b. **Generate an API token.** From the Oanda dashboard:
+   *Manage API Access* → *Generate Token*. Copy the token (it
+   appears once; save it somewhere safe).
+
+c. **Find your account ID.** In the dashboard top-right, the demo
+   account has a numeric ID like `101-001-1234567-001`. Copy that
+   too.
+
+d. **Verify your state is supported.** Oanda is available to US
+   clients in most states; historical exclusions include New York
+   (FX restricted), New Jersey, Hawaii, Ohio. If sign-up rejects
+   your state, ping me — we'll switch to Forex.com or IG as the
+   fallback (one-tranche change in M4.E2/E5).
+
+e. **Add the credentials to `.env`** on minitux (and on the dev Mac
+   if you'll smoke-test locally):
+
+   ```
+   OANDA_API_TOKEN=your-fxpractice-token-here
+   OANDA_ACCOUNT_ID=your-fxpractice-account-id
+   OANDA_ENVIRONMENT=fxpractice
+   ```
+
+f. **Install.sh awareness:** install.sh's `--refresh` mode preserves
+   `.env`, so adding these credentials is a one-time op. The
+   variables join the existing `POSTGRES_PASSWORD`, `JWT_SECRET_KEY`,
+   etc.
+
+**What happens at agent kickoff if these are missing:** Track E's
+M4.E1 first action is to verify all three vars are set and to hit
+Oanda's `/v3/accounts` endpoint to confirm the token works. If
+missing or invalid, the agent fails fast, writes a clear
+`BLOCKED.md` entry pointing back at this kickoff doc, and stops.
+The other four tracks proceed but cannot reach M3.X1 without FX
+bars; they continue their own work and wait at the integration
+gate.
+
+**Later — promoting to live trading:** the same workplan supports
+live trading by changing `OANDA_ENVIRONMENT=fxtrade` and using a
+live token from a funded Oanda account. No code change. Glenn
+makes that switch when he's ready.
 
 ### 2. Confirm or override the locked defaults (operator review)
 
@@ -49,11 +81,14 @@ find the section "DEFAULTS LOCKED (v2 autonomy revision)", and skim
 the seven defaults. If you want to change any, edit that table BEFORE
 launching agents.
 
-The defaults are:
-1. Forex source: TwelveData primary, HistData fallback.
+The defaults are (v2.1):
+1. **Forex provider: Oanda v20 fxpractice (paper) + fxtrade (live)** —
+   single REST API for both data and broker. NO CSV providers.
 2. FX calendar: `pandas_market_calendars` 24/5.
 3. dataset_ref syntax: existing string format.
-4. Phase 4 paper trading: deferred (stretch only).
+4. Phase 4 deployment orchestrator (M5.S4): deferred to stretch
+   (the broker interface itself is in M3.X2 hard floor, but
+   continuous-strategy-execution is M5.S4 stretch).
 5. Coexistence with draft form: `source` flag.
 6. Migrations: Alembic per-tranche.
 7. Backfill concurrency: sequential.

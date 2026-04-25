@@ -10,6 +10,7 @@
 
 - **v1.0 (2026-04-25)** — Initial decomposition. 5 agents, 25 milestones, ~12 working days of parallel effort.
 - **v2.0 (2026-04-25)** — Autonomy revision per Glenn's directive: agents do NOT pause at decision gates during execution. Defaults baked in for every previously-named decision gate, with the rationale documented inline. The minimal set of questions that genuinely require Glenn's input before kickoff is consolidated into a new `kickoff` companion doc; agents read those answers at startup and never ask Glenn anything mid-run. Integration model tightened: per-agent feature branches, atomic per-tranche commits, append-only progress logs Glenn can scan at wake-time.
+- **v2.1 (2026-04-25)** — Forex provider revision per Glenn's directive: NO manual CSV downloads. Verified Schwab's public Trader API does not expose FX programmatically (the existing `SchwabBrokerAdapter` is equities-only). Switched to **Oanda v20 REST API** as the single provider for both historical FX data AND live broker interface (paper via `fxpractice`, live via `fxtrade`). Track E grows by two tranches (M4.E5 OandaBrokerAdapter, M4.E6 broker registry) so a paper-trade smoke test is part of the M3.X2 hard floor. Total milestones: 27 (was 25).
 
 ---
 
@@ -18,8 +19,9 @@
 ```
 MILESTONE INDEX
 ───────────────────────────────────────────────────────────────
-Total milestones: 25
-Tracks: A (Schema/Compiler), B (Indicators), C (API), D (Frontend), E (Forex Data)
+Total milestones: 27
+Tracks: A (Schema/Compiler), B (Indicators), C (API), D (Frontend),
+        E (Forex Data + Broker — Oanda v20)
 
 Track A — Schema + Compiler   (critical-path):  M1.A1, M1.A2, M1.A3, M1.A4, M1.A5
 Track B — Indicator coverage  (parallel after A1):
@@ -27,10 +29,11 @@ Track B — Indicator coverage  (parallel after A1):
 Track C — API + run plumbing  (after A3):       M2.C1, M2.C2, M2.C3, M2.C4
 Track D — Frontend            (parallel after C contracts published):
                                                   M2.D1, M2.D2, M2.D3, M2.D4
-Track E — Forex market data   (independent):    M4.E1, M4.E2, M4.E3, M4.E4
+Track E — Oanda data + broker (independent):    M4.E1, M4.E2, M4.E3, M4.E4, M4.E5, M4.E6
 
-Cross-track integration milestones:             M3.X1 (end-to-end backtest one strategy),
-                                                M3.X2 (all-five-strategies backtest)
+Cross-track integration milestones:             M3.X1 (single-strategy CLI backtest),
+                                                M3.X2 (viable candidate via UI +
+                                                       paper-trade smoke test)
 ───────────────────────────────────────────────────────────────
 ```
 
@@ -423,87 +426,166 @@ a results viewer page.
 
 ---
 
-### AGENT E — Forex market data
+### AGENT E — Oanda data + broker (FX feed AND paper-trading interface)
 
-**Mission:** Get FX bars into the existing `market_data` table for
-the six majors at the timeframes the strategies need (1h, 4h, 1d).
-Without this, even a perfectly-built backtest path runs against
-empty data.
+**Mission:** Wire the project to **Oanda v20** as the single provider
+for both (a) historical FX bars at the timeframes the strategies need
+(1h, 4h, 1d) and (b) a live broker interface that supports paper
+trading via `fxpractice` (and live trading later via `fxtrade`,
+same API, different URL/credentials).
 
-**Dependencies:** None. Independent. Starts day 1.
+**Why Oanda (v2.1 lock-in):**
+- One REST API for everything — historical candles, live quotes,
+  order submission, position queries.
+- FX-native (forex is Oanda's core product, not a side feature).
+- Free demo account (`fxpractice`) — instant API access, fake money,
+  realistic fills. Drop-in switch to `fxtrade` for live.
+- Mature Python wrapper (`oandapyV20`) maintained on PyPI.
+- Rejected by Glenn 2026-04-25: TwelveData / HistData (CSV, no
+  paper-trading interface). Schwab (public Trader API does not
+  expose FX programmatically — verified via the existing
+  `services/api/adapters/schwab_broker_adapter.py` whose docstring
+  scope is equities/options only).
+
+**Dependencies:** None. Independent. Starts day 1. No other agent
+waits for E to finish before its own tranches; only the M3.X1
+integration gate blocks on E1–E4 being done.
 
 **Hands off:**
-- A `ForexMarketDataProvider` implementing
-  `MarketDataProviderInterface`.
+- `OandaMarketDataProvider` implementing `MarketDataProviderInterface`.
+- `OandaBrokerAdapter` implementing the existing
+  `BrokerAdapterInterface` (the same one `AlpacaBrokerAdapter`,
+  `SchwabBrokerAdapter`, and `PaperBrokerAdapter` already implement),
+  with `fxpractice` as the default endpoint for paper trading.
+- A broker-registry config layer (`BROKER_PROVIDER` env var) so
+  the API selects which broker adapter to use at runtime.
 - Backfilled historical FX bars in `market_data`, indexed by symbol
   + interval, covering the date ranges in each strategy's
-  `experiment_plan.json` (2010-01-01 onward for the deepest splits).
-- A `dataset_ref` resolution mechanism so `experiment_plan.dataset_ref`
-  values like `fx-eurusd-15m-certified-v3` resolve to a versioned
-  rows-set, not just "everything in the table."
+  `experiment_plan.json` (2010-01-01 onward for the deepest splits
+  in Turn-of-Month).
+- A `dataset_ref` resolution layer.
 
 **Tranches:**
 
-#### M4.E1 — Forex provider selection
-- **Default (decided 2026-04-25 v2): TwelveData free tier as primary,
-  HistData.com CSV as fallback.** Rationale:
-  - TwelveData has a JSON HTTP API (no Java app, no scraping), free
-    tier of 800 req/day = enough to backfill 6 majors × 3 timeframes
-    over a few days, and supports H1 / H4 / D1 directly. API key in
-    `.env` as `TWELVEDATA_API_KEY` — operator action, see kickoff
-    doc.
-  - HistData.com publishes free historical FX CSVs via direct HTTPS
-    (M1 bars resampled to whatever timeframe). No API key. Used as
-    automatic fallback if TwelveData rate-limits or returns 4xx.
-  - Dukascopy was tempting (deepest history), but its bar export
-    requires either the JForex Java client or a third-party library
-    (`dukascopy-python`) that's gnarly to wire up; not autonomy-friendly.
-  - Oanda v20 deferred to Phase 4 — needs live account, not free, and
-    we don't need real-time for backtesting.
-- **Operator action required at kickoff:** sign up for a TwelveData
-  free-tier account at https://twelvedata.com/pricing and put the
-  API key in minitux's `.env` as `TWELVEDATA_API_KEY=xxx`. The
-  agent's first step (M4.E1) is to verify this env var is present;
-  if missing, agent fails fast with a clear error pointing at the
-  kickoff doc — this is the only out-of-band action required.
-- **Acceptance:** integration test confirms TwelveData adapter is
-  reachable with the configured key; HistData fallback triggers
-  cleanly on a synthetic 429 rate-limit response.
+#### M4.E1 — Oanda account + token verification
+- **Locked default (v2.1):** Oanda v20 fxpractice (paper) for
+  development; fxtrade (live) for future production. Single provider
+  for both historical and live data, no fallback (per Glenn's
+  "no manual CSV" directive).
+- **Operator action required at kickoff:** sign up for an Oanda
+  fxpractice (demo) account at <https://www.oanda.com/account/v20/>,
+  generate an API token from the account dashboard, and put it in
+  minitux's `.env`:
+  ```
+  OANDA_API_TOKEN=your-fxpractice-token-here
+  OANDA_ACCOUNT_ID=your-fxpractice-account-id
+  OANDA_ENVIRONMENT=fxpractice
+  ```
+  See the kickoff doc for step-by-step. Sign-up is free; KYC is
+  minimal for demo accounts.
+- **Agent's first step in M4.E1:** verify all three env vars are
+  set, hit the `/v3/accounts` endpoint to confirm the token is
+  valid, and confirm at least one account is reachable. If missing
+  or invalid: fail fast with a clear error pointing at the kickoff
+  doc; do not proceed to M4.E2.
+- **Acceptance:** integration test asserts a real Oanda demo account
+  is reachable with the configured token; the test is parametrised
+  on `OANDA_ENVIRONMENT` so the same test will work later for
+  fxtrade.
 
-#### M4.E2 — `ForexMarketDataProvider` adapter
-- Implements `MarketDataProviderInterface` against the chosen source.
-- Maps source bars to the canonical `Candle` contract.
-- Error handling: rate-limit, retry-with-backoff, gap detection.
-- Authz: read-only against the source.
-- **Acceptance:** integration test fetches 30 days of EURUSD 1h
-  bars from the source, asserts contiguous OHLC, asserts spread
-  field populated when source provides it.
+#### M4.E2 — `OandaMarketDataProvider` adapter
+- Implements `MarketDataProviderInterface` against Oanda's
+  `/v3/instruments/{instrument}/candles` endpoint.
+- Maps Oanda bars (which have separate bid / ask / mid) to the
+  canonical `Candle` contract; default to mid-bars; surface bid/ask
+  spread in the `spread` field when both are present.
+- Symbol mapping: EURUSD ↔ EUR_USD, GBPUSD ↔ GBP_USD, USDJPY ↔
+  USD_JPY, AUDUSD ↔ AUD_USD, NZDUSD ↔ NZD_USD, USDCAD ↔ USD_CAD.
+  Build a `_normalise_symbol` helper.
+- Granularity mapping: `H1`, `H4`, `D` (Oanda) ↔ `H1`, `H4`, `D1`
+  (canonical `CandleInterval`).
+- Error handling: 401 → `AuthError`; 429 → `TransientError` with
+  exponential backoff; 5xx → `TransientError`; gap detection across
+  weekends (FX 24/5 — Oanda omits Saturday bars; agent's gap
+  detector must understand this so it doesn't flag weekend gaps as
+  data quality issues).
+- **Acceptance:** integration test fetches 30 days of EUR_USD H1
+  bars from fxpractice, asserts contiguous OHLC across weekday
+  segments, asserts spread populated, asserts the
+  `_normalise_symbol("EURUSD") == "EUR_USD"` round-trip.
 
-#### M4.E3 — Dataset versioning
+#### M4.E3 — Dataset versioning + DatasetService
 - A `dataset` table with `(name, version, symbol, interval,
-  start_date, end_date)` rows.
+  start_date, end_date, source)` rows.
 - A `DatasetService.resolve(dataset_ref) -> list[Candle]` that
   returns bars for the named, versioned dataset.
+- The interface (`libs/contracts/interfaces/dataset_service.py`) is
+  published as the FIRST sub-step of this tranche so Track C's
+  M2.C2 can consume it (in-memory stub if Track C reaches C2 before
+  E3 completes).
 - An admin CLI tool (`python -m services.api.cli.import_dataset
-  --name fx-eurusd-1h --version 2026.04.bootstrap --source dukascopy
+  --name fx-eurusd-1h --version 2026.04.bootstrap --source oanda
   --symbol EURUSD --interval H1 --start 2010-01-01`) to ingest a
   versioned snapshot.
-- **Acceptance:** CLI ingests 14 years of EURUSD H1 from the chosen
-  source; `DatasetService.resolve("fx-eurusd-1h:2026.04.bootstrap")`
-  returns the bars; a stale version reference returns a clear error.
+- **Acceptance:** CLI ingests 1 year of EURUSD H1 from Oanda;
+  `DatasetService.resolve("fx-eurusd-1h:2026.04.bootstrap")` returns
+  the bars; a stale or unknown version reference raises a clear
+  domain error.
 
 #### M4.E4 — Backfill all six majors
 - Orchestrate ingestion for EURUSD, GBPUSD, USDJPY, AUDUSD, NZDUSD,
   USDCAD at 1h, 4h, 1d timeframes from each strategy's earliest
-  `splits.in_sample.start` (2010 for Turn-of-Month, 2021 for the
-  example).
-- Persist as one versioned dataset per (symbol, interval).
+  `splits.in_sample.start` (2010-01-01 for Turn-of-Month;
+  2021-01-01 for the closest example).
+- Sequential (per the v2 default), so 6 symbols × 3 timeframes × ~14
+  years runs in ~4–6 hours of wall time. The agent paginates over
+  Oanda's 5000-candle-per-request limit and persists one dataset
+  per (symbol, interval).
+- Versioned snapshot id: `fx-{symbol}-{interval}:2026.04.bootstrap`.
 - **Acceptance:** smoke script `make verify-fx-data` queries each
   expected `(symbol, interval)` pair and asserts ≥99% bar coverage
-  across the expected date range.
+  across the expected date range, accounting for the 24/5 schedule
+  (no weekend bars expected).
 
-**Estimated tranches:** 4. **Estimated effort:** 3 working days
-(mostly waiting on data downloads).
+#### M4.E5 — `OandaBrokerAdapter`
+- Implements the existing `BrokerAdapterInterface` (same shape
+  Alpaca and Schwab adapters use) against Oanda's order endpoints:
+  - `POST /v3/accounts/{id}/orders` for submit
+  - `PUT /v3/accounts/{id}/orders/{order_id}/cancel` for cancel
+  - `GET /v3/accounts/{id}/openTrades` and `/positions` for query
+  - `GET /v3/accounts/{id}/transactions` for fill confirmation
+- Order types: market, limit, stop, stop-limit, trailing-stop.
+- Order status mapping: `PENDING`, `FILLED`, `CANCELLED`, `REJECTED`,
+  `EXPIRED` mapped to the canonical `OrderStatus` enum already used
+  by Alpaca and Schwab adapters.
+- Default endpoint: fxpractice (paper). Switching to fxtrade is a
+  config change only — no code change.
+- Reuses the OAuth-token-injection pattern from
+  `SchwabBrokerAdapter`; Oanda uses bearer tokens (simpler than
+  Schwab's refresh-token flow).
+- **Acceptance:** integration test against fxpractice submits a
+  small EUR_USD market order, polls until filled, queries position,
+  closes the position, asserts the round-trip P&L is within slippage
+  expectations. (Demo dollars, real API path. This test is the
+  paper-trade smoke that satisfies M3.X2's hard floor.)
+
+#### M4.E6 — Broker registry + selection
+- A new `BROKER_PROVIDER` env var with values
+  `paper_synthetic | alpaca | schwab | oanda_paper | oanda_live`.
+- A `BrokerRegistry` factory at
+  `services/api/services/broker_registry.py` that returns the right
+  adapter for the configured value. Existing `PaperBrokerAdapter`
+  remains the in-process synthetic broker (used by `BacktestEngine`);
+  `oanda_paper` is a separate selection that hits real fxpractice.
+- The runs subsystem reads the env var at startup and injects the
+  selected adapter via dependency injection.
+- **Acceptance:** unit test verifies each enum value resolves to the
+  correct adapter class; an integration test with
+  `BROKER_PROVIDER=oanda_paper` submits an order and gets a fill
+  from fxpractice (proves the wiring end-to-end).
+
+**Estimated tranches:** 6. **Estimated effort:** 4 working days
+(M4.E4 backfill is the bulk; M4.E5/E6 add ~1 day of broker work).
 
 ---
 
@@ -539,7 +621,7 @@ is real.
 
 **Trigger:** all milestones complete OR M3.X2's hard floor met.
 
-**Hard floor — "viable candidate" definition (v2 autonomy revision):**
+**Hard floor — "viable candidate" definition (v2.1 revision):**
 
 The overnight run is considered SUCCESSFUL if Glenn at wake-time can:
 1. Open Strategy Studio at `http://192.168.1.5/strategy-studio`.
@@ -550,12 +632,19 @@ The overnight run is considered SUCCESSFUL if Glenn at wake-time can:
 5. Wait for the run to complete (poll the run-monitor page).
 6. View metrics + equity curve + blotter on the results page —
    non-empty trade list, sensible-looking equity curve.
+7. **Submit one paper trade through Oanda fxpractice** via a
+   `make oanda-paper-smoke` helper (or equivalent CLI shim that
+   `OandaBrokerAdapter` exposes). Trade fills, position visible,
+   round-trip closes cleanly. This proves the live broker
+   interface Glenn requested actually works end-to-end against
+   real (demo) infrastructure — not just an in-process synthetic.
 
-The strategy that proves the path is **FX_TimeSeriesMomentum_Breakout_D1**
-— it uses only indicators in the v2-completion set (ADX, Donchian /
-rolling-extremes, EMA, ATR), runs on D1 bars (smallest data
-backfill), and has plenty of trades over the 2010-2023 in-sample
-window (Donchian-55 breakouts trigger frequently across 5 majors).
+The strategy that proves the backtest path is
+**FX_TimeSeriesMomentum_Breakout_D1** — it uses only indicators in
+the v2-completion set (ADX, Donchian / rolling-extremes, EMA, ATR),
+runs on D1 bars (smallest data backfill), and has plenty of trades
+over the 2010-2023 in-sample window (Donchian-55 breakouts trigger
+frequently across 5 majors).
 
 **Stretch — full success:**
 All FIVE strategies importable and runnable end-to-end via the UI,
@@ -595,16 +684,15 @@ floor is green AND Glenn's overnight time budget remains.
 ```
 Day  Track A           Track B          Track C            Track D            Track E
 ─────────────────────────────────────────────────────────────────────────────────────────
-1    M1.A1 schema      ── (waits A1)    ── (waits A3)      ── (waits C1)      M4.E1 source choice → DECISION GATE
-2    M1.A2 references  M1.B1 ADX        M2.C1 import-ir    M2.D1 file panel   M4.E2 provider adapter
+1    M1.A1 schema      ── (waits A1)    ── (waits A3)      ── (waits C1)      M4.E1 token verify
+2    M1.A2 references  M1.B1 ADX        M2.C1 import-ir    M2.D1 file panel   M4.E2 oanda candles
 3    M1.A3 compiler    M1.B2 z-score    M2.C2 from-ir      M2.D2 IR view      M4.E3 dataset svc
 4    M1.A4 lookback    M1.B3 rolling    M2.C3 results API  M2.D3 backtest UI  M4.E4 backfill (running)
 5    M1.A5 risk        M1.B4 stddev     M2.C4 detail GET   M2.D4 results view M4.E4 (continued)
 6    ─────────────── INTEGRATION GATE: M3.X1 single-strategy CLI backtest ───────────────
-7    (basket support) M1.B5 calendar   (cleanup)          (e2e tests)        (validation)
-                                                                              DECISION GATE
-8    (basket support) M1.B6 derived    (perf review)      (results polish)   (cleanup)
-9    ─────────────── FINAL ACCEPTANCE: M3.X2 five-strategies via UI ─────────────────────
+7    (basket support) M1.B5 calendar   (cleanup)          (e2e tests)        M4.E5 OandaBroker
+8    (basket support) M1.B6 derived    (perf review)      (results polish)   M4.E6 broker registry
+9    ─────────────── FINAL ACCEPTANCE: M3.X2 viable candidate + paper-trade smoke ──────
 ```
 
 Five agents for nine working days plus integration gates. A single
@@ -624,7 +712,7 @@ running, no agent pauses for any of these.
 
 | # | Topic | Default | Rationale |
 |---|---|---|---|
-| 1 | Forex data source (M4.E1) | TwelveData free tier primary, HistData.com CSV fallback | API-shape (JSON over HTTPS) friendly to autonomous backfill; free; H1/H4/D1 native; HistData fallback handles rate-limit edge case without a human. Oanda/Dukascopy/Polygon all required either a paid plan, a Java app, or a $99/mo subscription. |
+| 1 | Forex data source AND broker interface (M4.E1) | **Oanda v20 REST API** — fxpractice for paper, fxtrade for live | One provider for both historical FX bars and the live broker interface Glenn explicitly requested. FX-native, free demo accounts, mature Python wrapper. Glenn rejected CSV-based providers (TwelveData / HistData / Dukascopy) on 2026-04-25; verified Schwab's public Trader API does not support FX programmatically. Oanda's `fxpractice` env handles paper trading without any code change vs `fxtrade` (live). |
 | 2 | FX business calendar (M1.B5) | `pandas_market_calendars` with 24/5 schedule | Library exists, well-maintained, ships an FX calendar out of the box. Hand-rolling a calendar adds a tranche of work for no quality gain. |
 | 3 | `dataset_ref` syntax (M2.C2) | Keep the existing string format from the example experiment_plans (e.g. `fx-eurusd-15m-certified-v3`) | The format is already in every `*.experiment_plan.json` in `Strategy Repo/`. Changing the syntax forces 5 file rewrites for zero functional gain. |
 | 4 | Phase 4 paper-trading start | Defer to a separate workplan, BUT — if all 25 milestones complete with budget remaining, agents may pick up M5 stretch tranches (PaperBrokerAdapter orchestration + risk gates) listed at the bottom of this doc. | Lets the overnight run produce more value if backtesting goes faster than estimated, without committing to paper trading as a hard requirement. |
@@ -862,18 +950,24 @@ after M3.X2 hard floor is green.
 #### M5.S3 — Basket execution (= M3.X2.5)
 - See above. Promotes Turn-of-Month strategy from xfail to passing.
 
-#### M5.S4 — Paper-trading orchestrator (Phase 4 preview)
-- Build `PaperDeploymentService` that runs a passed backtest's
-  compiled strategy continuously against live (or replayed-recent)
-  FX data through `PaperBrokerAdapter`. Risk gates from
+#### M5.S4 — Paper-trading orchestrator (continuous strategy execution)
+- The single-shot paper-trade smoke (M4.E5) proves the
+  `OandaBrokerAdapter` works. M5.S4 builds the
+  `PaperDeploymentService` that runs a passed backtest's compiled
+  strategy CONTINUOUSLY against live FX data, routing orders
+  through `oanda_paper`. Risk gates from
   `risk_model.daily_loss_limit_pct` and `max_drawdown_halt_pct` are
-  enforced pre-trade.
+  enforced pre-trade. Reconciliation loop checks broker state vs
+  expected state every N minutes.
 - **Acceptance:** an operator can click "Promote to paper" on a
   passed backtest and see live position state on a paper-trading
-  page.
-- **Note:** Phase 4 originally; brought into scope as a stretch
-  here ONLY because the user's original ask explicitly mentioned
-  paper trading. Not gated; agents try it after M5.S1, S2 are done.
+  page; the deployment survives a process restart and reconciles
+  cleanly.
+- **Note:** the broker interface (M4.E5/E6) is in M3.X2's hard
+  floor; the orchestrator (M5.S4) is what turns "I can submit a
+  paper trade" into "the strategy is live-paper-trading." Stretch
+  because it adds significant code (deployment lifecycle, risk
+  gates, reconciliation) that has its own quality bar.
 
 ---
 
