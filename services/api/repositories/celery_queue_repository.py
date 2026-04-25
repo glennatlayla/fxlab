@@ -56,8 +56,8 @@ try:
     _CELERY_AVAILABLE = True
 except ImportError:
     _CELERY_AVAILABLE = False
-    Celery = None  # type: ignore[assignment, misc]
-    Inspect = None  # type: ignore[assignment, misc]
+    Celery = None
+    Inspect = None
 
 
 class CeleryQueueRepository(QueueRepositoryInterface):

@@ -539,9 +539,9 @@ class ReconciliationService(ReconciliationServiceInterface):
         # Paper adapter exposes get_all_order_states(), mock exposes
         # get_all_orders(). Try both before falling back to open orders only.
         if hasattr(adapter, "get_all_order_states"):
-            return adapter.get_all_order_states()  # type: ignore[attr-defined]
+            return adapter.get_all_order_states()
         if hasattr(adapter, "get_all_orders"):
-            return adapter.get_all_orders()  # type: ignore[attr-defined]
+            return adapter.get_all_orders()
         # Fallback: only open orders visible
         return adapter.list_open_orders()
 

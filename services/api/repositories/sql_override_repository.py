@@ -41,7 +41,7 @@ from typing import Any
 import structlog
 
 from libs.contracts.interfaces.override_repository import OverrideRepositoryInterface
-from libs.contracts.models import Override  # type: ignore[import-not-found]
+from libs.contracts.models import Override
 
 logger = structlog.get_logger(__name__)
 
@@ -239,7 +239,7 @@ class SqlOverrideRepository(OverrideRepositoryInterface):
         row.status = status
         row.reviewer_id = reviewer_id
         row.decision_rationale = decision_rationale
-        row.decided_at = now  # type: ignore[assignment]
+        row.decided_at = now
         row.updated_at = now  # type: ignore[assignment]
 
         self._db.flush()

@@ -504,9 +504,9 @@ class DrillService(DrillServiceInterface):
             # Verify order state is accessible for reconciliation
             try:
                 if hasattr(adapter, "get_all_order_states"):
-                    orders = adapter.get_all_order_states()  # type: ignore[attr-defined]
+                    orders = adapter.get_all_order_states()
                 elif hasattr(adapter, "get_all_orders"):
-                    orders = adapter.get_all_orders()  # type: ignore[attr-defined]
+                    orders = adapter.get_all_orders()
                 else:
                     orders = adapter.list_open_orders()
                 timeline.append(f"retrieved_{len(orders)}_orders")

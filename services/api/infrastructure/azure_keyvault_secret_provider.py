@@ -70,11 +70,11 @@ try:
     _AZURE_AVAILABLE = True
 except ImportError:
     _AZURE_AVAILABLE = False
-    DefaultAzureCredential = None  # type: ignore[assignment,misc]
-    SecretClient = None  # type: ignore[assignment,misc]
-    AzureResourceNotFoundError = Exception  # type: ignore[assignment,misc]
-    AzureHttpResponseError = Exception  # type: ignore[assignment,misc]
-    AzureAuthError = Exception  # type: ignore[assignment,misc]
+    DefaultAzureCredential = None
+    SecretClient = None
+    AzureResourceNotFoundError = Exception
+    AzureHttpResponseError = Exception
+    AzureAuthError = Exception
 
 
 def _to_keyvault_name(key: str) -> str:

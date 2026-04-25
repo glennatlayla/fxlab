@@ -424,7 +424,7 @@ class ExecutionAnalysisService(ExecutionAnalysisInterface):
         for _dep_id, adapter in registry_snapshot.items():
             try:
                 if hasattr(adapter, "get_all_orders"):
-                    for o in adapter.get_all_orders():  # type: ignore[attr-defined]
+                    for o in adapter.get_all_orders():
                         if o.client_order_id == order_id:
                             symbol = o.symbol
                             break
@@ -1008,9 +1008,9 @@ class ExecutionAnalysisService(ExecutionAnalysisInterface):
     ) -> list[OrderResponse]:
         """Get all broker orders for analysis."""
         if hasattr(adapter, "get_all_order_states"):
-            return adapter.get_all_order_states()  # type: ignore[attr-defined]
+            return adapter.get_all_order_states()
         if hasattr(adapter, "get_all_orders"):
-            return adapter.get_all_orders()  # type: ignore[attr-defined]
+            return adapter.get_all_orders()
         return adapter.list_open_orders()
 
     @staticmethod

@@ -351,3 +351,14 @@ class SqlDeploymentRepository(DeploymentRepositoryInterface):
             .all()
         )
         return [_transition_to_dict(t) for t in transitions]
+
+    def list_by_state(self, *, state: str) -> list[dict[str, Any]]:
+        """
+        List all deployments currently in a given lifecycle state.
+
+        Returns plain dicts so the caller (e.g. PeriodicReconciliationJob)
+        can filter further on fields like execution_mode without binding to
+        the SQLAlchemy model class.
+        """
+        deployments = self._db.query(Deployment).filter(Deployment.state == state).all()
+        return [_deployment_to_dict(d) for d in deployments]

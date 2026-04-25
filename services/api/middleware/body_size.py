@@ -55,7 +55,7 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
         app.add_middleware(BodySizeLimitMiddleware, max_bytes=1_048_576)
     """
 
-    def __init__(self, app, max_bytes: int = MAX_BYTES_DEFAULT):  # type: ignore[no-untyped-def]
+    def __init__(self, app, max_bytes: int = MAX_BYTES_DEFAULT):
         """
         Initialize the body size limit middleware.
 
@@ -67,7 +67,7 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self._max_bytes = int(os.environ.get("MAX_REQUEST_BODY_BYTES", max_bytes))
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def dispatch(self, request: Request, call_next):
         """
         Process the request and check body size before passing to handler.
 

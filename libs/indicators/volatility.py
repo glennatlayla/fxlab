@@ -471,7 +471,7 @@ class HistoricalVolatilityCalculator:
                 IndicatorParam(
                     name="period", default=20, min_value=2, max_value=500, param_type="int"
                 ),
-                IndicatorParam(name="annualize", default=True, param_type="bool"),  # type: ignore[arg-type]
+                IndicatorParam(name="annualize", default=True, param_type="bool"),
                 IndicatorParam(
                     name="trading_days", default=252, min_value=1, max_value=365, param_type="int"
                 ),

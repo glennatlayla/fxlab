@@ -73,7 +73,7 @@ class ClientSourceMiddleware(BaseHTTPMiddleware):
             return {"source": source}
     """
 
-    async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
+    async def dispatch(self, request: Request, call_next) -> Response:
         """
         Process the request and extract client source.
 

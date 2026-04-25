@@ -392,8 +392,8 @@ class RedisLoginAttemptTracker:
 
         try:
             # Prune expired entries before counting
-            self._redis.zremrangebyscore(key, "-inf", cutoff)  # type: ignore[no-untyped-call]
-            count = self._redis.zcard(key)  # type: ignore[no-untyped-call]
+            self._redis.zremrangebyscore(key, "-inf", cutoff)
+            count = self._redis.zcard(key)
             return count >= self._max_attempts  # type: ignore[operator]
         except Exception:
             # Fail-closed: deny login attempts when Redis is down
@@ -430,13 +430,13 @@ class RedisLoginAttemptTracker:
         cutoff = time.time() - self._window_seconds
 
         try:
-            self._redis.zremrangebyscore(key, "-inf", cutoff)  # type: ignore[no-untyped-call]
-            count = self._redis.zcard(key)  # type: ignore[no-untyped-call]
+            self._redis.zremrangebyscore(key, "-inf", cutoff)
+            count = self._redis.zcard(key)
             if count < self._max_attempts:  # type: ignore[operator]
                 return 0
 
             # Get the oldest entry to calculate remaining lockout time
-            oldest_entries = self._redis.zrange(key, 0, 0, withscores=True)  # type: ignore[no-untyped-call]
+            oldest_entries = self._redis.zrange(key, 0, 0, withscores=True)
             if not oldest_entries:
                 return 0
 

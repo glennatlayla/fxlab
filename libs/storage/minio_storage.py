@@ -363,7 +363,7 @@ class MinIOArtifactStorage(ArtifactStorageBase):
                 size=len(data),
             )
 
-            return data, metadata  # type: ignore[return-value]
+            return data, metadata
 
         except S3Error as e:
             if e.code == "NoSuchKey":

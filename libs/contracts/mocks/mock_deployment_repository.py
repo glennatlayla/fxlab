@@ -252,6 +252,15 @@ class MockDeploymentRepository(DeploymentRepositoryInterface):
         """
         return [dict(e) for e in self._transitions.get(deployment_id, [])]
 
+    def list_by_state(self, *, state: str) -> list[dict[str, Any]]:
+        """
+        List all deployments currently in a given lifecycle state.
+
+        Returns deep-copied dicts so callers cannot mutate the mock's
+        internal store.
+        """
+        return [dict(d) for d in self._store.values() if d.get("state") == state]
+
     # ------------------------------------------------------------------
     # Test helpers / introspection
     # ------------------------------------------------------------------

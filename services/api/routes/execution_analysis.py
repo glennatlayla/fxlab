@@ -190,7 +190,7 @@ def _event_to_dict(event: OrderEvent) -> dict[str, Any]:
     }
 
 
-def _order_history_page_to_dict(page) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+def _order_history_page_to_dict(page) -> dict[str, Any]:
     """
     Serialize an OrderHistoryPage to a JSON-compatible dict.
 
@@ -248,7 +248,7 @@ def _order_history_page_to_dict(page) -> dict[str, Any]:  # type: ignore[no-unty
     }
 
 
-def _execution_report_to_dict(report) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+def _execution_report_to_dict(report) -> dict[str, Any]:
     """
     Serialize an ExecutionReportSummary to a JSON-compatible dict.
 

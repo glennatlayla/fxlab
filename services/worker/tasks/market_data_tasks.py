@@ -111,7 +111,7 @@ def _get_alpaca_config() -> AlpacaConfig:
     )
 
 
-def _build_collector():  # type: ignore[no-untyped-def]
+def _build_collector():
     """
     Build a MarketDataCollectorService with production dependencies.
 

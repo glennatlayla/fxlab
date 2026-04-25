@@ -59,7 +59,7 @@ router = APIRouter(prefix="/indicators", tags=["indicators"])
 # ---------------------------------------------------------------------------
 
 
-def get_indicator_service(db: Session = Depends(get_db)) -> IndicatorService:  # type: ignore[no-untyped-def]
+def get_indicator_service(db: Session = Depends(get_db)) -> IndicatorService:
     """
     Provide the IndicatorService wired to the current request's DB session.
 

@@ -163,7 +163,7 @@ class SqlApprovalRepository(ApprovalRepositoryInterface):
         record.status = status
         record.reviewer_id = reviewer_id
         record.decision_reason = decision_reason
-        record.decided_at = now  # type: ignore[assignment]
+        record.decided_at = now
         record.updated_at = now  # type: ignore[assignment]
 
         self._db.flush()

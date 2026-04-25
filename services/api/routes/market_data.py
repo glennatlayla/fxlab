@@ -61,7 +61,7 @@ _LTTB_THRESHOLD = 2000
 # ---------------------------------------------------------------------------
 
 
-def get_market_data_repository(db: Session = Depends(get_db)):  # type: ignore[no-untyped-def]
+def get_market_data_repository(db: Session = Depends(get_db)):
     """
     Provide the active MarketDataRepositoryInterface implementation.
 
@@ -161,7 +161,7 @@ def get_candles(
     cursor: str | None = Query(default=None, description="Pagination cursor from previous page"),
     downsample: bool = Query(default=True, description="Apply LTTB downsampling if over threshold"),
     user: AuthenticatedUser = Depends(require_scope("feeds:read")),
-    repo=Depends(get_market_data_repository),  # type: ignore[assignment]
+    repo=Depends(get_market_data_repository),
 ) -> JSONResponse:
     """
     Query OHLCV candle data with time range filtering and cursor pagination.
@@ -244,7 +244,7 @@ def get_latest_candle(
     symbol: str = Query(..., min_length=1, max_length=10, description="Ticker symbol"),
     interval: str = Query(..., description="Candle interval"),
     user: AuthenticatedUser = Depends(require_scope("feeds:read")),
-    repo=Depends(get_market_data_repository),  # type: ignore[assignment]
+    repo=Depends(get_market_data_repository),
 ) -> JSONResponse:
     """
     Retrieve the most recent candle for a symbol and interval.
@@ -289,7 +289,7 @@ def get_gaps(
     start: str | None = Query(default=None, description="ISO 8601 start of scan range"),
     end: str | None = Query(default=None, description="ISO 8601 end of scan range"),
     user: AuthenticatedUser = Depends(require_scope("feeds:read")),
-    repo=Depends(get_market_data_repository),  # type: ignore[assignment]
+    repo=Depends(get_market_data_repository),
 ) -> JSONResponse:
     """
     List detected data gaps for a symbol and interval range.

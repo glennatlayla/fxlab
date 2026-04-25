@@ -1526,7 +1526,7 @@ if os.environ.get("ENVIRONMENT") == "production":
     class _HTTPSEnforcementMiddleware(_BaseHttp):
         """Log warnings when production requests arrive without TLS."""
 
-        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
+        async def dispatch(self, request, call_next):
             proto = request.headers.get("x-forwarded-proto", "http")
             if proto != "https":
                 logger.warning(

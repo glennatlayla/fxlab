@@ -61,7 +61,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def get_risk_analytics_service(db: Session = Depends(get_db)):  # type: ignore[no-untyped-def]
+def get_risk_analytics_service(db: Session = Depends(get_db)):
     """
     Provide the RiskAnalyticsService wired to real repositories.
 

@@ -208,3 +208,24 @@ class DeploymentRepositoryInterface(ABC):
         Example:
             transitions = repo.list_transitions(deployment_id="01HDEPLOY...")
         """
+
+    @abstractmethod
+    def list_by_state(self, *, state: str) -> list[dict[str, Any]]:
+        """
+        List all deployments currently in a given lifecycle state.
+
+        Args:
+            state: Deployment state to filter by (e.g. 'active',
+                'pending_approval', 'paused').
+
+        Returns:
+            List of deployment dicts. Empty list if none match. Each dict
+            carries the same shape as get_by_id() / create() returns,
+            including the execution_mode field so callers can do further
+            client-side filtering (e.g. PeriodicReconciliationJob filters
+            for execution_mode='live').
+
+        Example:
+            active = repo.list_by_state(state="active")
+            live_active = [d for d in active if d["execution_mode"] == "live"]
+        """

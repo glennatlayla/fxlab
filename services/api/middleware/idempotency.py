@@ -553,7 +553,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         # -> Returns cached response, "Idempotency-Key-Status: replayed"
     """
 
-    async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
+    async def dispatch(self, request: Request, call_next) -> Response:
         """
         Process the request and enforce idempotency if applicable.
 
