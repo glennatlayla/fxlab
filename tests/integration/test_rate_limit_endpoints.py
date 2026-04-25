@@ -42,6 +42,11 @@ from libs.contracts.research_run import (
     ResearchRunStatus,
 )
 from libs.contracts.risk import PreTradeRiskLimits, RiskCheckResult, RiskEvent
+from libs.contracts.run_results import (
+    EquityCurveResponse,
+    RunMetrics,
+    TradeBlotterPage,
+)
 from libs.contracts.safety import (
     EmergencyPostureDecision,
     HaltEvent,
@@ -135,6 +140,31 @@ class MockResearchRunService(ResearchRunServiceInterface):
     def get_run_result(self, run_id: str) -> ResearchRunResult | None:
         """Return None (not used in rate limit tests)."""
         return None
+
+    def get_equity_curve(self, run_id: str) -> EquityCurveResponse:
+        """Return empty curve (not used in rate limit tests)."""
+        return EquityCurveResponse(run_id=run_id, point_count=0, points=[])
+
+    def get_blotter(
+        self,
+        run_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> TradeBlotterPage:
+        """Return empty page (not used in rate limit tests)."""
+        return TradeBlotterPage(
+            run_id=run_id,
+            page=page,
+            page_size=page_size,
+            total_count=0,
+            total_pages=0,
+            trades=[],
+        )
+
+    def get_metrics(self, run_id: str) -> RunMetrics:
+        """Return empty metrics (not used in rate limit tests)."""
+        return RunMetrics(run_id=run_id)
 
 
 class MockRiskGateService(RiskGateInterface):

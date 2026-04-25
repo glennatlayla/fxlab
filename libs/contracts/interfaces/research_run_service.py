@@ -35,6 +35,11 @@ from libs.contracts.research_run import (
     ResearchRunRecord,
     ResearchRunResult,
 )
+from libs.contracts.run_results import (
+    EquityCurveResponse,
+    RunMetrics,
+    TradeBlotterPage,
+)
 
 
 class ResearchRunServiceInterface(ABC):
@@ -141,4 +146,71 @@ class ResearchRunServiceInterface(ABC):
         Returns:
             The result if the run is COMPLETED, None if not found or
             not yet completed.
+        """
+
+    # ------------------------------------------------------------------
+    # Results sub-resources (M2.C3)
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def get_equity_curve(self, run_id: str) -> EquityCurveResponse:
+        """
+        Build the equity-curve sub-resource for a completed run.
+
+        Args:
+            run_id: ULID of the research run.
+
+        Returns:
+            EquityCurveResponse with samples ordered ascending by
+            timestamp.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+            RunNotCompletedError: If the run is not COMPLETED.
+        """
+
+    @abstractmethod
+    def get_blotter(
+        self,
+        run_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> TradeBlotterPage:
+        """
+        Build a paginated trade-blotter page for a completed run.
+
+        Trades MUST be sorted deterministically so identical queries
+        return identical pages.
+
+        Args:
+            run_id: ULID of the research run.
+            page: 1-based page index.
+            page_size: Maximum trades per page.
+
+        Returns:
+            TradeBlotterPage. Pages beyond the last populated page
+            return an empty ``trades`` list with totals still
+            populated.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+            RunNotCompletedError: If the run is not COMPLETED.
+            ValueError: If ``page`` < 1 or ``page_size`` < 1.
+        """
+
+    @abstractmethod
+    def get_metrics(self, run_id: str) -> RunMetrics:
+        """
+        Build the headline-metrics sub-resource for a completed run.
+
+        Args:
+            run_id: ULID of the research run.
+
+        Returns:
+            RunMetrics with all available fields populated.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+            RunNotCompletedError: If the run is not COMPLETED.
         """

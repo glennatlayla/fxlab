@@ -9,17 +9,26 @@ import re
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from libs.contracts.errors import NotFoundError
 from libs.contracts.experiment_plan import ExperimentPlan
+from libs.contracts.run_results import (
+    DEFAULT_BLOTTER_PAGE_SIZE,
+    MAX_BLOTTER_PAGE_SIZE,
+    EquityCurveResponse,
+    RunMetrics,
+    TradeBlotterPage,
+)
 from libs.strategy_ir.interfaces.dataset_resolver_interface import (
     DatasetNotFoundError,
     DatasetResolverInterface,
 )
 from services.api.auth import AuthenticatedUser, require_scope
 from services.api.middleware.correlation import correlation_id_var
+from services.api.services.research_run_service import RunNotCompletedError
 
 logger = structlog.get_logger()
 
@@ -314,3 +323,296 @@ async def get_run_results_endpoint(
 
     logger.info("get_run_results.success", run_id=run_id, correlation_id=corr_id, component="runs")
     return results
+
+
+# ---------------------------------------------------------------------------
+# M2.C3: results sub-resources
+# ---------------------------------------------------------------------------
+#
+# Three schema-locked GET endpoints layered over the same
+# ``ResearchRunService`` used by ``POST /runs/from-ir``. They share a
+# common error contract:
+#
+#     * 422 — invalid ULID format, or ``page_size`` exceeds the cap.
+#     * 404 — run does not exist.
+#     * 409 — run exists but is not COMPLETED (no result body yet).
+#     * 503 — the service has not been wired into the route module.
+#     * 500 — anything else (logged with ``exc_info``).
+#
+# Auth uses ``exports:read`` to match the existing
+# ``GET /runs/{run_id}/results`` handler above; both the ``operator``
+# and ``viewer`` roles already carry that scope so the new endpoints
+# don't broaden access beyond what the parent endpoint already allows.
+
+
+def _validate_run_id_or_422(run_id: str, *, operation: str, corr_id: str) -> None:
+    """
+    Reject malformed run IDs with HTTP 422 before we touch the service.
+
+    Centralised so all three sub-resources behave identically and the
+    log line carries the operation name for triage.
+
+    Args:
+        run_id: Path parameter to validate.
+        operation: Snake-case name of the calling endpoint, used in
+            the structured log line.
+        corr_id: Request correlation ID.
+
+    Raises:
+        HTTPException 422: If ``run_id`` is not a valid ULID.
+    """
+    if not is_valid_ulid(run_id):
+        logger.warning(
+            f"{operation}.invalid_ulid",
+            run_id=run_id,
+            correlation_id=corr_id,
+            component="runs",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid ULID format",
+        )
+
+
+def _map_service_errors(
+    exc: Exception, *, run_id: str, operation: str, corr_id: str
+) -> HTTPException:
+    """
+    Translate a service-layer exception into the wire-format HTTPException.
+
+    ``NotFoundError`` -> 404, ``RunNotCompletedError`` -> 409, everything
+    else -> 500. The 500 branch is logged with ``exc_info`` so the
+    underlying error survives in the log even though the response body
+    is generic.
+
+    Args:
+        exc: Exception raised by the service call.
+        run_id: ULID being queried (for log context).
+        operation: Snake-case operation name (for log context).
+        corr_id: Request correlation ID.
+
+    Returns:
+        Fully-populated HTTPException ready to ``raise``.
+    """
+    if isinstance(exc, NotFoundError):
+        logger.warning(
+            f"{operation}.not_found",
+            run_id=run_id,
+            correlation_id=corr_id,
+            component="runs",
+        )
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    if isinstance(exc, RunNotCompletedError):
+        logger.warning(
+            f"{operation}.not_completed",
+            run_id=run_id,
+            run_status=exc.status.value,
+            correlation_id=corr_id,
+            component="runs",
+        )
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    logger.error(
+        f"{operation}.error",
+        run_id=run_id,
+        error=str(exc),
+        exc_info=True,
+        correlation_id=corr_id,
+        component="runs",
+    )
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Internal server error",
+    )
+
+
+@router.get(
+    "/{run_id}/results/equity-curve",
+    response_model=EquityCurveResponse,
+    summary="Equity curve for a completed run",
+)
+async def get_run_equity_curve_endpoint(
+    run_id: str = Path(..., description="Run ULID"),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
+    service: ResearchRunService = Depends(get_research_run_service),
+) -> EquityCurveResponse:
+    """
+    Return the equity curve sub-resource for a completed run.
+
+    Args:
+        run_id: ULID of the research run.
+        user: Authenticated caller with ``exports:read`` scope.
+        service: Injected :class:`ResearchRunService`.
+
+    Returns:
+        :class:`EquityCurveResponse` with samples ordered ascending by
+        timestamp.
+
+    Raises:
+        HTTPException 422: Invalid ULID format.
+        HTTPException 404: Run does not exist.
+        HTTPException 409: Run exists but has not COMPLETED.
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    logger.info(
+        "get_run_equity_curve.entry",
+        run_id=run_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="runs",
+    )
+
+    _validate_run_id_or_422(run_id, operation="get_run_equity_curve", corr_id=corr_id)
+
+    try:
+        response = service.get_equity_curve(run_id)
+    except Exception as exc:  # noqa: BLE001 — re-raised via _map_service_errors
+        raise _map_service_errors(
+            exc, run_id=run_id, operation="get_run_equity_curve", corr_id=corr_id
+        ) from exc
+
+    logger.info(
+        "get_run_equity_curve.success",
+        run_id=run_id,
+        point_count=response.point_count,
+        correlation_id=corr_id,
+        component="runs",
+    )
+    return response
+
+
+@router.get(
+    "/{run_id}/results/blotter",
+    response_model=TradeBlotterPage,
+    summary="Trade blotter (paginated) for a completed run",
+)
+async def get_run_blotter_endpoint(
+    run_id: str = Path(..., description="Run ULID"),
+    page: int = Query(default=1, ge=1, description="1-based page index."),
+    page_size: int = Query(
+        default=DEFAULT_BLOTTER_PAGE_SIZE,
+        ge=1,
+        le=MAX_BLOTTER_PAGE_SIZE,
+        description=(
+            f"Trades per page (default {DEFAULT_BLOTTER_PAGE_SIZE}, max {MAX_BLOTTER_PAGE_SIZE})."
+        ),
+    ),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
+    service: ResearchRunService = Depends(get_research_run_service),
+) -> TradeBlotterPage:
+    """
+    Return one page of the trade blotter for a completed run.
+
+    Pagination contract:
+        * ``page`` is 1-based.
+        * ``page_size`` defaults to ``DEFAULT_BLOTTER_PAGE_SIZE`` and is
+          capped at ``MAX_BLOTTER_PAGE_SIZE``; values above the cap
+          surface as 422 (FastAPI's default ``le`` validator).
+        * Trades are sorted ascending by ``(timestamp, trade_id)`` so
+          identical queries return identical pages.
+        * Out-of-range pages (``page > total_pages``) return an empty
+          ``trades`` list with ``total_count`` and ``total_pages`` still
+          populated so callers can detect the end of the dataset.
+
+    Args:
+        run_id: ULID of the research run.
+        page: 1-based page index.
+        page_size: Trades per page (validated by FastAPI).
+        user: Authenticated caller with ``exports:read`` scope.
+        service: Injected :class:`ResearchRunService`.
+
+    Returns:
+        :class:`TradeBlotterPage` for the requested page.
+
+    Raises:
+        HTTPException 422: Invalid ULID format or page_size out of bounds.
+        HTTPException 404: Run does not exist.
+        HTTPException 409: Run exists but has not COMPLETED.
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    logger.info(
+        "get_run_blotter.entry",
+        run_id=run_id,
+        page=page,
+        page_size=page_size,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="runs",
+    )
+
+    _validate_run_id_or_422(run_id, operation="get_run_blotter", corr_id=corr_id)
+
+    try:
+        response = service.get_blotter(run_id, page=page, page_size=page_size)
+    except Exception as exc:  # noqa: BLE001 — re-raised via _map_service_errors
+        raise _map_service_errors(
+            exc, run_id=run_id, operation="get_run_blotter", corr_id=corr_id
+        ) from exc
+
+    logger.info(
+        "get_run_blotter.success",
+        run_id=run_id,
+        page=page,
+        page_size=page_size,
+        total_count=response.total_count,
+        total_pages=response.total_pages,
+        returned=len(response.trades),
+        correlation_id=corr_id,
+        component="runs",
+    )
+    return response
+
+
+@router.get(
+    "/{run_id}/results/metrics",
+    response_model=RunMetrics,
+    summary="Headline metrics for a completed run",
+)
+async def get_run_metrics_endpoint(
+    run_id: str = Path(..., description="Run ULID"),
+    user: AuthenticatedUser = Depends(require_scope("exports:read")),
+    service: ResearchRunService = Depends(get_research_run_service),
+) -> RunMetrics:
+    """
+    Return the headline-metrics sub-resource for a completed run.
+
+    Args:
+        run_id: ULID of the research run.
+        user: Authenticated caller with ``exports:read`` scope.
+        service: Injected :class:`ResearchRunService`.
+
+    Returns:
+        :class:`RunMetrics` with all available fields populated.
+
+    Raises:
+        HTTPException 422: Invalid ULID format.
+        HTTPException 404: Run does not exist.
+        HTTPException 409: Run exists but has not COMPLETED.
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    logger.info(
+        "get_run_metrics.entry",
+        run_id=run_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="runs",
+    )
+
+    _validate_run_id_or_422(run_id, operation="get_run_metrics", corr_id=corr_id)
+
+    try:
+        response = service.get_metrics(run_id)
+    except Exception as exc:  # noqa: BLE001 — re-raised via _map_service_errors
+        raise _map_service_errors(
+            exc, run_id=run_id, operation="get_run_metrics", corr_id=corr_id
+        ) from exc
+
+    logger.info(
+        "get_run_metrics.success",
+        run_id=run_id,
+        total_trades=response.total_trades,
+        correlation_id=corr_id,
+        component="runs",
+    )
+    return response

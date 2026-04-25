@@ -1,15 +1,13 @@
 """
-Unit tests for POST /runs/from-ir (M2.C2).
+Unit tests for POST /runs/from-ir (M2.C2) and the GET
+/runs/{run_id}/results/* sub-resources introduced in M2.C3.
 
 Scope:
-    Verify the route handler:
-      * Resolves dataset_ref via the injected DatasetResolverInterface.
-      * Delegates to ResearchRunService.submit_from_ir().
-      * Returns 201 with run_id + queued status on the happy path.
-      * Returns 404 when dataset_ref is unknown.
-      * Returns 422 when the request body is malformed.
-      * Returns 401/403 when the auth scope is wrong.
-      * Returns 503 when the service or resolver is not configured.
+    Verify the route handlers:
+      * POST /runs/from-ir (M2.C2 — pre-existing tests below).
+      * GET /runs/{run_id}/results/equity-curve (M2.C3).
+      * GET /runs/{run_id}/results/blotter (M2.C3, paginated).
+      * GET /runs/{run_id}/results/metrics (M2.C3).
 
 We mock the ResearchRunService at the module-level DI hook so this
 file is a true unit test of the route layer; the service layer has
@@ -22,15 +20,35 @@ import copy
 import json
 import os
 from collections.abc import Iterator
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from libs.contracts.backtest import (
+    BacktestConfig,
+    BacktestResult,
+    BacktestTrade,
+)
 from libs.contracts.mocks.mock_research_run_repository import (
     MockResearchRunRepository,
 )
-from libs.contracts.research_run import ResearchRunStatus
+from libs.contracts.research_run import (
+    ResearchRunConfig,
+    ResearchRunRecord,
+    ResearchRunResult,
+    ResearchRunStatus,
+    ResearchRunType,
+)
+from libs.contracts.run_results import (
+    DEFAULT_BLOTTER_PAGE_SIZE,
+    MAX_BLOTTER_PAGE_SIZE,
+    EquityCurveResponse,
+    RunMetrics,
+    TradeBlotterPage,
+)
 from libs.strategy_ir.dataset_resolver import (
     InMemoryDatasetResolver,
     seed_default_datasets,
@@ -330,6 +348,415 @@ def test_from_ir_returns_503_when_resolver_unconfigured(
         }
         resp = client.post("/runs/from-ir", json=payload, headers=AUTH_HEADERS)
         assert resp.status_code == 503
+    finally:
+        runs_routes.set_research_run_service(None)  # type: ignore[arg-type]
+        runs_routes.set_dataset_resolver(None)  # type: ignore[arg-type]
+
+
+# ===========================================================================
+# M2.C3 — GET /runs/{run_id}/results/{equity-curve,blotter,metrics}
+# ===========================================================================
+#
+# These tests use the same MockResearchRunRepository + real
+# ResearchRunService stack as the M2.C2 tests above. We seed a
+# COMPLETED record with a synthetic BacktestResult so the projections
+# the service performs in get_equity_curve / get_blotter / get_metrics
+# have something concrete to walk over.
+
+# Fixed run ULID so tests can hit the same record across requests.
+_COMPLETED_RUN_ID = "01HRESDNE00000000000000001"
+_PENDING_RUN_ID = "01HRESPND00000000000000002"
+
+
+def _build_backtest_result(*, trade_count: int = 0) -> BacktestResult:
+    """
+    Build a deterministic BacktestResult with ``trade_count`` trades.
+
+    Trades are emitted in deliberately reverse-chronological order so
+    the service's ``(timestamp, trade_id)`` sort actually gets exercised
+    rather than being a no-op against pre-sorted input.
+    """
+    base_ts = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+    trades = [
+        BacktestTrade(
+            # Use descending timestamps so the service has to re-sort.
+            timestamp=base_ts + timedelta(minutes=trade_count - 1 - i),
+            symbol="EURUSD",
+            side="buy" if i % 2 == 0 else "sell",
+            quantity=Decimal("100"),
+            price=Decimal("1.1000") + Decimal(i) / Decimal("10000"),
+            commission=Decimal("0.50"),
+            slippage=Decimal("0.10"),
+        )
+        for i in range(trade_count)
+    ]
+    config = BacktestConfig(
+        strategy_id="01HSTRATBACKTEST0000000001",
+        symbols=["EURUSD"],
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 1, 31),
+    )
+    return BacktestResult(
+        config=config,
+        total_return_pct=Decimal("12.34"),
+        annualized_return_pct=Decimal("45.67"),
+        max_drawdown_pct=Decimal("-3.21"),
+        sharpe_ratio=Decimal("1.42"),
+        total_trades=trade_count,
+        win_rate=Decimal("0.55"),
+        profit_factor=Decimal("1.80"),
+        final_equity=Decimal("112340"),
+        trades=trades,
+        bars_processed=500,
+    )
+
+
+def _seed_completed_record(
+    repo: MockResearchRunRepository,
+    *,
+    run_id: str = _COMPLETED_RUN_ID,
+    trade_count: int = 0,
+) -> ResearchRunRecord:
+    """Insert a COMPLETED ResearchRunRecord directly into the mock repo."""
+    config = ResearchRunConfig(
+        run_type=ResearchRunType.BACKTEST,
+        strategy_id="01HSTRATBACKTEST0000000001",
+        symbols=["EURUSD"],
+        initial_equity=Decimal("100000"),
+    )
+    result = ResearchRunResult(
+        backtest_result=_build_backtest_result(trade_count=trade_count),
+        summary_metrics={"sharpe_ratio": "1.42", "max_dd": "-3.21"},
+    )
+    record = ResearchRunRecord(
+        id=run_id,
+        config=config,
+        status=ResearchRunStatus.COMPLETED,
+        result=result,
+        created_by="01HUSER0000000000000000001",
+        completed_at=datetime(2025, 2, 1, tzinfo=timezone.utc),
+    )
+    # Bypass create() to avoid the PENDING -> COMPLETED transition guard.
+    with repo._lock:  # noqa: SLF001 — test seeding only
+        repo._store[record.id] = record  # noqa: SLF001 — test seeding only
+    return record
+
+
+def _seed_pending_record(
+    repo: MockResearchRunRepository,
+    *,
+    run_id: str = _PENDING_RUN_ID,
+) -> ResearchRunRecord:
+    """Insert a PENDING (not yet completed) record into the mock repo."""
+    config = ResearchRunConfig(
+        run_type=ResearchRunType.BACKTEST,
+        strategy_id="01HSTRATBACKTEST0000000001",
+        symbols=["EURUSD"],
+    )
+    record = ResearchRunRecord(
+        id=run_id,
+        config=config,
+        status=ResearchRunStatus.PENDING,
+        created_by="01HUSER0000000000000000001",
+    )
+    with repo._lock:  # noqa: SLF001 — test seeding only
+        repo._store[record.id] = record  # noqa: SLF001 — test seeding only
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Equity curve
+# ---------------------------------------------------------------------------
+
+
+def test_equity_curve_invalid_ulid_returns_422(client: TestClient) -> None:
+    """Bad ULID format -> 422 before service is touched."""
+    resp = client.get("/runs/not-a-ulid/results/equity-curve", headers=AUTH_HEADERS)
+    assert resp.status_code == 422
+
+
+def test_equity_curve_missing_run_returns_404(client: TestClient) -> None:
+    """Unknown run_id -> 404 with detail mentioning the id."""
+    missing = "01HRESMSNG0000000000000099"
+    resp = client.get(f"/runs/{missing}/results/equity-curve", headers=AUTH_HEADERS)
+    assert resp.status_code == 404
+    assert missing in resp.json()["detail"]
+
+
+def test_equity_curve_pending_run_returns_409(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """A non-COMPLETED run -> 409 with current status in detail."""
+    _seed_pending_record(mock_repo)
+    resp = client.get(f"/runs/{_PENDING_RUN_ID}/results/equity-curve", headers=AUTH_HEADERS)
+    assert resp.status_code == 409
+    assert "pending" in resp.json()["detail"]
+
+
+def test_equity_curve_completed_run_returns_schema_locked_body(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """Happy path -> 200 with body validating against EquityCurveResponse."""
+    _seed_completed_record(mock_repo, trade_count=3)
+    resp = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/equity-curve", headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    # Schema-locked: round-trip through the Pydantic model. Because the
+    # model is extra='forbid' + frozen, any drift would surface here.
+    body = EquityCurveResponse.model_validate(resp.json())
+    assert body.run_id == _COMPLETED_RUN_ID
+    # Empty equity curve is acceptable for the synthetic fixture; the
+    # contract guarantees the field exists and matches point_count.
+    assert body.point_count == len(body.points)
+
+
+def test_equity_curve_requires_authentication(client: TestClient) -> None:
+    """Missing Authorization header -> 401."""
+    resp = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/equity-curve")
+    assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Blotter — basic contract
+# ---------------------------------------------------------------------------
+
+
+def test_blotter_invalid_ulid_returns_422(client: TestClient) -> None:
+    resp = client.get("/runs/not-a-ulid/results/blotter", headers=AUTH_HEADERS)
+    assert resp.status_code == 422
+
+
+def test_blotter_missing_run_returns_404(client: TestClient) -> None:
+    missing = "01HRESMSNG0000000000000088"
+    resp = client.get(f"/runs/{missing}/results/blotter", headers=AUTH_HEADERS)
+    assert resp.status_code == 404
+
+
+def test_blotter_pending_run_returns_409(
+    client: TestClient, mock_repo: MockResearchRunRepository
+) -> None:
+    _seed_pending_record(mock_repo)
+    resp = client.get(f"/runs/{_PENDING_RUN_ID}/results/blotter", headers=AUTH_HEADERS)
+    assert resp.status_code == 409
+
+
+def test_blotter_default_page_size_is_100(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """Omitting page_size -> default of 100 in the response body."""
+    _seed_completed_record(mock_repo, trade_count=5)
+    resp = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/blotter", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    body = TradeBlotterPage.model_validate(resp.json())
+    assert body.page_size == DEFAULT_BLOTTER_PAGE_SIZE
+    assert body.page == 1
+    assert body.total_count == 5
+    assert len(body.trades) == 5
+
+
+def test_blotter_rejects_page_size_above_cap(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """page_size beyond MAX_BLOTTER_PAGE_SIZE -> 422."""
+    _seed_completed_record(mock_repo, trade_count=10)
+    resp = client.get(
+        f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+        params={"page_size": MAX_BLOTTER_PAGE_SIZE + 1},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 422
+
+
+def test_blotter_rejects_page_zero(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """page < 1 -> 422 from FastAPI's Query validator."""
+    _seed_completed_record(mock_repo, trade_count=10)
+    resp = client.get(
+        f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+        params={"page": 0},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 422
+
+
+def test_blotter_trades_are_sorted_deterministically(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """Same query -> same order, ascending by timestamp."""
+    _seed_completed_record(mock_repo, trade_count=10)
+    resp1 = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/blotter", headers=AUTH_HEADERS)
+    resp2 = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/blotter", headers=AUTH_HEADERS)
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    body1 = TradeBlotterPage.model_validate(resp1.json())
+    body2 = TradeBlotterPage.model_validate(resp2.json())
+    assert [t.trade_id for t in body1.trades] == [t.trade_id for t in body2.trades]
+    # Ascending timestamps.
+    timestamps = [t.timestamp for t in body1.trades]
+    assert timestamps == sorted(timestamps)
+
+
+# ---------------------------------------------------------------------------
+# Blotter — 1000-trade pagination acceptance
+# ---------------------------------------------------------------------------
+
+
+def test_blotter_pagination_with_1000_trades(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """
+    Acceptance: synthetic 1000-trade blotter paginates correctly.
+
+    * page=1, page_size=100  -> trades 1-100, total_count=1000, total_pages=10.
+    * page=10, page_size=100 -> trades 901-1000.
+    * page=11, page_size=100 -> empty trades, total_count still 1000.
+    """
+    _seed_completed_record(mock_repo, trade_count=1000)
+
+    # Page 1
+    resp = client.get(
+        f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+        params={"page": 1, "page_size": 100},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    page1 = TradeBlotterPage.model_validate(resp.json())
+    assert page1.total_count == 1000
+    assert page1.total_pages == 10
+    assert page1.page == 1
+    assert page1.page_size == 100
+    assert len(page1.trades) == 100
+
+    # Page 10 (last populated)
+    resp = client.get(
+        f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+        params={"page": 10, "page_size": 100},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    page10 = TradeBlotterPage.model_validate(resp.json())
+    assert page10.total_count == 1000
+    assert page10.total_pages == 10
+    assert page10.page == 10
+    assert len(page10.trades) == 100
+
+    # Page 1 and page 10 must not overlap.
+    page1_ids = {t.trade_id for t in page1.trades}
+    page10_ids = {t.trade_id for t in page10.trades}
+    assert page1_ids.isdisjoint(page10_ids)
+
+    # Page 11 — beyond last populated page -> empty trades, totals unchanged.
+    resp = client.get(
+        f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+        params={"page": 11, "page_size": 100},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    page11 = TradeBlotterPage.model_validate(resp.json())
+    assert page11.total_count == 1000
+    assert page11.total_pages == 10
+    assert page11.page == 11
+    assert page11.trades == []
+
+
+def test_blotter_pagination_is_stable_across_calls(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """Same query, different requests -> identical trades on the page."""
+    _seed_completed_record(mock_repo, trade_count=1000)
+    resp_a = client.get(
+        f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+        params={"page": 5, "page_size": 100},
+        headers=AUTH_HEADERS,
+    )
+    resp_b = client.get(
+        f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+        params={"page": 5, "page_size": 100},
+        headers=AUTH_HEADERS,
+    )
+    assert resp_a.json() == resp_b.json()
+
+
+def test_blotter_requires_authentication(client: TestClient) -> None:
+    resp = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/blotter")
+    assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_invalid_ulid_returns_422(client: TestClient) -> None:
+    resp = client.get("/runs/not-a-ulid/results/metrics", headers=AUTH_HEADERS)
+    assert resp.status_code == 422
+
+
+def test_metrics_missing_run_returns_404(client: TestClient) -> None:
+    missing = "01HRESMSNG0000000000000077"
+    resp = client.get(f"/runs/{missing}/results/metrics", headers=AUTH_HEADERS)
+    assert resp.status_code == 404
+
+
+def test_metrics_pending_run_returns_409(
+    client: TestClient, mock_repo: MockResearchRunRepository
+) -> None:
+    _seed_pending_record(mock_repo)
+    resp = client.get(f"/runs/{_PENDING_RUN_ID}/results/metrics", headers=AUTH_HEADERS)
+    assert resp.status_code == 409
+
+
+def test_metrics_completed_run_returns_schema_locked_body(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """Happy path -> 200 with body validating against RunMetrics."""
+    _seed_completed_record(mock_repo, trade_count=42)
+    resp = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/metrics", headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+    body = RunMetrics.model_validate(resp.json())
+    assert body.run_id == _COMPLETED_RUN_ID
+    assert body.total_trades == 42
+    assert body.sharpe_ratio == Decimal("1.42")
+    assert body.bars_processed == 500
+    # summary_metrics passed through verbatim.
+    assert body.summary_metrics["sharpe_ratio"] == "1.42"
+
+
+def test_metrics_requires_authentication(client: TestClient) -> None:
+    resp = client.get(f"/runs/{_COMPLETED_RUN_ID}/results/metrics")
+    assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# DI fail-closed (M2.C3)
+# ---------------------------------------------------------------------------
+
+
+def test_results_endpoints_return_503_when_service_unconfigured() -> None:
+    """Without a registered service, all three M2.C3 endpoints fail-closed."""
+    runs_routes.set_research_run_service(None)  # type: ignore[arg-type]
+    runs_routes.set_dataset_resolver(None)  # type: ignore[arg-type]
+    try:
+        from services.api.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        for path in (
+            f"/runs/{_COMPLETED_RUN_ID}/results/equity-curve",
+            f"/runs/{_COMPLETED_RUN_ID}/results/blotter",
+            f"/runs/{_COMPLETED_RUN_ID}/results/metrics",
+        ):
+            resp = client.get(path, headers=AUTH_HEADERS)
+            assert resp.status_code == 503, f"{path} did not fail-closed: {resp.status_code}"
     finally:
         runs_routes.set_research_run_service(None)  # type: ignore[arg-type]
         runs_routes.set_dataset_resolver(None)  # type: ignore[arg-type]

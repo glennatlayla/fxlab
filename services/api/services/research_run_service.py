@@ -46,7 +46,7 @@ from decimal import Decimal
 import structlog
 import ulid as _ulid
 
-from libs.contracts.errors import NotFoundError
+from libs.contracts.errors import FXLabError, NotFoundError
 from libs.contracts.experiment_plan import ExperimentPlan
 from libs.contracts.interfaces.research_run_repository import (
     ResearchRunRepositoryInterface,
@@ -61,9 +61,40 @@ from libs.contracts.research_run import (
     ResearchRunStatus,
     ResearchRunType,
 )
+from libs.contracts.run_results import (
+    EquityCurvePoint,
+    EquityCurveResponse,
+    RunMetrics,
+    TradeBlotterEntry,
+    TradeBlotterPage,
+)
 from libs.strategy_ir.interfaces.dataset_resolver_interface import (
     ResolvedDataset,
 )
+
+
+class RunNotCompletedError(FXLabError):
+    """
+    Raised when a results sub-resource is requested for a run that exists
+    but has not yet COMPLETED.
+
+    The route layer maps this to HTTP 409 Conflict so callers can
+    distinguish "run does not exist" (404) from "run exists but its
+    results are not ready yet" (409).
+
+    Attributes:
+        run_id: ULID of the run that was queried.
+        status: Current status of the run.
+    """
+
+    def __init__(self, run_id: str, status: ResearchRunStatus) -> None:
+        super().__init__(
+            f"Research run {run_id} is in status {status.value}; results are only available "
+            f"once the run has completed."
+        )
+        self.run_id = run_id
+        self.status = status
+
 
 logger = structlog.get_logger(__name__)
 
@@ -394,3 +425,271 @@ class ResearchRunService(ResearchRunServiceInterface):
         if record is None:
             return None
         return record.result
+
+    # ------------------------------------------------------------------
+    # Results sub-resources (M2.C3)
+    # ------------------------------------------------------------------
+    #
+    # These three methods feed the GET /runs/{run_id}/results/* endpoints.
+    # Each one performs the same triage:
+    #
+    #     1. Look up the record via the repository.
+    #     2. Raise NotFoundError if the record is missing.
+    #     3. Raise RunNotCompletedError if the run hasn't finished — we
+    #        prefer 409 over 404 here so the frontend can distinguish
+    #        "wrong id" from "not ready yet".
+    #     4. Project the engine result into the wire-shaped DTO.
+    #
+    # The projection logic is intentionally local: we never mutate the
+    # ResearchRunRecord and never persist the projected DTO. This keeps
+    # the service stateless w.r.t. these reads (no caching, no race).
+
+    def get_equity_curve(self, run_id: str) -> EquityCurveResponse:
+        """
+        Build the equity-curve sub-resource for a completed run.
+
+        The engine result carries equity points in two places:
+            * ``signal_summary.equity_curve_points`` — the M9 extension,
+              already in (timestamp, equity) shape.
+            * ``backtest_result.equity_curve`` — a list of
+              :class:`BacktestBar` objects from which we extract
+              ``timestamp`` and ``equity`` per bar.
+        We prefer the M9 extension because it's the canonical source
+        when present; we fall back to the bar-derived series so older
+        results still produce a usable curve.
+
+        Args:
+            run_id: ULID of the research run.
+
+        Returns:
+            EquityCurveResponse with samples ordered ascending by
+            timestamp.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+            RunNotCompletedError: If the run is not COMPLETED.
+        """
+        record = self._require_completed_record(run_id)
+        result = record.result
+        # _require_completed_record() guarantees a non-None result,
+        # but the type checker can't see across raises so re-assert.
+        assert result is not None  # noqa: S101 — invariant guard
+
+        points: list[EquityCurvePoint] = []
+        backtest_result = result.backtest_result
+        if backtest_result is not None:
+            summary = backtest_result.signal_summary
+            if summary is not None and summary.equity_curve_points:
+                points = [
+                    EquityCurvePoint(timestamp=p.timestamp, equity=p.equity)
+                    for p in summary.equity_curve_points
+                ]
+            elif backtest_result.equity_curve:
+                points = [
+                    EquityCurvePoint(timestamp=bar.timestamp, equity=bar.equity)
+                    for bar in backtest_result.equity_curve
+                ]
+
+        # Stable sort so a future engine that emits out-of-order points
+        # still yields a deterministic wire response.
+        points.sort(key=lambda p: p.timestamp)
+
+        logger.info(
+            "research_run.equity_curve.served",
+            run_id=run_id,
+            point_count=len(points),
+            component="research_run_service",
+        )
+
+        return EquityCurveResponse(
+            run_id=run_id,
+            point_count=len(points),
+            points=points,
+        )
+
+    def get_blotter(
+        self,
+        run_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> TradeBlotterPage:
+        """
+        Build a paginated trade-blotter page for a completed run.
+
+        Trades are sourced from ``backtest_result.trades`` and assigned
+        a stable ``trade_id`` of ``trade-{index:06d}`` derived from
+        their position in the ordered trade list. They are then sorted
+        ascending by ``(timestamp, trade_id)`` so identical queries
+        always produce identical pages — the precondition for the
+        frontend's "load page N" pattern.
+
+        Args:
+            run_id: ULID of the research run.
+            page: 1-based page index.
+            page_size: Maximum trades per page (caller is responsible
+                for enforcing the upper bound; this method does NOT
+                clamp because the route returns 422 instead).
+
+        Returns:
+            TradeBlotterPage. Pages beyond ``total_pages`` return an
+            empty ``trades`` list with the totals still populated.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+            RunNotCompletedError: If the run is not COMPLETED.
+            ValueError: If ``page`` < 1 or ``page_size`` < 1 (defence
+                in depth — the route validates first).
+        """
+        if page < 1:
+            raise ValueError("page must be >= 1")
+        if page_size < 1:
+            raise ValueError("page_size must be >= 1")
+
+        record = self._require_completed_record(run_id)
+        result = record.result
+        assert result is not None  # noqa: S101 — invariant guard
+
+        # Project trades into wire-shape entries with a stable trade_id.
+        # The index-based ID is deterministic w.r.t. the engine's
+        # ordering, which is the only ordering we trust pre-sort.
+        entries: list[TradeBlotterEntry] = []
+        backtest_result = result.backtest_result
+        if backtest_result is not None:
+            for index, trade in enumerate(backtest_result.trades):
+                entries.append(
+                    TradeBlotterEntry(
+                        trade_id=f"trade-{index:06d}",
+                        timestamp=trade.timestamp,
+                        symbol=trade.symbol,
+                        side=trade.side,
+                        quantity=trade.quantity,
+                        price=trade.price,
+                        commission=trade.commission,
+                        slippage=trade.slippage,
+                    )
+                )
+
+        entries.sort(key=lambda e: (e.timestamp, e.trade_id))
+
+        total_count = len(entries)
+        total_pages = (total_count + page_size - 1) // page_size if total_count else 0
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_entries = entries[start:end]
+
+        logger.info(
+            "research_run.blotter.served",
+            run_id=run_id,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=total_pages,
+            returned=len(page_entries),
+            component="research_run_service",
+        )
+
+        return TradeBlotterPage(
+            run_id=run_id,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=total_pages,
+            trades=page_entries,
+        )
+
+    def get_metrics(self, run_id: str) -> RunMetrics:
+        """
+        Build the headline-metrics sub-resource for a completed run.
+
+        Pulls the explicit fields (Sharpe, drawdown, etc.) from
+        ``backtest_result`` when available and passes
+        ``summary_metrics`` through verbatim so engine-specific keys
+        survive.
+
+        Args:
+            run_id: ULID of the research run.
+
+        Returns:
+            RunMetrics with all available fields populated; absent
+            fields stay None rather than being defaulted to zero so
+            consumers can tell "engine produced 0" from "engine did not
+            report this metric".
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+            RunNotCompletedError: If the run is not COMPLETED.
+        """
+        record = self._require_completed_record(run_id)
+        result = record.result
+        assert result is not None  # noqa: S101 — invariant guard
+
+        backtest_result = result.backtest_result
+
+        if backtest_result is not None:
+            metrics = RunMetrics(
+                run_id=run_id,
+                completed_at=result.completed_at,
+                total_return_pct=backtest_result.total_return_pct,
+                annualized_return_pct=backtest_result.annualized_return_pct,
+                max_drawdown_pct=backtest_result.max_drawdown_pct,
+                sharpe_ratio=backtest_result.sharpe_ratio,
+                total_trades=backtest_result.total_trades,
+                win_rate=backtest_result.win_rate,
+                profit_factor=backtest_result.profit_factor,
+                final_equity=backtest_result.final_equity,
+                bars_processed=backtest_result.bars_processed,
+                summary_metrics=dict(result.summary_metrics),
+            )
+        else:
+            # Walk-forward / Monte-Carlo / Composite runs may not have
+            # a backtest_result; surface the summary_metrics so the
+            # endpoint still returns a meaningful payload.
+            metrics = RunMetrics(
+                run_id=run_id,
+                completed_at=result.completed_at,
+                summary_metrics=dict(result.summary_metrics),
+            )
+
+        logger.info(
+            "research_run.metrics.served",
+            run_id=run_id,
+            has_backtest_result=backtest_result is not None,
+            summary_metric_keys=len(result.summary_metrics),
+            component="research_run_service",
+        )
+
+        return metrics
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _require_completed_record(self, run_id: str) -> ResearchRunRecord:
+        """
+        Look up a run and verify it is COMPLETED with a result body.
+
+        Centralises the triage used by every results sub-resource so
+        the error semantics stay identical across endpoints.
+
+        Args:
+            run_id: ULID of the research run.
+
+        Returns:
+            The ResearchRunRecord with a non-None ``result`` field.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+            RunNotCompletedError: If the run is not COMPLETED, or is
+                COMPLETED but missing a result body (treated the same
+                way because callers cannot distinguish the two).
+        """
+        record = self._repo.get_by_id(run_id)
+        if record is None:
+            raise NotFoundError(f"Research run {run_id} not found")
+
+        if record.status != ResearchRunStatus.COMPLETED or record.result is None:
+            raise RunNotCompletedError(run_id, record.status)
+
+        return record
