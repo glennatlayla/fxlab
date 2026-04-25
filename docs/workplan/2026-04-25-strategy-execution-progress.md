@@ -15,24 +15,26 @@ Per §16 Rule 4, phase completion requires
 
 ## Track A — Schema + Compiler (critical path)
 
-| ID     | Milestone                                  | Status      | Commit | Owner |
-|--------|--------------------------------------------|-------------|--------|-------|
-| M1.A1  | Pydantic schema for strategy_ir.json       | NOT_STARTED |        |       |
-| M1.A2  | Reference resolver                         | NOT_STARTED |        |       |
-| M1.A3  | IR → SignalStrategy compiler               | NOT_STARTED |        |       |
-| M1.A4  | Lookback notation handler                  | NOT_STARTED |        |       |
-| M1.A5  | Risk model + sizing translation            | NOT_STARTED |        |       |
+| ID     | Milestone                                  | Status      | Commit  | Owner       |
+|--------|--------------------------------------------|-------------|---------|-------------|
+| M1.A1  | Pydantic schema for strategy_ir.json       | DONE        | c64ab96 | orchestrator |
+| M1.A2  | Reference resolver                         | DONE        | c684dd2 | orchestrator |
+| M1.A3  | IR → SignalStrategy compiler               | NOT_STARTED |         |             |
+| M1.A4  | Lookback notation handler                  | NOT_STARTED |         |             |
+| M1.A5  | Risk model + sizing translation            | NOT_STARTED |         |             |
 
 ## Track B — Indicator coverage (parallel after A1)
 
-| ID     | Milestone                                  | Status      | Commit | Owner |
-|--------|--------------------------------------------|-------------|--------|-------|
-| M1.B1  | ADX                                        | NOT_STARTED |        |       |
-| M1.B2  | z-score indicator                          | NOT_STARTED |        |       |
-| M1.B3  | Rolling extremes                           | NOT_STARTED |        |       |
-| M1.B4  | Rolling stddev                             | NOT_STARTED |        |       |
-| M1.B5  | Calendar indicators (DECISION GATE)        | NOT_STARTED |        |       |
-| M1.B6  | Derived-fields formula evaluator           | NOT_STARTED |        |       |
+| ID     | Milestone                                  | Status      | Commit  | Owner       |
+|--------|--------------------------------------------|-------------|---------|-------------|
+| M1.B1  | ADX                                        | DONE        | 0eedc82 | orchestrator |
+| M1.B2  | z-score indicator                          | DONE        | 31ba84b | orchestrator |
+| M1.B3  | Rolling extremes                           | DONE        | 50b604c | orchestrator |
+| M1.B4  | Rolling stddev                             | DONE        | d7a5f68 | orchestrator |
+| M1.B5  | Calendar indicators (resolved → mcal 4.x)  | DONE        | 6a204fb | orchestrator |
+| M1.B6  | Derived-fields formula evaluator           | DONE        | 3701d87 | orchestrator |
+
+Track B integration commit (default_registry wiring): `d11c83c`.
 
 ## Track C — API + run plumbing (after A3)
 
