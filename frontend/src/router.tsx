@@ -84,6 +84,11 @@ const Emergency = lazy(() => import("./pages/Emergency"));
 const Alerts = lazy(() => import("./pages/Alerts"));
 const More = lazy(() => import("./pages/More"));
 
+// Run Results viewer (M2.D4) — completed-run results page powered by the
+// M2.C3 sub-resource endpoints (metrics, equity-curve, blotter). Auth
+// scope matches those endpoints (exports:read).
+const RunResults = lazy(() => import("./pages/RunResults"));
+
 export const router = createBrowserRouter(
   [
     {
@@ -340,6 +345,21 @@ export const router = createBrowserRouter(
               ),
             },
           ],
+        },
+        // Run Results viewer (M2.D4): completed-run results page consuming
+        // the M2.C3 sub-resource endpoints. Scope matches those endpoints
+        // (exports:read).
+        {
+          path: "runs/:runId/results",
+          element: (
+            <AuthGuard requiredScope="exports:read">
+              <FeatureErrorBoundary featureName="Run Results">
+                <Suspense fallback={<PageLoadingFallback />}>
+                  <RunResults />
+                </Suspense>
+              </FeatureErrorBoundary>
+            </AuthGuard>
+          ),
         },
       ],
     },
