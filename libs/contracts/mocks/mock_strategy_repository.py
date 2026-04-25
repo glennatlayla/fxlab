@@ -59,19 +59,30 @@ class MockStrategyRepository(StrategyRepositoryInterface):
         code: str,
         created_by: str,
         version: str | None = None,
+        source: str = "draft_form",
     ) -> dict[str, Any]:
         """
         Create a strategy in the in-memory store.
 
         Args:
             name: Strategy name.
-            code: DSL source code.
+            code: Strategy source code or IR JSON body.
             created_by: Creator ULID.
             version: Optional version string.
+            source: Provenance flag (``"draft_form"`` | ``"ir_upload"``).
+                Mirrors the SQL repo's ``chk_strategies_source`` CHECK
+                constraint (migration 0025).
 
         Returns:
-            Dict with all strategy fields.
+            Dict with all strategy fields, including ``source``.
+
+        Raises:
+            ValueError: If ``source`` is not one of the allowed values.
+                Mirrors the SQL CHECK constraint at the mock layer so
+                bad callers fail loudly in unit tests too.
         """
+        if source not in ("draft_form", "ir_upload"):
+            raise ValueError(f"Invalid source {source!r}: expected 'draft_form' or 'ir_upload'")
         now = datetime.now(timezone.utc)
         strategy_id = str(ULID())
         record: dict[str, Any] = {
@@ -82,6 +93,7 @@ class MockStrategyRepository(StrategyRepositoryInterface):
             "created_by": created_by,
             "is_active": True,
             "row_version": 1,
+            "source": source,
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }

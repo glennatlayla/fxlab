@@ -36,11 +36,13 @@ import json
 from typing import Any
 
 import structlog
+from pydantic import ValidationError as PydanticValidationError
 
 from libs.contracts.errors import NotFoundError, ValidationError
 from libs.contracts.interfaces.strategy_repository_interface import (
     StrategyRepositoryInterface,
 )
+from libs.contracts.strategy_ir import StrategyIR
 from services.api.services.dsl_validator import (
     DslValidationResult,
     validate_dsl,
@@ -271,6 +273,95 @@ class StrategyService(StrategyServiceInterface):
             "indicators_used": sorted(all_indicators),
             "variables_used": sorted(all_variables),
         }
+
+    def create_from_ir(
+        self,
+        ir_dict: dict[str, Any],
+        *,
+        created_by: str,
+        source: str = "ir_upload",
+    ) -> dict[str, Any]:
+        """
+        Create a strategy from a parsed Strategy IR document (M2.C1).
+
+        Validates the body against :class:`StrategyIR` before
+        persisting. The full IR JSON is stored in the ``code`` column
+        verbatim (canonical, sort-keys-stable) so the M2.C4 parsed-IR
+        round-trip endpoint can deep-equal it without reformatting.
+
+        Args:
+            ir_dict: Raw IR body parsed from the uploaded JSON file.
+            created_by: ULID of the importing user.
+            source: Provenance flag (default ``"ir_upload"``).
+
+        Returns:
+            Dict with the persisted strategy record (includes
+            ``source`` and the canonical IR JSON in ``code``).
+
+        Raises:
+            ValidationError: If the IR fails Pydantic validation.
+                Message preserves every error's dotted path (e.g.
+                ``metadata.strategy_name: field required``) so the
+                controller can return it as the 400 body without
+                further reshaping.
+
+        Example:
+            >>> import json
+            >>> with open("FX_DoubleBollinger_TrendZone.strategy_ir.json") as fh:
+            ...     ir = json.load(fh)
+            >>> result = service.create_from_ir(ir, created_by="01HUSER001")
+            >>> result["source"]
+            'ir_upload'
+        """
+        logger.info(
+            "strategy.create_from_ir.started",
+            created_by=created_by,
+            source=source,
+            component="StrategyService",
+            operation="create_from_ir",
+        )
+
+        # Schema validation. Pydantic produces a structured error list
+        # with dotted paths into the document — we surface that path
+        # verbatim so M2.C1 acceptance "400 with the validation error
+        # path in the response body" is satisfied without bespoke
+        # reformatting at the controller layer.
+        try:
+            ir_model = StrategyIR.model_validate(ir_dict)
+        except PydanticValidationError as exc:
+            errors = exc.errors()
+            paths = [
+                "{path}: {msg}".format(
+                    path=".".join(str(p) for p in err.get("loc", ())) or "<root>",
+                    msg=err.get("msg", "validation failed"),
+                )
+                for err in errors
+            ]
+            raise ValidationError("; ".join(paths)) from exc
+
+        # Canonicalise the IR body before persistence. Sorting keys
+        # gives M2.C4's deep-equal round-trip a stable representation
+        # regardless of the upload's original key ordering.
+        canonical_code = json.dumps(ir_dict, sort_keys=True)
+
+        strategy = self._strategy_repo.create(
+            name=ir_model.metadata.strategy_name,
+            code=canonical_code,
+            created_by=created_by,
+            version=ir_model.metadata.strategy_version,
+            source=source,
+        )
+
+        logger.info(
+            "strategy.create_from_ir.completed",
+            strategy_id=strategy["id"],
+            name=ir_model.metadata.strategy_name,
+            source=source,
+            component="StrategyService",
+            operation="create_from_ir",
+        )
+
+        return strategy
 
     def get_strategy(self, strategy_id: str) -> dict[str, Any]:
         """

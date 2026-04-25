@@ -76,6 +76,40 @@ class StrategyServiceInterface(ABC):
         """
 
     @abstractmethod
+    def create_from_ir(
+        self,
+        ir_dict: dict[str, Any],
+        *,
+        created_by: str,
+        source: str = "ir_upload",
+    ) -> dict[str, Any]:
+        """
+        Create a strategy from a parsed Strategy IR document.
+
+        Validates the IR via ``StrategyIR.model_validate`` before
+        persistence — invalid bodies raise ``ValidationError`` with the
+        Pydantic error path so the controller can surface it as 400.
+
+        Args:
+            ir_dict: Raw IR body (parsed from the uploaded JSON file).
+            created_by: ULID of the importing user.
+            source: Provenance flag for the strategy record. Defaults
+                to ``"ir_upload"`` (the only valid value for this
+                method's call site, but accepted as a parameter so the
+                controller can override in future scenarios such as
+                automated re-imports).
+
+        Returns:
+            Dict with the persisted strategy record (includes ``source``).
+
+        Raises:
+            ValidationError: If ``ir_dict`` does not validate against
+                the ``StrategyIR`` schema. Message includes every
+                Pydantic error path so the caller can locate the
+                offending field.
+        """
+
+    @abstractmethod
     def get_strategy(self, strategy_id: str) -> dict[str, Any]:
         """
         Retrieve a strategy by ID.

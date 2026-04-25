@@ -142,9 +142,16 @@ class Strategy(TimestampMixin, Base):
         version: Semantic version string.
         created_by: ULID of the user who created this strategy.
         is_active: Whether this strategy is currently active.
+        source: Provenance ('draft_form' | 'ir_upload') — see migration 0025.
     """
 
     __tablename__ = "strategies"
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('draft_form', 'ir_upload')",
+            name="chk_strategies_source",
+        ),
+    )
 
     id: Any = Column(String(26), primary_key=True, nullable=False)
     name: Any = Column(String(255), nullable=False)
@@ -156,6 +163,14 @@ class Strategy(TimestampMixin, Base):
     is_active: Any = Column(Boolean, nullable=False, default=True)
     # Optimistic locking: incremented on every UPDATE to detect concurrent writes.
     row_version: Any = Column(Integer, nullable=False, default=1, server_default="1")
+    # Provenance: 'draft_form' (Strategy Studio wizard) | 'ir_upload' (M2.C1).
+    # Backed by migration 0025 with a CHECK constraint pinning allowed values.
+    source: Any = Column(
+        String(32),
+        nullable=False,
+        default="draft_form",
+        server_default="draft_form",
+    )
 
     builds: Any = relationship("StrategyBuild", back_populates="strategy")
 

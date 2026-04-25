@@ -9,6 +9,8 @@ Verifies:
 - Authentication enforcement on all endpoints.
 - DSL validation endpoint returns structured results.
 - List strategies with pagination.
+- M2.C1: POST /strategies/import-ir accepts the 5 production IRs and
+  rejects malformed bodies with 400 + the validation error path.
 
 Example:
     pytest tests/unit/test_strategy_routes.py -v
@@ -16,7 +18,12 @@ Example:
 
 from __future__ import annotations
 
+import copy
+import io
+import json
+import logging
 import os
+from pathlib import Path as FsPath
 from typing import Any
 
 import pytest
@@ -388,3 +395,251 @@ class TestListStrategiesRoute:
         resp = client.get("/strategies/", headers=_auth_headers())
         data = resp.json()
         assert data["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: POST /strategies/import-ir (M2.C1)
+# ---------------------------------------------------------------------------
+
+#: Five production IR files shipped under ``Strategy Repo/`` — pinned
+#: explicitly so a future repo addition does not silently change the
+#: contract test surface (the M2.C1 acceptance is "each of the 5
+#: repo IR files", not "every file we happen to have").
+_REPO_IR_FILES: tuple[str, ...] = (
+    "Strategy Repo/fxlab_chan_next3_strategy_pack/FX_SingleAsset_MeanReversion_H1.strategy_ir.json",
+    "Strategy Repo/fxlab_chan_next3_strategy_pack/FX_TimeSeriesMomentum_Breakout_D1.strategy_ir.json",
+    "Strategy Repo/fxlab_chan_next3_strategy_pack/FX_TurnOfMonth_USDSeasonality_D1.strategy_ir.json",
+    "Strategy Repo/fxlab_kathy_lien_public_strategy_pack/FX_DoubleBollinger_TrendZone.strategy_ir.json",
+    "Strategy Repo/fxlab_kathy_lien_public_strategy_pack/FX_MTF_DailyTrend_H1Pullback.strategy_ir.json",
+)
+
+
+def _load_repo_ir(rel_path: str) -> dict[str, Any]:
+    """
+    Load a strategy_ir.json from the repo by repository-relative path.
+
+    Args:
+        rel_path: Path relative to the project root.
+
+    Returns:
+        Parsed JSON dict.
+    """
+    # tests/unit/test_strategy_routes.py → up two levels = project root.
+    project_root = FsPath(__file__).resolve().parents[2]
+    full = project_root / rel_path
+    with full.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+@pytest.fixture()
+def import_ir_test_env():
+    """
+    TestClient + real ``StrategyService`` wired to ``MockStrategyRepository``.
+
+    The M2.C1 contract test must exercise the actual ``StrategyIR``
+    Pydantic validation — substituting a hand-rolled mock service
+    here would defeat the whole acceptance criterion. Wiring the real
+    service against the mock repo lets us assert persistence
+    behaviour (source flag, IR JSON in code, generated strategy_id)
+    without a database.
+    """
+    from libs.contracts.mocks.mock_strategy_repository import MockStrategyRepository
+    from services.api.routes.strategies import set_strategy_service
+    from services.api.services.strategy_service import StrategyService
+
+    repo = MockStrategyRepository()
+    real_service = StrategyService(strategy_repo=repo)
+    set_strategy_service(real_service)
+    _override_auth(app)
+
+    client = TestClient(app)
+    yield client, repo
+
+    app.dependency_overrides.clear()
+    set_strategy_service(None)
+
+
+class TestImportStrategyIR:
+    """
+    Contract tests for ``POST /strategies/import-ir`` (M2.C1).
+
+    Acceptance (workplan lines 608-610):
+    - posting each of the 5 repo IR files returns 201 with a new
+      ``strategy_id``;
+    - posting a malformed IR (missing artifact_type) returns 400 with
+      the validation error path in the response body;
+    - the structured audit log entry ``event=strategy_imported
+      strategy_id=... source=ir_upload`` is emitted on success.
+    """
+
+    @pytest.mark.parametrize("ir_path", _REPO_IR_FILES)
+    def test_import_repo_ir_returns_201(self, import_ir_test_env, ir_path: str) -> None:
+        """Each of the 5 production IRs imports cleanly with 201."""
+        client, repo = import_ir_test_env
+
+        ir_body = _load_repo_ir(ir_path)
+        # Send as multipart upload — the same shape the frontend
+        # M2.D1 file-drop panel will use.
+        resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    os.path.basename(ir_path),
+                    json.dumps(ir_body).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        assert "strategy" in data
+        strategy = data["strategy"]
+        # strategy_id is non-empty (ULID, 26 chars in this codebase)
+        assert strategy["id"], "expected non-empty strategy_id on import"
+        assert len(strategy["id"]) == 26
+        assert strategy["source"] == "ir_upload"
+        assert strategy["name"] == ir_body["metadata"]["strategy_name"]
+        # Repository was actually written through (not a stub).
+        assert repo.count() == 1
+        persisted = repo.get_by_id(strategy["id"])
+        assert persisted is not None
+        # Persisted code is the canonical IR JSON — round-trips back to
+        # the original dict (key order doesn't matter, values do).
+        assert json.loads(persisted["code"]) == ir_body
+
+    def test_import_malformed_ir_returns_400_with_error_path(self, import_ir_test_env) -> None:
+        """Missing ``artifact_type`` returns 400 + the field path in detail."""
+        client, repo = import_ir_test_env
+
+        ir_body = _load_repo_ir(_REPO_IR_FILES[0])
+        bad = copy.deepcopy(ir_body)
+        del bad["artifact_type"]  # pin the failure to a known path
+
+        resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    "broken.strategy_ir.json",
+                    json.dumps(bad).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        # FastAPI HTTPException renders {"detail": "..."}
+        assert "detail" in body
+        # The Pydantic error path for the missing field is exactly
+        # "artifact_type" — assert the path appears in the response so
+        # callers can locate the offending field per acceptance.
+        assert "artifact_type" in body["detail"], body
+        # Nothing was persisted on a 400.
+        assert repo.count() == 0
+
+    def test_import_invalid_json_returns_400(self, import_ir_test_env) -> None:
+        """A non-JSON upload returns 400 with a clear message."""
+        client, repo = import_ir_test_env
+
+        resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    "garbage.json",
+                    b"this is not json {",
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 400
+        assert "JSON" in resp.json()["detail"]
+        assert repo.count() == 0
+
+    def test_import_emits_audit_log_on_success(
+        self,
+        import_ir_test_env,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A successful import emits ``event=strategy_imported`` per CLAUDE.md §8.
+
+        structlog in this codebase is configured to render directly to
+        stdout rather than route through the stdlib logging tree, so
+        ``caplog`` does not see structlog calls. The structurally-
+        correct way to assert the audit emission is therefore to spy
+        on the route module's bound logger and verify the call shape
+        is exactly what the workplan pins.
+        """
+        client, _repo = import_ir_test_env
+        from services.api.routes import strategies as strategies_module
+
+        captured: list[tuple[str, dict[str, Any]]] = []
+        original_info = strategies_module.logger.info
+
+        def _spy_info(event: str, /, **kwargs: Any) -> Any:
+            captured.append((event, kwargs))
+            return original_info(event, **kwargs)
+
+        monkeypatch.setattr(strategies_module.logger, "info", _spy_info)
+
+        ir_body = _load_repo_ir(_REPO_IR_FILES[0])
+        resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    "audit.strategy_ir.json",
+                    json.dumps(ir_body).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 201
+        strategy_id = resp.json()["strategy"]["id"]
+
+        # The audit line is the one whose event name matches exactly
+        # the workplan's pin: ``strategy_imported``.
+        audit_calls = [(ev, kw) for (ev, kw) in captured if ev == "strategy_imported"]
+        assert len(audit_calls) == 1, (
+            f"expected exactly one strategy_imported audit log line; got {captured}"
+        )
+        _event, kwargs = audit_calls[0]
+        assert kwargs["strategy_id"] == strategy_id
+        assert kwargs["source"] == "ir_upload"
+        # CLAUDE.md §8 required structured fields:
+        assert "user_id" in kwargs
+        assert "correlation_id" in kwargs
+        assert kwargs["component"] == "strategies"
+        # Silence ruff about unused logging import.
+        _ = logging
+
+    def test_import_requires_auth(self, import_ir_test_env) -> None:
+        """Request without auth is rejected (no service call)."""
+        client, repo = import_ir_test_env
+        # Drop the auth override so the real require_scope dependency runs.
+        app.dependency_overrides.clear()
+
+        ir_body = _load_repo_ir(_REPO_IR_FILES[0])
+        resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    "noauth.strategy_ir.json",
+                    json.dumps(ir_body).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+        )
+
+        assert resp.status_code in (401, 403, 422)
+        assert repo.count() == 0
+
+
+# Silence unused-import check for io (kept for symmetry with future
+# multi-part stream tests under M2.C2).
+_ = io

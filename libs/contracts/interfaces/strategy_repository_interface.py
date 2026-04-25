@@ -53,19 +53,27 @@ class StrategyRepositoryInterface(ABC):
         code: str,
         created_by: str,
         version: str | None = None,
+        source: str = "draft_form",
     ) -> dict[str, Any]:
         """
         Create a new strategy record.
 
         Args:
             name: Human-readable strategy name.
-            code: Strategy DSL source code (entry/exit conditions).
+            code: Strategy source — DSL JSON for the draft-form flow,
+                or the full ``strategy_ir.json`` body for IR uploads.
             created_by: ULID of the creating user.
             version: Optional semantic version string.
+            source: Provenance flag — ``"draft_form"`` (Strategy Studio
+                wizard) or ``"ir_upload"`` (POST /strategies/import-ir).
+                Persisted on the strategy record so downstream
+                consumers (M2.C4 GET /strategies/{id}) can render the
+                correct view. Backed by migration 0025 with a CHECK
+                constraint pinning the allowed values.
 
         Returns:
             Dict with id, name, code, version, created_by, is_active,
-            created_at, updated_at.
+            source, created_at, updated_at.
         """
 
     @abstractmethod

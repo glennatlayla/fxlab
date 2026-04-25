@@ -34,6 +34,7 @@ Example:
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
     )
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -225,6 +226,124 @@ async def create_strategy(
     )
 
     return JSONResponse(content=result, status_code=status.HTTP_201_CREATED)
+
+
+@router.post(
+    "/import-ir",
+    status_code=status.HTTP_201_CREATED,
+    summary="Import a strategy from a strategy_ir.json file (M2.C1)",
+)
+async def import_strategy_ir(
+    file: UploadFile = File(..., description="strategy_ir.json file"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Import a strategy from a multipart-uploaded ``strategy_ir.json`` body.
+
+    Validates the body via :class:`StrategyIR` (the M1.A1 schema). On
+    success persists via ``StrategyService.create_from_ir`` with
+    ``source="ir_upload"`` and emits an audit log line per CLAUDE.md
+    §8 in the form ``event=strategy_imported strategy_id=...
+    source=ir_upload``.
+
+    Args:
+        file: Multipart-uploaded JSON file containing a strategy IR.
+        user: Authenticated user with ``strategies:write`` scope
+            (matches the Tranche L scope vocabulary, identical to the
+            existing ``POST /strategies/`` route).
+
+    Returns:
+        201 JSONResponse with ``{"strategy": <persisted record>}``.
+        The strategy record contains the new ``strategy_id`` (alias
+        ``id``), ``name``, ``version``, ``source="ir_upload"``,
+        ``created_by``, timestamps, and the canonical IR body in
+        ``code``.
+
+    Raises:
+        HTTPException 400: If the upload is not valid JSON, or if the
+            parsed body fails ``StrategyIR`` validation. The response
+            body's ``detail`` carries every Pydantic error path so the
+            caller can locate the offending field.
+
+    Example:
+        POST /strategies/import-ir  (multipart/form-data)
+            file=@FX_DoubleBollinger_TrendZone.strategy_ir.json
+        → 201 {"strategy": {"id": "01H...", "name": "FX_Double...",
+                            "source": "ir_upload", ...}}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    logger.info(
+        "strategies.import_ir.called",
+        filename=file.filename,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="import_strategy_ir",
+    )
+
+    # 1) Read the upload. python-multipart streams the body into memory
+    #    (acceptable here — IR files are O(10 KB), not video uploads).
+    raw = await file.read()
+
+    # 2) Parse JSON. Malformed JSON is a 400 with an explicit message —
+    #    we never want a JSONDecodeError to escape to the global 500
+    #    handler when the cause is a clearly-attributable client error.
+    try:
+        ir_dict = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "strategies.import_ir.invalid_json",
+            filename=file.filename,
+            error=str(exc),
+            correlation_id=corr_id,
+            component="strategies",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Uploaded file is not valid JSON: {exc}",
+        ) from exc
+
+    # 3) Schema-validate + persist. ValidationError carries the
+    #    Pydantic error path (e.g. ``metadata.strategy_name: field
+    #    required``) so 400 detail satisfies the M2.C1 acceptance
+    #    criterion verbatim.
+    try:
+        strategy = service.create_from_ir(ir_dict, created_by=user.user_id)
+    except ValidationError as exc:
+        logger.warning(
+            "strategies.import_ir.validation_failed",
+            filename=file.filename,
+            error=str(exc),
+            correlation_id=corr_id,
+            component="strategies",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    # 4) Audit log per CLAUDE.md §8. Structured fields are mandatory
+    #    and the workplan pins the literal field shape:
+    #    "event=strategy_imported strategy_id=... source=ir_upload".
+    #    structlog binds the first positional arg to the ``event`` key,
+    #    so we use the literal event name here and surface ``source``
+    #    as a separate structured field.
+    logger.info(
+        "strategy_imported",
+        strategy_id=strategy["id"],
+        source="ir_upload",
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="import_strategy_ir",
+    )
+
+    return JSONResponse(
+        content={"strategy": strategy},
+        status_code=status.HTTP_201_CREATED,
+    )
 
 
 @router.get("/{strategy_id}", summary="Get strategy by ID")

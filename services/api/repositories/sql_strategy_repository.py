@@ -60,6 +60,7 @@ def _strategy_to_dict(record: Strategy) -> dict[str, Any]:
         "created_by": record.created_by,
         "is_active": record.is_active,
         "row_version": record.row_version,
+        "source": record.source,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }
@@ -96,18 +97,24 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
         code: str,
         created_by: str,
         version: str | None = None,
+        source: str = "draft_form",
     ) -> dict[str, Any]:
         """
         Create a new strategy record with a generated ULID.
 
         Args:
             name: Human-readable strategy name.
-            code: Strategy DSL source code.
+            code: Strategy source — DSL JSON for the draft-form flow,
+                or the full ``strategy_ir.json`` body for IR uploads.
             created_by: ULID of the creating user.
             version: Optional semantic version string.
+            source: Provenance flag (``"draft_form"`` | ``"ir_upload"``).
+                Pinned by the ``chk_strategies_source`` CHECK
+                constraint added in migration 0025.
 
         Returns:
-            Dict representation of the created strategy.
+            Dict representation of the created strategy (includes
+            ``source``).
         """
         strategy_id = str(ULID())
         record = Strategy(
@@ -117,6 +124,7 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
             version=version or "0.1.0",
             created_by=created_by,
             is_active=True,
+            source=source,
         )
         self._db.add(record)
         self._db.flush()
@@ -126,6 +134,7 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
             strategy_id=strategy_id,
             name=name,
             created_by=created_by,
+            source=source,
             component="SqlStrategyRepository",
         )
         return _strategy_to_dict(record)
