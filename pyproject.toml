@@ -46,22 +46,13 @@ test = [
     "httpx==0.26.0",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-# Mirror pytest.ini — must be kept in sync.  norecursedirs prevents pytest
-# from collecting third-party library tests inside .venv (passlib, pyarrow…).
-norecursedirs = [".venv", ".archive", ".claude", "__pycache__", "*.egg-info", ".git", ".mypy_cache"]
-addopts = [
-    "-v",
-    "--strict-markers",
-    "--tb=short",
-    "--cov=libs",
-    "--cov=services",
-    "--cov-report=term-missing",
-]
+# pytest config lives in pytest.ini (single source of truth).
+# A duplicate [tool.pytest.ini_options] block here was silently
+# ignored by pytest (the older pytest.ini takes precedence) and
+# the divergence was real: pyproject's version dropped
+# --cov-config=.coveragerc (which carries the 80% fail_under gate)
+# and the marker definitions (unit/integration/acceptance). Removed
+# 2026-04-25 in Tranche M-prep #4.
 
 [tool.black]
 line-length = 100
