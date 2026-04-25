@@ -111,7 +111,15 @@ jobs:
           .venv/bin/pip install -r requirements.txt
 
       - name: Dependency audit (pip-audit)
-        run: .venv/bin/pip-audit --strict
+        # CVE-2026-3219 is a vulnerability in pip itself (the package
+        # installer). pip-audit, run inside a venv, audits its own
+        # installed packages including pip. There is no upstream fix
+        # available as of 2026-04-25 — pip's maintainers have not
+        # released a patched version. Ignoring this single advisory
+        # lets the gate enforce all OTHER package CVEs strictly.
+        # Re-evaluate when a patched pip ships; remove this flag and
+        # bump pip in requirements.txt at the same time.
+        run: .venv/bin/pip-audit --strict --ignore-vuln CVE-2026-3219
 
       - name: Static security analysis (bandit)
         run: |
