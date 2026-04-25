@@ -118,6 +118,41 @@ class MockStrategyService:
             "updated_at": "2026-04-12T14:00:00+00:00",
         }
 
+    def get_with_parsed_ir(
+        self,
+        strategy_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> dict:
+        """
+        Mock M2.C4 GET-with-parsed-IR.
+
+        Mirrors the production semantics: NotFoundError when configured,
+        otherwise returns a draft_form-shaped record (parsed_ir is None,
+        draft_fields carries the parsed code dict). Tests that exercise
+        the ir_upload branch use the ``import_ir_test_env`` fixture
+        which wires the real StrategyService against MockStrategyRepository.
+        """
+        from libs.contracts.errors import NotFoundError
+
+        if self.raise_not_found:
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+
+        return {
+            "id": strategy_id,
+            "name": "Test Strategy",
+            "code": '{"entry_condition": "RSI(14) < 30"}',
+            "version": "0.1.0",
+            "created_by": "01HTESTFAKE000000000000000",
+            "is_active": True,
+            "row_version": 1,
+            "source": "draft_form",
+            "created_at": "2026-04-12T14:00:00+00:00",
+            "updated_at": "2026-04-12T14:00:00+00:00",
+            "parsed_ir": None,
+            "draft_fields": {"entry_condition": "RSI(14) < 30"},
+        }
+
     def list_strategies(self, **kwargs) -> dict:
         return {
             "strategies": self._strategies,
@@ -279,18 +314,28 @@ class TestCreateStrategyRoute:
 
 
 class TestGetStrategyRoute:
-    """Tests for GET /strategies/{id}."""
+    """Tests for GET /strategies/{id} (M2.C4 response shape)."""
 
     def test_get_strategy_returns_200(self, strategy_test_env) -> None:
-        """Existing strategy returns 200 with parsed code."""
+        """Existing strategy returns 200 wrapped under ``strategy``.
+
+        M2.C4 changed the response envelope to ``{"strategy": {...}}``
+        and added ``source``, ``parsed_ir``, ``draft_fields``.
+        """
         client, _, _ = strategy_test_env
 
         resp = client.get("/strategies/01HSTRAT0000000000000001", headers=_auth_headers())
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["name"] == "Test Strategy"
-        assert "parsed_code" in data
+        assert "strategy" in data
+        strategy = data["strategy"]
+        assert strategy["name"] == "Test Strategy"
+        assert strategy["source"] in ("draft_form", "ir_upload")
+        # The legacy mock service returns a draft_form shape — assert
+        # the M2.C4 surface is wired through correctly.
+        assert strategy["parsed_ir"] is None
+        assert strategy["draft_fields"] == {"entry_condition": "RSI(14) < 30"}
 
     def test_get_strategy_not_found_returns_404(self, strategy_test_env) -> None:
         """Nonexistent strategy returns 404."""
@@ -643,3 +688,178 @@ class TestImportStrategyIR:
 # Silence unused-import check for io (kept for symmetry with future
 # multi-part stream tests under M2.C2).
 _ = io
+
+
+# ---------------------------------------------------------------------------
+# Tests: GET /strategies/{id} round-trip with parsed IR (M2.C4)
+# ---------------------------------------------------------------------------
+
+
+class TestGetStrategyParsedIRRoundTrip:
+    """
+    M2.C4 acceptance: the 5 imported repo strategies each round-trip
+    through GET /strategies/{id} with deep-equal IR bodies.
+
+    Workflow per IR:
+      1. POST /strategies/import-ir with the IR file (M2.C1) → 201
+      2. Extract strategy_id from response.
+      3. GET /strategies/{strategy_id} → 200
+      4. Assert response.json()["strategy"]["source"] == "ir_upload".
+      5. Assert response.json()["strategy"]["parsed_ir"] deep-equals
+         the original IR JSON (canonicalised via sort_keys to absorb
+         field-ordering noise — values must match exactly).
+    """
+
+    @pytest.mark.parametrize("ir_path", _REPO_IR_FILES)
+    def test_get_returns_parsed_ir_round_trip(
+        self,
+        import_ir_test_env,
+        ir_path: str,
+    ) -> None:
+        """Each of the 5 production IRs round-trips through GET endpoint."""
+        client, _repo = import_ir_test_env
+
+        ir_body = _load_repo_ir(ir_path)
+
+        # 1) Import via POST /strategies/import-ir (M2.C1 endpoint).
+        import_resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    os.path.basename(ir_path),
+                    json.dumps(ir_body).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+        assert import_resp.status_code == 201, import_resp.text
+        strategy_id = import_resp.json()["strategy"]["id"]
+
+        # 2) GET the strategy back.
+        get_resp = client.get(f"/strategies/{strategy_id}", headers=_auth_headers())
+        assert get_resp.status_code == 200, get_resp.text
+
+        body = get_resp.json()
+        assert "strategy" in body
+        strategy = body["strategy"]
+
+        # 3) Source flag is the M2.C1 provenance pin.
+        assert strategy["source"] == "ir_upload"
+        assert strategy["draft_fields"] is None
+
+        # 4) parsed_ir deep-equals the original IR JSON. Compare via
+        #    sort_keys-canonicalised JSON so any unintended field
+        #    reordering at the model_dump layer would still match — the
+        #    contract is value equality, not Python dict identity.
+        returned_ir = strategy["parsed_ir"]
+        assert returned_ir is not None, "expected parsed_ir for source=ir_upload"
+        assert json.dumps(returned_ir, sort_keys=True) == json.dumps(ir_body, sort_keys=True), (
+            f"IR round-trip mismatch for {ir_path}: parsed_ir does not deep-equal upload"
+        )
+
+        # 5) Other persistence columns are present and well-typed.
+        assert strategy["id"] == strategy_id
+        assert strategy["name"] == ir_body["metadata"]["strategy_name"]
+        assert strategy["version"] == ir_body["metadata"]["strategy_version"]
+        assert isinstance(strategy["row_version"], int)
+        assert strategy["is_active"] is True
+        assert strategy["created_at"]
+        assert strategy["updated_at"]
+
+    def test_get_with_unknown_id_returns_404(self, import_ir_test_env) -> None:
+        """A non-existent strategy_id returns 404 (real service path)."""
+        client, _repo = import_ir_test_env
+
+        resp = client.get(
+            "/strategies/01HFAKEFAKEFAKEFAKEFAKEFAKE",
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
+
+    def test_get_includes_source_field_explicitly(
+        self,
+        import_ir_test_env,
+    ) -> None:
+        """The ``source`` column from migration 0025 surfaces verbatim."""
+        client, _repo = import_ir_test_env
+
+        ir_body = _load_repo_ir(_REPO_IR_FILES[0])
+        import_resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    "src.strategy_ir.json",
+                    json.dumps(ir_body).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+        strategy_id = import_resp.json()["strategy"]["id"]
+
+        get_resp = client.get(f"/strategies/{strategy_id}", headers=_auth_headers())
+        assert get_resp.status_code == 200
+        # The frontend dispatches off this field; assert it's both
+        # present and exactly the expected literal value.
+        assert "source" in get_resp.json()["strategy"]
+        assert get_resp.json()["strategy"]["source"] == "ir_upload"
+
+    def test_get_round_trip_preserves_all_top_level_ir_keys(
+        self,
+        import_ir_test_env,
+    ) -> None:
+        """No top-level IR key is silently dropped during round-trip."""
+        client, _repo = import_ir_test_env
+
+        ir_body = _load_repo_ir(_REPO_IR_FILES[0])
+        import_resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    "keys.strategy_ir.json",
+                    json.dumps(ir_body).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+        strategy_id = import_resp.json()["strategy"]["id"]
+
+        get_resp = client.get(f"/strategies/{strategy_id}", headers=_auth_headers())
+        returned_ir = get_resp.json()["strategy"]["parsed_ir"]
+
+        # Symmetric difference must be empty — neither side may contain
+        # a key the other lacks. This is stricter than a deep-equal
+        # because Python's == treats {"a": None} == {} as False, but
+        # a buggy Pydantic dump could still match overall while losing
+        # an optional field. This guards that case.
+        assert set(returned_ir.keys()) == set(ir_body.keys()), (
+            f"top-level key set differs: missing={set(ir_body) - set(returned_ir)}, "
+            f"extra={set(returned_ir) - set(ir_body)}"
+        )
+
+    def test_get_requires_auth(self, import_ir_test_env) -> None:
+        """Request without auth is rejected before the service runs."""
+        client, _repo = import_ir_test_env
+
+        # Import once (with the override still in place) so a real ID
+        # exists, then drop the override and assert auth is enforced.
+        ir_body = _load_repo_ir(_REPO_IR_FILES[0])
+        import_resp = client.post(
+            "/strategies/import-ir",
+            files={
+                "file": (
+                    "auth.strategy_ir.json",
+                    json.dumps(ir_body).encode("utf-8"),
+                    "application/json",
+                ),
+            },
+            headers=_auth_headers(),
+        )
+        strategy_id = import_resp.json()["strategy"]["id"]
+
+        app.dependency_overrides.clear()
+        resp = client.get(f"/strategies/{strategy_id}")
+        assert resp.status_code in (401, 403, 422)

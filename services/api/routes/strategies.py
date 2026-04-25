@@ -352,37 +352,90 @@ async def get_strategy(
     user: AuthenticatedUser = Depends(require_scope("strategies:write")),
 ) -> JSONResponse:
     """
-    Retrieve a strategy by its ULID, including parsed code fields.
+    Retrieve a strategy by its ULID with parsed IR + draft view (M2.C4).
+
+    Returns the strategy record alongside either ``parsed_ir`` (when
+    ``source=="ir_upload"``) or ``draft_fields`` (when
+    ``source=="draft_form"``). The ``source`` field tells the frontend
+    which view to render.
+
+    For source=ir_upload the returned ``parsed_ir`` round-trips deeply
+    against the original IR JSON uploaded via
+    ``POST /strategies/import-ir`` — this is the M2.C4 acceptance gate.
+
+    Auth scope: ``strategies:write`` (matches every other strategy GET
+    in this module — there is no ``strategies:read`` scope in the
+    project's ROLE_SCOPES vocabulary).
 
     Args:
         strategy_id: ULID of the strategy.
-        user: Authenticated user with strategies:write scope.
+        user: Authenticated user with ``strategies:write`` scope.
 
     Returns:
-        200 JSONResponse with strategy record and parsed code.
+        200 JSONResponse with body ``{"strategy": {...}}``. The
+        strategy record contains the persistence columns (id, name,
+        code, version, source, created_by, is_active, row_version,
+        created_at, updated_at) plus ``parsed_ir`` and
+        ``draft_fields`` (exactly one populated, the other ``None``).
 
     Raises:
-        HTTPException 404: If strategy does not exist.
+        HTTPException 404: If the strategy does not exist.
+        HTTPException 422: If the stored IR fails schema validation
+            (data integrity breach surfaced explicitly so an operator
+            sees it rather than a silent 200 with garbage).
     """
     corr_id = correlation_id_var.get("no-corr")
     service = get_strategy_service()
 
+    logger.info(
+        "strategies.get.called",
+        strategy_id=strategy_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="get_strategy",
+    )
+
     try:
-        result = service.get_strategy(strategy_id)
+        strategy = service.get_with_parsed_ir(strategy_id, correlation_id=corr_id)
     except NotFoundError as exc:
+        logger.warning(
+            "strategies.get.not_found",
+            strategy_id=strategy_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="get_strategy",
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Strategy {strategy_id} not found",
         ) from exc
+    except ValidationError as exc:
+        # Stored IR failed re-validation — schema drift without a
+        # backfill. Surface as 422 so the caller knows the data is
+        # actually present but unrenderable.
+        logger.error(
+            "strategies.get.ir_invalid",
+            strategy_id=strategy_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="get_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
-    logger.debug(
+    logger.info(
         "strategies.get.completed",
         strategy_id=strategy_id,
+        source=strategy.get("source"),
         correlation_id=corr_id,
         component="strategies",
+        operation="get_strategy",
     )
 
-    return JSONResponse(content=result)
+    return JSONResponse(content={"strategy": strategy})
 
 
 @router.get("/", summary="List strategies")

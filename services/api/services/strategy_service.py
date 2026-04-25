@@ -393,6 +393,159 @@ class StrategyService(StrategyServiceInterface):
             "parsed_code": code_doc,
         }
 
+    def get_with_parsed_ir(
+        self,
+        strategy_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Retrieve a strategy by ID with parsed IR + draft view (M2.C4).
+
+        Branches on the ``source`` column persisted by ``create_from_ir``
+        (migration 0025) so the frontend can render either the IR-detail
+        view (source=ir_upload) or the legacy draft-form view
+        (source=draft_form) from a single endpoint.
+
+        For ``source="ir_upload"``: deserialise the canonical IR JSON
+        stored in ``code`` and validate via :class:`StrategyIR`. The
+        validated model is dumped via ``model_dump(mode='json')`` so it
+        round-trips deeply against the original upload (M2.C4 acceptance
+        criterion: "5 imported repo strategies each round-trip through
+        this endpoint with deep-equal IR bodies").
+
+        For ``source="draft_form"``: parse ``code`` as JSON and surface
+        it as ``draft_fields`` for the legacy draft view. ``parsed_ir``
+        is ``None``.
+
+        Args:
+            strategy_id: ULID of the strategy.
+            correlation_id: Optional correlation ID for structured log
+                propagation across layers.
+
+        Returns:
+            Strategy dict including ``source``, ``parsed_ir``, and
+            ``draft_fields`` (exactly one of the latter two is
+            populated).
+
+        Raises:
+            NotFoundError: If the strategy does not exist.
+            ValidationError: If the stored IR fails ``StrategyIR``
+                validation (indicates schema drift without backfill).
+        """
+        logger.info(
+            "strategy.get_with_parsed_ir.started",
+            strategy_id=strategy_id,
+            correlation_id=correlation_id,
+            component="StrategyService",
+            operation="get_with_parsed_ir",
+        )
+
+        strategy = self._strategy_repo.get_by_id(strategy_id)
+        if strategy is None:
+            logger.warning(
+                "strategy.get_with_parsed_ir.not_found",
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                component="StrategyService",
+                operation="get_with_parsed_ir",
+            )
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+
+        # Default to draft_form for legacy rows that pre-date migration
+        # 0025 (the column has a NOT NULL default, but mocks/tests can
+        # still hand back records lacking it — guard explicitly).
+        source = strategy.get("source") or "draft_form"
+
+        parsed_ir: dict[str, Any] | None = None
+        draft_fields: dict[str, Any] | None = None
+
+        if source == "ir_upload":
+            # The ``code`` column for IR uploads is the canonical IR JSON
+            # written verbatim by ``create_from_ir`` (sort_keys=True).
+            # Re-validate to catch schema drift, then dump back to JSON-
+            # compatible primitives so the response is deep-equal to the
+            # original upload.
+            try:
+                ir_dict = json.loads(strategy["code"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                # A non-JSON code body for an ir_upload row is a data
+                # integrity violation, not a client error — log loudly
+                # and surface as ValidationError so the controller can
+                # decide how to render it (we don't 500 silently).
+                logger.error(
+                    "strategy.get_with_parsed_ir.code_not_json",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    component="StrategyService",
+                    operation="get_with_parsed_ir",
+                    exc_info=True,
+                )
+                raise ValidationError(
+                    f"Strategy {strategy_id} has source=ir_upload but stored "
+                    f"code is not valid JSON: {exc}"
+                ) from exc
+
+            # Re-validate the stored IR against the schema as a data
+            # integrity check (catches schema drift from a migration that
+            # wasn't backfilled). We do NOT use the validated model's
+            # ``model_dump`` for the response — Pydantic injects ``None``
+            # for every unset optional field, which would break the M2.C4
+            # acceptance ("5 imported repo strategies each round-trip
+            # through this endpoint with deep-equal IR bodies") because
+            # the production IRs deliberately omit those keys. Instead
+            # we return the original parsed dict verbatim — the same
+            # bytes that ``create_from_ir`` persisted in canonical form.
+            try:
+                StrategyIR.model_validate(ir_dict)
+            except PydanticValidationError as exc:
+                logger.error(
+                    "strategy.get_with_parsed_ir.ir_validation_failed",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    component="StrategyService",
+                    operation="get_with_parsed_ir",
+                    exc_info=True,
+                )
+                paths = [
+                    "{path}: {msg}".format(
+                        path=".".join(str(p) for p in err.get("loc", ())) or "<root>",
+                        msg=err.get("msg", "validation failed"),
+                    )
+                    for err in exc.errors()
+                ]
+                raise ValidationError(
+                    f"Strategy {strategy_id} stored IR fails schema validation: " + "; ".join(paths)
+                ) from exc
+
+            parsed_ir = ir_dict
+        else:
+            # Legacy draft-form path: surface whatever JSON the existing
+            # strategy stored. If parsing fails fall back to a raw
+            # passthrough so the frontend can still render something.
+            try:
+                draft_fields = json.loads(strategy["code"])
+            except (json.JSONDecodeError, TypeError):
+                draft_fields = {"raw": strategy["code"]}
+
+        result = {
+            **strategy,
+            "source": source,
+            "parsed_ir": parsed_ir,
+            "draft_fields": draft_fields,
+        }
+
+        logger.info(
+            "strategy.get_with_parsed_ir.completed",
+            strategy_id=strategy_id,
+            source=source,
+            correlation_id=correlation_id,
+            component="StrategyService",
+            operation="get_with_parsed_ir",
+        )
+
+        return result
+
     def list_strategies(
         self,
         *,

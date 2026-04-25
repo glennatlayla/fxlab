@@ -125,6 +125,52 @@ class StrategyServiceInterface(ABC):
         """
 
     @abstractmethod
+    def get_with_parsed_ir(
+        self,
+        strategy_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Retrieve a strategy by ID with parsed IR / draft fields (M2.C4).
+
+        Reads the ``source`` column persisted by :meth:`create_from_ir` and
+        :meth:`create_strategy` (migration 0025) and chooses the
+        appropriate deserialisation path:
+
+        - ``source == "ir_upload"``: parse ``code`` as JSON, validate via
+          :class:`StrategyIR.model_validate`, and surface
+          ``StrategyIR.model_dump(mode='json')`` as ``parsed_ir``.
+          ``draft_fields`` is ``None``. The original IR JSON round-trips
+          deeply (key ordering aside, since ``code`` was canonicalised
+          via ``json.dumps(..., sort_keys=True)`` on import).
+        - ``source == "draft_form"``: parse ``code`` as JSON and surface
+          the dict as ``draft_fields``. ``parsed_ir`` is ``None``.
+
+        The route layer wraps the dict under a top-level ``"strategy"``
+        key for the JSON response — this method returns the strategy
+        record itself for layering symmetry with the rest of the
+        service surface.
+
+        Args:
+            strategy_id: ULID of the strategy.
+            correlation_id: Optional correlation ID for log propagation.
+
+        Returns:
+            Strategy dict including ``source``, ``parsed_ir``, and
+            ``draft_fields`` (exactly one of the latter two is
+            populated; the other is ``None``).
+
+        Raises:
+            NotFoundError: If the strategy does not exist.
+            ValidationError: If ``source == "ir_upload"`` but the stored
+                ``code`` is no longer valid against the IR schema (would
+                indicate a schema-breaking migration without a backfill;
+                surfaced explicitly so an operator sees the breach
+                rather than a silent 200 with garbage).
+        """
+
+    @abstractmethod
     def list_strategies(
         self,
         *,
