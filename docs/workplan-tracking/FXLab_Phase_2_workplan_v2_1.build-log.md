@@ -20,7 +20,7 @@ ______________________ test_active_workplan_is_valid_json ______________________
 tests/acceptance/test_m0_bootstrap.py:72: in test_active_workplan_is_valid_json
     assert data["workplan_stem"] == "FXLab_Phase_1_workplan_v3"
 E   AssertionError: assert 'FXLab_Phase_2_workplan_v2_1' == 'FXLab_Phase_1_workplan_v3'
-E     
+E
 E     - FXLab_Phase_1_workplan_v3
 E     ?             ^           ^
 E     + FXLab_Phase_2_workplan_v2_1
@@ -91,7 +91,7 @@ ______________________ test_active_workplan_is_valid_json ______________________
 tests/acceptance/test_m0_bootstrap.py:72: in test_active_workplan_is_valid_json
     assert data["workplan_stem"] == "FXLab_Phase_1_workplan_v3"
 E   AssertionError: assert 'FXLab_Phase_2_workplan_v2_1' == 'FXLab_Phase_1_workplan_v3'
-E     
+E
 E     - FXLab_Phase_1_workplan_v3
 E     ?             ^           ^
 E     + FXLab_Phase_2_workplan_v2_1
@@ -325,7 +325,7 @@ ______________________ test_active_workplan_is_valid_json ______________________
 tests/acceptance/test_m0_bootstrap.py:72: in test_active_workplan_is_valid_json
     assert data["workplan_stem"] == "FXLab_Phase_1_workplan_v3"
 E   AssertionError: assert 'FXLab_Phase_2_workplan_v2_1' == 'FXLab_Phase_1_workplan_v3'
-E     
+E
 E     - FXLab_Phase_1_workplan_v3
 E     ?             ^           ^
 E     + FXLab_Phase_2_workplan_v2_1

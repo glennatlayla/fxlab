@@ -260,26 +260,26 @@ http_max_connections = Gauge(
 async def track_metrics(request, call_next):
     http_active_connections.inc()
     start = time.time()
-    
+
     response = await call_next(request)
-    
+
     duration = time.time() - start
     endpoint = request.url.path
     method = request.method
     status = response.status_code
-    
+
     http_request_duration.labels(
         endpoint=endpoint,
         method=method,
         status=status
     ).observe(duration)
-    
+
     http_requests_total.labels(
         endpoint=endpoint,
         method=method,
         status=status
     ).inc()
-    
+
     http_active_connections.dec()
     return response
 
@@ -301,17 +301,17 @@ kill_switch_state_inconsistencies = Gauge(
 async def audit_kill_switch_state():
     """Verify kill switch state matches broker reality."""
     inconsistencies = 0
-    
+
     # Check each adapter for state mismatches
     for adapter in self.adapters:
         fxlab_halted = self.storage.is_halted(adapter.id)
         broker_positions = adapter.get_positions()
-        
+
         if fxlab_halted and len(broker_positions) > 0:
             # State inconsistency: marked halted but positions still open
             inconsistencies += 1
             self.logger.error(f"State inconsistency on {adapter.id}")
-    
+
     kill_switch_state_inconsistencies.set(inconsistencies)
 ```
 
@@ -337,4 +337,3 @@ Before enabling alerts in production:
 
 **Next steps**: Start with Phase 1 critical metrics implementation
 **Target**: All metrics instrumented and alerts enabled by end of Q2 2026
-

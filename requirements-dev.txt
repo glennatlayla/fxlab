@@ -11,3 +11,9 @@ locust>=2.20.0
 
 # CI/CD validation tests
 PyYAML>=6.0.0
+
+# Pre-commit hook runner. The Makefile's `make hooks` target invokes
+# .venv/bin/pre-commit; without this dep, hook installation silently
+# fails on a fresh clone and tranches like Tranche L (2026-04-16) can
+# slip past the format/lint gate without anyone noticing locally.
+pre-commit>=4.0.0,<5.0.0

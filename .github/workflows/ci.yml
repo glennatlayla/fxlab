@@ -14,6 +14,44 @@ env:
   ENVIRONMENT: test
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # `verify` mirrors what every dev runs locally via `make verify`:
+  # format-check -> lint -> test-unit (with 80% coverage gate) -> compose-check.
+  #
+  # The point is parity: if a dev's local `make verify` passes, this job
+  # passes too. Drift between local and CI gates is what allowed Tranche L
+  # to slip past format/lint on 2026-04-16. By wrapping the same Makefile
+  # target instead of duplicating individual steps, the two stay aligned
+  # automatically as `make verify` evolves.
+  #
+  # The downstream jobs (quality / security / test / migrations-postgres /
+  # build) remain in place because they emit specific artifacts (coverage,
+  # bandit, mypy) that the operator reviews independently. `verify` is the
+  # belt; the others are the suspenders.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Local verify-gate parity (make verify)
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: sqlite:///./test.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies (dev set, mirrors local bootstrap)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements-dev.txt
+
+      - name: make verify
+        run: make verify
+
   quality:
     name: Code Quality
     runs-on: ubuntu-latest

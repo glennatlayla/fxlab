@@ -88,7 +88,7 @@ routes:
     group_wait: 10s
     group_interval: 10s
     repeat_interval: 1h
-    
+
   - match:
       severity: warning
     receiver: platform_team

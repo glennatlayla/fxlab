@@ -1,8 +1,8 @@
 # FXLab Service Level Objectives (SLOs)
 
-**Version:** 1.0  
-**Last Updated:** 2026-04-13  
-**Audience:** Engineering, Operations, Product Management  
+**Version:** 1.0
+**Last Updated:** 2026-04-13
+**Audience:** Engineering, Operations, Product Management
 **Review Cycle:** Quarterly with monthly progress checks
 
 ---
@@ -43,7 +43,7 @@ FXLab's SLO strategy prioritizes **safety above all else**, followed by **availa
 
 ### SLO-1: Kill Switch Activation Latency
 
-**Definition:**  
+**Definition:**
 Time from kill switch API request arrival to database state change confirmation (all orders marked CANCELLED, internal state frozen).
 
 **SLI Measurement:**
@@ -51,7 +51,7 @@ Time from kill switch API request arrival to database state change confirmation 
 - **How:** Prometheus histogram `fxlab_kill_switch_activation_latency_seconds` emitted by `KillSwitchService.activate()` after the final DB write succeeds. Buckets: [50ms, 100ms, 200ms, 500ms, 1s, 2s, 5s, 10s].
 - **Window:** Per activation (no aggregation; each activation is independent).
 
-**Target:** P99 < 500 ms  
+**Target:** P99 < 500 ms
 **Error Budget:** 0.01% of activations may exceed 500ms in a 30-day window (i.e., 1 out of 10,000 activations).
 
 **Prometheus Query:**
@@ -82,7 +82,7 @@ The kill switch is the primary safety mechanism. Traders expect orders to be hal
 
 ### SLO-2: Kill Switch Monthly Availability
 
-**Definition:**  
+**Definition:**
 Percentage of 5-minute intervals in a calendar month during which kill switch activation succeeds (returns HTTP 200 and persists state).
 
 **SLI Measurement:**
@@ -90,13 +90,13 @@ Percentage of 5-minute intervals in a calendar month during which kill switch ac
 - **How:** Prometheus counter `fxlab_kill_switch_activations_total{status="success"}` and `{status="failure"}` incremented in HTTP middleware after response committed.
 - **Window:** 30 calendar days.
 
-**Target:** 99.99% (i.e., 4.32 minutes of downtime allowed per month)  
+**Target:** 99.99% (i.e., 4.32 minutes of downtime allowed per month)
 **Error Budget:** 10 failed activations per month (assuming 100 activations/month in normal ops; may be higher in high-stress scenarios).
 
 **Prometheus Query:**
 ```promql
-sum(rate(fxlab_kill_switch_activations_total{status="success"}[30d])) 
-/ 
+sum(rate(fxlab_kill_switch_activations_total{status="success"}[30d]))
+/
 sum(rate(fxlab_kill_switch_activations_total[30d]))
 ```
 
@@ -116,7 +116,7 @@ Kill switch is *always critical* — any unavailability threatens the entire pos
 
 ### SLO-3: Order Submission Latency (Live Mode)
 
-**Definition:**  
+**Definition:**
 Time from order submission API request arrival to broker acknowledgement (HTTP 200 response from broker, order assigned a broker order ID).
 
 **SLI Measurement:**
@@ -132,7 +132,7 @@ Time from order submission API request arrival to broker acknowledgement (HTTP 2
 | P95 | < 2s | 95% of orders complete within 2s; allows for transient broker latency |
 | P99 | < 5s | 99% of orders complete within 5s; accounts for broker retry (429/5xx + exponential backoff) |
 
-**Error Budget:** 
+**Error Budget:**
 - P50 > 500ms: 0.5% of orders (5 per 1,000)
 - P95 > 2s: 5% of orders (50 per 1,000)
 - P99 > 5s: 1% of orders (10 per 1,000)
@@ -176,7 +176,7 @@ A P99 of 5s budgets 5 seconds, accounting for:
 
 ### SLO-4: Order State Reconciliation Match Rate
 
-**Definition:**  
+**Definition:**
 Percentage of reconciliation runs (daily, hourly, or manual) that find zero discrepancies between internal order state and broker state.
 
 **SLI Measurement:**
@@ -184,7 +184,7 @@ Percentage of reconciliation runs (daily, hourly, or manual) that find zero disc
 - **How:** Prometheus counter `fxlab_reconciliation_runs_total` and `fxlab_reconciliation_discrepancies_total{type="status|filled_qty"}`. Ratio: (total_runs - runs_with_discrepancies) / total_runs.
 - **Window:** 1 hour.
 
-**Target:** 99.9% (≤ 1 discrepancy per 1,000 runs)  
+**Target:** 99.9% (≤ 1 discrepancy per 1,000 runs)
 **Error Budget:** 1 run with discrepancies per 1,000 runs.
 
 **Prometheus Query:**
@@ -220,7 +220,7 @@ Order state must be consistent between internal DB and broker. Discrepancies ari
 
 ### SLO-5: Position Tracking Accuracy (Live Mode)
 
-**Definition:**  
+**Definition:**
 In live trading mode, internal position state (quantity, average cost, P&L) must exactly match broker state. Zero tolerance.
 
 **SLI Measurement:**
@@ -228,7 +228,7 @@ In live trading mode, internal position state (quantity, average cost, P&L) must
 - **How:** Prometheus gauge `fxlab_position_accuracy{symbol,status="match|mismatch"}` updated at every fill; counter `fxlab_position_drift_total` incremented on mismatch.
 - **Window:** Per trade.
 
-**Target:** 100% match (zero tolerance for drift in live mode)  
+**Target:** 100% match (zero tolerance for drift in live mode)
 **Error Budget:** 0 (any mismatch is a data integrity bug).
 
 **Prometheus Query:**
@@ -246,7 +246,7 @@ fxlab_position_accuracy{status="mismatch"}
 
 **Consequence of Breach:**
 - **100% match maintained:** No action; system nominal.
-- **Any mismatch:** 
+- **Any mismatch:**
   1. Halt all orders immediately (kill switch activation).
   2. Capture current state from broker and database.
   3. Audit transaction logs to identify when divergence began.
@@ -263,7 +263,7 @@ In live trading, position accuracy is a fundamental invariant. A 0.01% drift on 
 
 ### SLO-6: API Availability
 
-**Definition:**  
+**Definition:**
 Percentage of HTTP requests to any `/api/*` endpoint that return HTTP 2xx or 3xx status (successful response).
 
 **SLI Measurement:**
@@ -271,7 +271,7 @@ Percentage of HTTP requests to any `/api/*` endpoint that return HTTP 2xx or 3xx
 - **How:** Prometheus counter `fxlab_http_requests_total{path,status}` incremented in FastAPI middleware after response is sent. Histogram `fxlab_http_request_duration_seconds` for latency.
 - **Window:** 30 calendar days.
 
-**Target:** 99.9% (≤ 43.2 minutes downtime per month)  
+**Target:** 99.9% (≤ 43.2 minutes downtime per month)
 **Error Budget:** 0.1% of requests may fail; i.e., 1 in 1,000 requests.
 
 **Prometheus Queries:**
@@ -308,7 +308,7 @@ sum(rate(fxlab_http_requests_total{path=~"/api/.*"}[30d]))
 
 ### SLO-7: API Latency — P50 (Median)
 
-**Definition:**  
+**Definition:**
 50th percentile (median) response time for all `/api/*` requests.
 
 **SLI Measurement:**
@@ -316,7 +316,7 @@ sum(rate(fxlab_http_requests_total{path=~"/api/.*"}[30d]))
 - **How:** Prometheus histogram `fxlab_http_request_duration_seconds{path,method}` with buckets [10ms, 50ms, 100ms, 200ms, 500ms, 1s, 2s, 5s, 10s].
 - **Window:** 5-minute aggregation.
 
-**Target:** < 200 ms  
+**Target:** < 200 ms
 **Error Budget:** 50% of requests may exceed 200ms (i.e., P50 is exactly 200ms); implies 25th percentile must be < 100ms.
 
 **Prometheus Query:**
@@ -345,10 +345,10 @@ P50 latency reflects the *typical* user experience. < 200ms is imperceptible (hu
 
 ### SLO-8: API Latency — P95 (95th Percentile)
 
-**Definition:**  
+**Definition:**
 95th percentile response time for all `/api/*` requests.
 
-**Target:** < 1 second (1,000 ms)  
+**Target:** < 1 second (1,000 ms)
 **Error Budget:** 5% of requests may exceed 1s.
 
 **Prometheus Query:**
@@ -367,10 +367,10 @@ P95 captures slower-than-average requests (heavier computations, network I/O). 1
 
 ### SLO-9: API Latency — P99 (99th Percentile)
 
-**Definition:**  
+**Definition:**
 99th percentile response time for all `/api/*` requests.
 
-**Target:** < 3 seconds (3,000 ms)  
+**Target:** < 3 seconds (3,000 ms)
 **Error Budget:** 1% of requests may exceed 3s.
 
 **Prometheus Query:**
@@ -389,7 +389,7 @@ P99 captures worst-case scenarios: broker API retry loops (1–2s), database loc
 
 ### SLO-10: API Error Rate (5xx Responses)
 
-**Definition:**  
+**Definition:**
 Percentage of HTTP requests returning 5xx status (server error).
 
 **SLI Measurement:**
@@ -397,7 +397,7 @@ Percentage of HTTP requests returning 5xx status (server error).
 - **How:** Prometheus counter `fxlab_http_requests_total{status=~"5.."}` from FastAPI middleware.
 - **Window:** 5-minute rolling window.
 
-**Target:** < 0.1% (1 error per 1,000 requests)  
+**Target:** < 0.1% (1 error per 1,000 requests)
 **Error Budget:** 1 error per 1,000 requests.
 
 **Prometheus Query:**
@@ -424,7 +424,7 @@ sum(rate(fxlab_http_requests_total{path=~"/api/.*"}[5m]))
 
 ### SLO-11: Authentication Latency
 
-**Definition:**  
+**Definition:**
 Time for JWT validation (HS256) or OIDC token exchange (Phase 3+).
 
 **SLI Measurement:**
@@ -432,7 +432,7 @@ Time for JWT validation (HS256) or OIDC token exchange (Phase 3+).
 - **How:** Prometheus histogram `fxlab_auth_latency_seconds{method="jwt|oidc"}` (currently JWT only).
 - **Window:** 5-minute aggregation.
 
-**Target (JWT):** P99 < 500 ms  
+**Target (JWT):** P99 < 500 ms
 **Target (OIDC, Phase 3):** P99 < 2s (includes token exchange + validation)
 
 **Prometheus Queries:**
@@ -458,7 +458,7 @@ JWT validation is in the critical path for every API request. It must be < 500ms
 
 ### SLO-12: Database Availability
 
-**Definition:**  
+**Definition:**
 Percentage of database connectivity checks that succeed (can execute a trivial query within timeout).
 
 **SLI Measurement:**
@@ -466,7 +466,7 @@ Percentage of database connectivity checks that succeed (can execute a trivial q
 - **How:** Prometheus counter `fxlab_database_health_checks_total{status="success|failure"}` from `/health/db` endpoint.
 - **Window:** 30 calendar days.
 
-**Target:** 99.95% (≤ 21.6 seconds downtime per month)  
+**Target:** 99.95% (≤ 21.6 seconds downtime per month)
 **Error Budget:** 1 database outage per month lasting < 30 seconds, OR 3 outages per month lasting < 10 seconds each.
 
 **Prometheus Query:**
@@ -496,7 +496,7 @@ PostgreSQL 15 with async replication can achieve 99.95% uptime on a single host 
 
 ### SLO-13: Database Query Latency
 
-**Definition:**  
+**Definition:**
 95th percentile response time for database queries (SELECT, INSERT, UPDATE, DELETE).
 
 **SLI Measurement:**
@@ -505,7 +505,7 @@ PostgreSQL 15 with async replication can achieve 99.95% uptime on a single host 
 - **Buckets:** [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 5s].
 - **Window:** 5-minute aggregation.
 
-**Target:** P95 < 100 ms  
+**Target:** P95 < 100 ms
 **Error Budget:** 5% of queries may exceed 100ms (typically SELECT * on large tables, multi-table joins).
 
 **Prometheus Queries:**
@@ -538,7 +538,7 @@ Database queries dominate API latency (e.g., fetching orders, updating positions
 
 ### SLO-14: Redis Availability
 
-**Definition:**  
+**Definition:**
 Percentage of Redis operations (SET, GET, INCR, LPUSH) that complete within timeout.
 
 **SLI Measurement:**
@@ -546,7 +546,7 @@ Percentage of Redis operations (SET, GET, INCR, LPUSH) that complete within time
 - **How:** Prometheus counter `fxlab_redis_operations_total{operation="get|set|incr|lpush", status="success|timeout"}`.
 - **Window:** 30 calendar days.
 
-**Target:** 99.9% (≤ 43.2 minutes downtime per month)  
+**Target:** 99.9% (≤ 43.2 minutes downtime per month)
 **Error Budget:** 1 per 1,000 operations may timeout.
 
 **Prometheus Query:**
@@ -572,7 +572,7 @@ Redis is used for rate limiting and response caching. Availability of 99.9% is r
 
 ### SLO-15: Backup Success Rate
 
-**Definition:**  
+**Definition:**
 Percentage of scheduled daily backups that complete successfully (exported to durable storage, integrity verified).
 
 **SLI Measurement:**
@@ -580,7 +580,7 @@ Percentage of scheduled daily backups that complete successfully (exported to du
 - **How:** Prometheus counter `fxlab_backup_success_total` and `fxlab_backup_failure_total` from backup script exit status.
 - **Window:** 30 calendar days (e.g., 30 backup attempts).
 
-**Target:** 100% (zero tolerance; every backup must succeed)  
+**Target:** 100% (zero tolerance; every backup must succeed)
 **Error Budget:** 0 (any missed backup is a data integrity risk).
 
 **Prometheus Queries:**
@@ -596,7 +596,7 @@ sum(rate(fxlab_backup_success_total[30d]))
 
 **Consequence of Breach:**
 - **100% maintained:** No action; verify retention policy (keep 7-day rolling backup).
-- **Any failure:** 
+- **Any failure:**
   1. Investigate immediately; assess whether data loss risk exists.
   2. Manual backup override (if automated backup broken).
   3. Post-mortem; update backup monitoring, alert thresholds.
@@ -608,7 +608,7 @@ Backups are the last line of defense. If backups fail, data loss becomes possibl
 
 ### SLO-16: Backup RTO (Recovery Time Objective)
 
-**Definition:**  
+**Definition:**
 Time to restore database from backup to a usable state, measured via monthly restore test.
 
 **SLI Measurement:**
@@ -616,7 +616,7 @@ Time to restore database from backup to a usable state, measured via monthly res
 - **How:** Manual test; record duration in runbook `docs/runbooks/database-backup-restore.md`. Prometheus gauge `fxlab_backup_rto_seconds` updated monthly.
 - **Window:** Monthly (1 data point per month).
 
-**Target:** < 30 minutes (1,800 seconds)  
+**Target:** < 30 minutes (1,800 seconds)
 **Error Budget:** RTO may be up to 45 minutes for a 50GB+ backup (rare; acceptable if < 1x per quarter).
 
 **Prometheus Query:**
@@ -673,7 +673,7 @@ If the SLO breaches *faster* than expected:
 # 2x burn rate for API availability over 5 minutes
 - alert: APIAvailability2xBurnRate
   expr: |
-    (1 - sum(rate(fxlab_http_requests_total{status=~"2..|3.."}[5m])) 
+    (1 - sum(rate(fxlab_http_requests_total{status=~"2..|3.."}[5m]))
          / sum(rate(fxlab_http_requests_total[5m]))) > 0.002
   for: 5m
   labels:
@@ -685,7 +685,7 @@ If the SLO breaches *faster* than expected:
 # 10x burn rate (immediate escalation)
 - alert: APIAvailability10xBurnRate
   expr: |
-    (1 - sum(rate(fxlab_http_requests_total{status=~"2..|3.."}[1m])) 
+    (1 - sum(rate(fxlab_http_requests_total{status=~"2..|3.."}[1m]))
          / sum(rate(fxlab_http_requests_total[1m]))) > 0.01
   for: 1m
   labels:
@@ -745,8 +745,8 @@ If the SLO breaches *faster* than expected:
 ```markdown
 # SLO Review — March 2026
 
-**Date:** 2026-04-01 10:00 UTC  
-**Reviewed by:** [Engineering Lead Name]  
+**Date:** 2026-04-01 10:00 UTC
+**Reviewed by:** [Engineering Lead Name]
 **Status:** ✅ All SLOs met | ⚠️ 1 SLO at-risk | 🔴 1 SLO breached
 
 ## Metric Summary
@@ -899,7 +899,7 @@ groups:
       # SLO-2: Kill Switch Availability
       - alert: KillSwitchAvailabilityWarning
         expr: |
-          (sum(rate(fxlab_kill_switch_activations_total{status="success"}[7d])) 
+          (sum(rate(fxlab_kill_switch_activations_total{status="success"}[7d]))
            / sum(rate(fxlab_kill_switch_activations_total[7d]))) < 0.9998
         for: 10m
         labels:
@@ -1209,5 +1209,5 @@ Use this checklist at every monthly SLO review:
 
 ---
 
-**Last Updated:** 2026-04-13  
+**Last Updated:** 2026-04-13
 **Next Review:** 2026-05-01 (monthly SLO review)

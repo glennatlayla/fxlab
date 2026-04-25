@@ -1,7 +1,7 @@
 # Disaster Recovery Runbook
 
-**Owner:** FXLab Platform Operations Team  
-**Last Updated:** 2026-04-13  
+**Owner:** FXLab Platform Operations Team
+**Last Updated:** 2026-04-13
 **Classification:** Internal Use Only (High Sensitivity)
 
 ---
@@ -368,7 +368,7 @@ curl -X GET http://localhost:8000/ready \
    ```bash
    # Check when the database came back online
    docker logs fxlab-postgres | grep -i "accepting\|ready" | tail -2
-   
+
    # Check if the API missed any orders during downtime
    curl -X GET "http://localhost:8000/audit?start_time=<failure-time>&end_time=<recovery-time>" \
      -H "Authorization: Bearer $TOKEN"
@@ -388,7 +388,7 @@ curl -X GET http://localhost:8000/ready \
 
 # SCENARIO 2: REDIS FAILURE
 
-**Impact:** Rate limiting degraded (requests may exceed limits). Session cache lost. Job queue unavailable (if applicable).  
+**Impact:** Rate limiting degraded (requests may exceed limits). Session cache lost. Job queue unavailable (if applicable).
 **Note:** Database is authoritative; Redis loss does NOT cause data loss, only performance degradation.
 
 **RTO:** < 3 minutes (container restart) | < 10 minutes (AOF replay)
@@ -567,7 +567,7 @@ print('Redis connection OK:', r.ping())
    # Check that AOF is enabled and syncing
    docker exec fxlab-redis redis-cli CONFIG GET appendonly
    # Expected: "appendonly" "yes"
-   
+
    # Check AOF rewrite status (optional, but recommended for performance)
    docker exec fxlab-redis redis-cli BGREWRITEAOF
    echo "AOF rewrite scheduled (runs in background)"
@@ -733,7 +733,7 @@ echo "MTTH: <milliseconds> ms (should be < 200 ms)"
 # Check broker status every 30 seconds
 for i in {1..60}; do
   echo "Check $i: $(date +%H:%M:%S)"
-  
+
   # Test broker connectivity
   if curl -s http://localhost:8000/live/health | grep -q '"broker":"ok"'; then
     echo "✓ Broker is back online"
@@ -741,7 +741,7 @@ for i in {1..60}; do
   else
     echo "✗ Broker still down"
   fi
-  
+
   sleep 30
 done
 
@@ -807,10 +807,10 @@ curl -X DELETE http://localhost:8000/kill-switch/global \
    ```bash
    # Orders submitted BEFORE the outage may have been filled without FXLab knowing
    # Reconciliation should catch these, but manually verify for high-value orders
-   
+
    curl -X GET "http://localhost:8000/execution-analysis?start_time=<outage-start>&end_time=<outage-end>" \
      -H "Authorization: Bearer $TOKEN" | jq '.orders[] | select(.status == "PENDING")'
-   
+
    # For each PENDING order, check the broker dashboard to see if it actually filled
    ```
 
@@ -1112,7 +1112,7 @@ curl -X GET http://localhost:8000/reconciliation/all/latest-reports \
    ```bash
    # AWS: terminate the instance
    aws ec2 terminate-instances --instance-ids i-oldinstance123
-   
+
    # GCP: delete the instance
    gcloud compute instances delete fxlab-host-original --zone us-central1-a
    ```
@@ -1129,7 +1129,7 @@ curl -X GET http://localhost:8000/reconciliation/all/latest-reports \
    ```bash
    # Ensure the monitoring agent is running and connected
    sudo systemctl status datadog-agent  # (or your monitoring tool)
-   
+
    # Test an alert notification
    # (depends on your monitoring tool)
    ```
@@ -1261,7 +1261,7 @@ curl -X POST http://localhost:8000/kill-switch/global \
 for i in {1..5}; do
   STATUS=$(curl -s http://localhost:8000/kill-switch/status \
     -H "Authorization: Bearer $TOKEN" | jq '.[] | select(.scope == "GLOBAL") | .active')
-  
+
   if [[ "$STATUS" == "true" ]]; then
     echo "✓ Kill switch is ACTIVE"
     break
@@ -1279,13 +1279,13 @@ done
 ```bash
 # 1. Check the kill_switch_events table for recent events
 docker exec fxlab-postgres psql -U fxlab -d fxlab << 'EOF'
-SELECT 
-  id, 
-  scope, 
-  target_id, 
-  is_active, 
-  activated_at, 
-  deactivated_at, 
+SELECT
+  id,
+  scope,
+  target_id,
+  is_active,
+  activated_at,
+  deactivated_at,
   reason,
   created_at
 FROM kill_switch_events
@@ -1295,9 +1295,9 @@ EOF
 
 # 2. Check the deployments table to see if kill switch state is consistent across all deployments
 docker exec fxlab-postgres psql -U fxlab -d fxlab << 'EOF'
-SELECT 
-  deployment_id, 
-  is_kill_switch_active, 
+SELECT
+  deployment_id,
+  is_kill_switch_active,
   kill_switch_activated_at
 FROM deployments
 WHERE created_at > now() - interval '2 hours'
@@ -1381,17 +1381,17 @@ curl -X GET http://localhost:8000/kill-switch/status \
    ```bash
    # Activate and deactivate a kill switch on a paper deployment
    DEPLOYMENT_ID="paper-test"
-   
+
    curl -X POST http://localhost:8000/kill-switch/strategy/${DEPLOYMENT_ID} \
      -H "Authorization: Bearer $TOKEN" \
      -d '{"reason": "Post-corruption verification test"}'
-   
+
    sleep 5
-   
+
    # Verify it activated
    curl -X GET http://localhost:8000/kill-switch/status \
      -H "Authorization: Bearer $TOKEN" | jq '.[] | select(.target_id == "'${DEPLOYMENT_ID}'")'
-   
+
    # Deactivate
    curl -X DELETE http://localhost:8000/kill-switch/strategy/${DEPLOYMENT_ID} \
      -H "Authorization: Bearer $TOKEN"
@@ -1796,7 +1796,7 @@ docker exec fxlab-redis redis-cli ping
 
 ---
 
-**Last Tested:** TBD  
-**Next Review:** Quarterly (or after each incident)  
-**Owner:** FXLab Operations Team  
+**Last Tested:** TBD
+**Next Review:** Quarterly (or after each incident)
+**Owner:** FXLab Operations Team
 **Escalation:** See [Escalation Matrix](#escalation-matrix)

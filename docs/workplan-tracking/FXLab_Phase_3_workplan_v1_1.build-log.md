@@ -5480,13 +5480,13 @@ _________________________ test_ac8_npm_build_succeeds __________________________
 tests/unit/test_m0_frontend_structure.py:152: in test_ac8_npm_build_succeeds
     assert result.returncode == 0, f"npm run build failed with exit code {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
 E   AssertionError: npm run build failed with exit code 127
-E     stdout: 
+E     stdout:
 E     > fxlab-frontend@0.0.0 build
 E     > tsc && vite build
-E     
-E     
+E
+E
 E     stderr: sh: 1: tsc: not found
-E     
+E
 E   assert 127 == 0
 E    +  where 127 = CompletedProcess(args=['npm', 'run', 'build'], returncode=127, stdout='\n> fxlab-frontend@0.0.0 build\n> tsc && vite build\n\n', stderr='sh: 1: tsc: not found\n').returncode
 =============================== warnings summary ===============================
@@ -6348,13 +6348,13 @@ _________________________ test_ac8_npm_build_succeeds __________________________
 tests/unit/test_m0_frontend_structure.py:152: in test_ac8_npm_build_succeeds
     assert result.returncode == 0, f"npm run build failed with exit code {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
 E   AssertionError: npm run build failed with exit code 127
-E     stdout: 
+E     stdout:
 E     > fxlab-frontend@0.0.0 build
 E     > tsc && vite build
-E     
-E     
+E
+E
 E     stderr: sh: 1: tsc: not found
-E     
+E
 E   assert 127 == 0
 E    +  where 127 = CompletedProcess(args=['npm', 'run', 'build'], returncode=127, stdout='\n> fxlab-frontend@0.0.0 build\n> tsc && vite build\n\n', stderr='sh: 1: tsc: not found\n').returncode
 =============================== warnings summary ===============================
@@ -6960,7 +6960,7 @@ tests/unit/test_fastapi_main_structure.py:85: in test_ac2_health_status_is_ok
     assert data.get("status") == "ok", \
 E   AssertionError: Expected status='ok', got status='healthy'
 E   assert 'healthy' == 'ok'
-E     
+E
 E     - ok
 E     + healthy
 =============================== warnings summary ===============================
@@ -7021,7 +7021,7 @@ ______________________________ test_health_check _______________________________
 tests/api/test_main.py:21: in test_health_check
     assert data["status"] == "healthy"
 E   AssertionError: assert 'ok' == 'healthy'
-E     
+E
 E     - healthy
 E     + ok
 ----------------------------- Captured stdout call -----------------------------

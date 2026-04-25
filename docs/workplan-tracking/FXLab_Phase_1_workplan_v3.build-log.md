@@ -447,7 +447,7 @@ ______________ coverage: platform darwin, python 3.12.13-final-0 _______________
 
 Name                                      Stmts   Miss  Cover   Missing
 -----------------------------------------------------------------------
-libs/audit/__init__.py             
+libs/audit/__init__.py
 ```
 
 ## 2026-03-16T19:14:28Z  S4 M0 — targeting 3 file(s)
@@ -885,7 +885,7 @@ tests/unit/test_metadata_database_interface.py:222: in test_database_execute_que
     assert results == expected_results, "execute should return query results"
 E   AssertionError: execute should return query results
 E   assert [] == [{'id': 1, 'name': 'test'}]
-E     
+E
 E     Right contains one more item: {'id': 1, 'name': 'test'}
 E     Use -v to get more diff
 ================================ tests coverage ================================
@@ -934,7 +934,7 @@ tests/unit/test_metadata_database_interface.py:222: in test_database_execute_que
     assert results == expected_results, "execute should return query results"
 E   AssertionError: execute should return query results
 E   assert [] == [{'id': 1, 'name': 'test'}]
-E     
+E
 E     Right contains one more item: {'id': 1, 'name': 'test'}
 E     Use -v to get more diff
 ================================ tests coverage ================================
@@ -1069,7 +1069,7 @@ tests/unit/test_metadata_database_interface.py:222: in test_database_execute_que
     assert results == expected_results, "execute should return query results"
 E   AssertionError: execute should return query results
 E   assert [] == [{'id': 1, 'name': 'test'}]
-E     
+E
 E     Right contains one more item: {'id': 1, 'name': 'test'}
 E     Use -v to get more diff
 ================================ tests coverage ================================
