@@ -64,6 +64,11 @@ optuna==4.8.0
 numpy==2.4.4
 polars==1.39.3
 pyarrow==23.0.1
+# pandas pulled in for the rolling_stddev / calendar indicators (M1.B4 / M1.B5);
+# pandas_market_calendars is a transitive parent. Pinned explicitly so
+# pandas_market_calendars cannot drift the version unexpectedly.
+pandas==2.3.3
+pandas_market_calendars==4.6.1
 
 # --- Testing ---
 pytest==9.0.3
