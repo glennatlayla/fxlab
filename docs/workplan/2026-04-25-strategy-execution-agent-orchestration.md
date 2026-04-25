@@ -9,6 +9,7 @@
 ## REVISION SUMMARY
 
 - **v1.0 (2026-04-25)** — Initial decomposition. 5 agents, 25 milestones, ~12 working days of parallel effort.
+- **v2.0 (2026-04-25)** — Autonomy revision per Glenn's directive: agents do NOT pause at decision gates during execution. Defaults baked in for every previously-named decision gate, with the rationale documented inline. The minimal set of questions that genuinely require Glenn's input before kickoff is consolidated into a new `kickoff` companion doc; agents read those answers at startup and never ask Glenn anything mid-run. Integration model tightened: per-agent feature branches, atomic per-tranche commits, append-only progress logs Glenn can scan at wake-time.
 
 ---
 
@@ -275,12 +276,13 @@ referenced by every IR in `Strategy Repo/`.
 - `calendar_days_to_month_end` — emits the count of remaining
   business days in the bar's month.
 - Used by FX_TurnOfMonth_USDSeasonality_D1.
-- **Decision point for Glenn:** what calendar? FX trading is 24/5, so
-  the relevant business calendar is "weekdays minus FX market
-  holidays." Proposal: use `pandas_market_calendars` with the FX
-  calendar; lock the choice in CLAUDE.md as the canonical FX
-  calendar. **Agent must wait for Glenn's approval on this choice
-  before implementing.**
+- **Default (decided 2026-04-25 v2):** use `pandas_market_calendars`
+  with its built-in 24/5 schedule. The library is well-maintained,
+  ships an FX-shaped calendar out of the box, and handles year-end
+  / new-year edge cases consistently. Document the pin
+  (`pandas_market_calendars==4.x`) in `requirements.txt`. If Glenn
+  wants a hand-rolled calendar later, that's a one-tranche swap;
+  no agent waits.
 - **Acceptance:** unit test against a hand-computed calendar for
   March/April/December (year-end edge case).
 
@@ -442,24 +444,31 @@ empty data.
 
 **Tranches:**
 
-#### M4.E1 — Forex provider selection (DECISION GATE)
-- **Glenn must choose a forex data source before this tranche
-  begins.** Options:
-
-  | Option | Cost | Coverage | API quality | Real-time |
-  |---|---|---|---|---|
-  | **Oanda v20 REST** | free w/ live account | EOD + intraday | excellent | yes |
-  | **Dukascopy historical CSV** | free | 2003+, tick & bar | manual download | no |
-  | **TwelveData** | free tier 800 req/day | 1m+ | OK | limited |
-  | **Polygon FX** | $99/mo+ | full intraday | excellent | yes |
-  | **CSV import (manual)** | zero | whatever you load | none | no |
-
-- **Recommendation:** start with **Dukascopy historical CSV** for
-  backtesting (no API rate limits, no cost, deepest history). Add
-  **Oanda v20** later for live/paper. Defer real-time decision to
-  Phase 4.
-- This is an infra choice per the operator memory; agent does not
-  proceed without explicit Glenn approval.
+#### M4.E1 — Forex provider selection
+- **Default (decided 2026-04-25 v2): TwelveData free tier as primary,
+  HistData.com CSV as fallback.** Rationale:
+  - TwelveData has a JSON HTTP API (no Java app, no scraping), free
+    tier of 800 req/day = enough to backfill 6 majors × 3 timeframes
+    over a few days, and supports H1 / H4 / D1 directly. API key in
+    `.env` as `TWELVEDATA_API_KEY` — operator action, see kickoff
+    doc.
+  - HistData.com publishes free historical FX CSVs via direct HTTPS
+    (M1 bars resampled to whatever timeframe). No API key. Used as
+    automatic fallback if TwelveData rate-limits or returns 4xx.
+  - Dukascopy was tempting (deepest history), but its bar export
+    requires either the JForex Java client or a third-party library
+    (`dukascopy-python`) that's gnarly to wire up; not autonomy-friendly.
+  - Oanda v20 deferred to Phase 4 — needs live account, not free, and
+    we don't need real-time for backtesting.
+- **Operator action required at kickoff:** sign up for a TwelveData
+  free-tier account at https://twelvedata.com/pricing and put the
+  API key in minitux's `.env` as `TWELVEDATA_API_KEY=xxx`. The
+  agent's first step (M4.E1) is to verify this env var is present;
+  if missing, agent fails fast with a clear error pointing at the
+  kickoff doc — this is the only out-of-band action required.
+- **Acceptance:** integration test confirms TwelveData adapter is
+  reachable with the configured key; HistData fallback triggers
+  cleanly on a synthetic 429 rate-limit response.
 
 #### M4.E2 — `ForexMarketDataProvider` adapter
 - Implements `MarketDataProviderInterface` against the chosen source.
@@ -526,23 +535,58 @@ This gate proves the foundation works. Tracks C and D resume
 parallel work after this point with confidence the underlying engine
 is real.
 
-### M3.X2 — Five-strategies via UI (final acceptance)
+### M3.X2 — Viable candidate for testing (final acceptance)
 
-**Trigger:** all milestones complete.
+**Trigger:** all milestones complete OR M3.X2's hard floor met.
 
-**Deliverable:** an operator can:
+**Hard floor — "viable candidate" definition (v2 autonomy revision):**
+
+The overnight run is considered SUCCESSFUL if Glenn at wake-time can:
 1. Open Strategy Studio at `http://192.168.1.5/strategy-studio`.
-2. Click "Import from file", upload one of the five
-   `*.strategy_ir.json` files plus its experiment_plan.
+2. Click "Import from file", upload one (1) of the five
+   `*.strategy_ir.json` files plus its `*.experiment_plan.json`.
 3. See the IR rendered in the detail view.
 4. Click "Execute backtest", confirm the experiment plan, submit.
 5. Wait for the run to complete (poll the run-monitor page).
-6. View metrics + equity curve + blotter on the results page.
+6. View metrics + equity curve + blotter on the results page —
+   non-empty trade list, sensible-looking equity curve.
 
-**Acceptance test:** a Playwright e2e test runs all five strategies
-in sequence and asserts each lands on a results page with at least
-one trade. (The Turn-of-Month basket strategy may need M3.X2.5 for
-basket execution if not done by then.)
+The strategy that proves the path is **FX_TimeSeriesMomentum_Breakout_D1**
+— it uses only indicators in the v2-completion set (ADX, Donchian /
+rolling-extremes, EMA, ATR), runs on D1 bars (smallest data
+backfill), and has plenty of trades over the 2010-2023 in-sample
+window (Donchian-55 breakouts trigger frequently across 5 majors).
+
+**Stretch — full success:**
+All FIVE strategies importable and runnable end-to-end via the UI,
+each producing a non-empty trade blotter. The Turn-of-Month basket
+strategy may require additional basket-execution work
+(M3.X2.5 — see below); if the agent budget runs out before basket
+execution, single-position strategies (4 of 5) suffice for stretch.
+
+**Acceptance test:** Playwright e2e test
+`tests/e2e/test_strategy_import_to_results.spec.ts` runs the hard-floor
+flow with FX_TimeSeriesMomentum_Breakout_D1. A second test
+parametrises over the other 4 strategies and is marked `xfail` for
+Turn-of-Month if M3.X2.5 hasn't landed.
+
+### M3.X2.5 — Basket execution (stretch, opt-in)
+
+**Trigger:** Turn-of-Month strategy fails M3.X2's per-strategy
+parametrise unless this is built.
+
+**Scope:** extend `BacktestEngine` (or wrap it) to support multi-leg
+basket entries: enter all legs on the same bar with weighted sizes,
+exit all legs on the same bar, basket-level P&L for stop checks.
+Implement `basket_atr_multiple` and `basket_open_loss_pct` exit
+types from FX_TurnOfMonth.
+
+**Acceptance:** Turn-of-Month strategy completes a backtest, basket
+entries appear as 6 simultaneous fills in the trade blotter, basket
+P&L tracked per-month.
+
+This tranche is opt-in. Agents move to it only after M3.X2 hard
+floor is green AND Glenn's overnight time budget remains.
 
 ---
 
@@ -568,32 +612,175 @@ agent doing the same work serially: ~28 working days.
 
 ---
 
-## DECISION GATES requiring Glenn's approval
+## DEFAULTS LOCKED (v2 autonomy revision)
 
-These are the points where the agent stops and waits, per the
-operator memory `feedback_ask_before_infra_choices`:
+The v1 of this workplan named four decision gates where each agent
+would pause for Glenn. Per Glenn's 2026-04-25 directive, each gate
+is now resolved with a default the agent uses without waiting. The
+underlying spec + project context made every one of these answerable
+without a real cost-of-being-wrong. If Glenn objects to any of them
+he edits this document BEFORE launching agents; once agents are
+running, no agent pauses for any of these.
 
-1. **M4.E1 — Forex data source choice.** Five real options listed
-   above; recommendation = Dukascopy CSV for now, Oanda later.
-   Cost, coverage, latency tradeoffs.
-2. **M1.B5 — FX business calendar choice.** Proposal: use
-   `pandas_market_calendars` with the FX-24/5 schedule plus a
-   curated holiday list. Document in CLAUDE.md as the canonical
-   reference. Alternative: hand-roll a calendar in
-   `libs/calendars/fx.py`.
-3. **M2.C2 — `dataset_ref` syntax.** Proposed format
-   `<name>:<version>` (e.g. `fx-eurusd-1h:2026.04.bootstrap`).
-   Alternative: separate `name` and `version` fields in the
-   experiment plan. Cleaner separation but requires updating every
-   experiment_plan in `Strategy Repo/`.
-4. **Out-of-band: Phase 4 paper-trading.** Not in this workplan.
-   Open question: when to start? After M3.X2 acceptance is the
-   recommendation.
+| # | Topic | Default | Rationale |
+|---|---|---|---|
+| 1 | Forex data source (M4.E1) | TwelveData free tier primary, HistData.com CSV fallback | API-shape (JSON over HTTPS) friendly to autonomous backfill; free; H1/H4/D1 native; HistData fallback handles rate-limit edge case without a human. Oanda/Dukascopy/Polygon all required either a paid plan, a Java app, or a $99/mo subscription. |
+| 2 | FX business calendar (M1.B5) | `pandas_market_calendars` with 24/5 schedule | Library exists, well-maintained, ships an FX calendar out of the box. Hand-rolling a calendar adds a tranche of work for no quality gain. |
+| 3 | `dataset_ref` syntax (M2.C2) | Keep the existing string format from the example experiment_plans (e.g. `fx-eurusd-15m-certified-v3`) | The format is already in every `*.experiment_plan.json` in `Strategy Repo/`. Changing the syntax forces 5 file rewrites for zero functional gain. |
+| 4 | Phase 4 paper-trading start | Defer to a separate workplan, BUT — if all 25 milestones complete with budget remaining, agents may pick up M5 stretch tranches (PaperBrokerAdapter orchestration + risk gates) listed at the bottom of this doc. | Lets the overnight run produce more value if backtesting goes faster than estimated, without committing to paper trading as a hard requirement. |
+| 5 | Coexistence with draft-form strategies (added v2) | Coexist via `source: "ir_upload" \| "draft_form"` flag on the strategy record | Preserves the existing Strategy Studio draft flow. IR-imported and hand-authored strategies live in the same `strategies` table. |
+| 6 | Migration tooling (added v2) | Alembic, agent-owned per-tranche | Project already uses Alembic; each tranche that needs schema adds its own migration script under `migrations/versions/`. |
+| 7 | Forex backfill concurrency (added v2) | Sequential | Trades 8 hours of wall time for zero rate-limit risk. Overnight runs prioritize safety over throughput. |
 
-Each agent's brief explicitly stops at its decision-gate tranche and
-posts the question before proceeding.
+Each agent reads this table at startup. If a tranche references a
+"decision gate" (legacy phrasing), the agent looks up the default
+above and proceeds.
 
 ---
+
+## AGENT COORDINATION PROTOCOL (v2 autonomy revision)
+
+Five agents working on one repo can step on each other if not
+coordinated. The protocol below avoids merge conflicts and gives
+Glenn a clean wake-time review surface.
+
+### Branching
+
+- Each agent works on a feature branch named `agent/<track>` —
+  `agent/A`, `agent/B`, `agent/C`, `agent/D`, `agent/E`.
+- All branches are cut from the same `main` SHA at kickoff (call this
+  the "kickoff SHA"; the orchestrator captures it in
+  `docs/workplan/agent_logs/kickoff.md`).
+- Per-tranche commits land on the agent's own branch. Atomic — one
+  tranche, one commit, no force-pushes.
+- At integration gate **M3.X1** (single-strategy CLI backtest), all
+  branches merge to main in dependency order: A → B → E → C → D.
+  Merges are fast-forward where possible, octopus or sequential merge
+  commits where not. Conflicts are resolved by the agent that owns
+  the more-recent commit (defined by commit timestamp).
+- At **M3.X2** (final acceptance), the same procedure repeats for
+  any post-X1 work.
+- No agent rebases another agent's branch. No agent force-pushes
+  anywhere.
+
+### File-ownership boundaries
+
+To prevent merge conflicts the tracks claim non-overlapping file
+sets. Each agent's contract:
+
+| Track | Owns (writes) | Reads but does not modify |
+|---|---|---|
+| A | `libs/contracts/strategy_ir.py` (NEW), `libs/strategy_ir/**` (NEW), `tests/unit/test_strategy_ir_*.py` (NEW), migrations for `strategies.ir_json` column | `libs/indicators/**` (read-only — uses registry) |
+| B | `libs/indicators/<each-new-indicator>.py` (NEW per tranche), `libs/indicators/registry.py` (extends — see "shared file" rule below), `tests/unit/test_indicators_*.py` (NEW) | `libs/contracts/strategy_ir.py` (reads to know which types it must implement) |
+| C | `services/api/routes/strategies.py` (extends — additive), `services/api/routes/runs.py` (extends — additive), `libs/contracts/experiment_plan.py` (NEW), `services/api/services/research_run_service.py` (extends — additive), `services/api/services/dataset_service.py` (NEW), `tests/unit/test_routes_*.py` (NEW), migrations | `libs/strategy_ir/**` (uses parser/compiler) |
+| D | `frontend/src/pages/StrategyStudio.tsx` (extends), `frontend/src/pages/RunResults.tsx` (NEW), `frontend/src/components/strategy_import/**` (NEW), `frontend/src/api/strategies.ts` (extends), `frontend/src/api/runs.ts` (extends), `frontend/src/**/*.test.tsx` (NEW) | OpenAPI types from C |
+| E | `services/worker/collectors/forex_*.py` (NEW), `services/worker/collectors/histdata_provider.py` (NEW), `services/api/services/dataset_service.py` (NEW — coordinated with C; see below), `services/api/cli/import_dataset.py` (NEW), migrations for `dataset` table, `tests/unit/test_forex_*.py` (NEW) | none |
+
+**Shared-file rule for `libs/indicators/registry.py`:** Track B
+appends new entries to the registry per tranche. Each commit
+appends only at the bottom of the registration block — no edits to
+existing entries. This avoids merge conflicts even if multiple
+indicators are added in quick succession.
+
+**Shared-file rule for `services/api/services/dataset_service.py`:**
+Track E creates this file in M4.E3. Track C consumes it in M2.C2.
+If C reaches M2.C2 before E reaches M4.E3, C uses an in-memory stub
+of the dataset service (typed by the interface) and the real
+implementation lands when E catches up. The interface is published
+in `libs/contracts/interfaces/dataset_service.py` (Track E owns
+the interface as the first sub-step of M4.E3).
+
+**Shared-file rule for `Makefile` and `CLAUDE.md`:** if any track
+needs to update either, the agent makes the edit on its own branch.
+Conflicts are resolved at integration gate by appending — never
+overwriting — in the order A, B, C, D, E.
+
+### Per-tranche commit convention
+
+Every commit subject:
+
+```
+<type>(<track>): Tranche M<x>.<track><n> — <one-line summary>
+```
+
+Examples:
+```
+feat(strategy-ir): Tranche M1.A1 — Pydantic schema for strategy_ir.json
+feat(indicators): Tranche M1.B1 — ADX (Wilder's average directional index)
+feat(api): Tranche M2.C1 — POST /strategies/import-ir
+feat(forex-data): Tranche M4.E2 — TwelveData market-data provider
+```
+
+Body must include the tranche's acceptance test result, the file
+list, and `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`.
+
+### Progress logs (Glenn's wake-time view)
+
+Every agent appends one entry per tranche to a track-specific log
+file under `docs/workplan/agent_logs/`:
+
+```
+docs/workplan/agent_logs/A.md
+docs/workplan/agent_logs/B.md
+docs/workplan/agent_logs/C.md
+docs/workplan/agent_logs/D.md
+docs/workplan/agent_logs/E.md
+docs/workplan/agent_logs/kickoff.md   ← captures kickoff SHA + agent assignments
+docs/workplan/agent_logs/integration.md ← captures merge events at X1 / X2
+docs/workplan/agent_logs/BLOCKED.md   ← created ONLY if an agent blocks
+```
+
+Each log entry is one fenced block:
+
+```
+## M1.A1 — Pydantic schema for strategy_ir.json
+status:    DONE
+commit:    abc1234
+duration:  47m
+notes:     5/5 repo IRs parse; 5 malformed inputs rejected at validation.
+           Renamed StrategyIR to StrategyIRDocument to avoid clash with
+           the existing 'strategy_ir' database column name; downstream
+           tracks read from libs.contracts.strategy_ir.StrategyIRDocument.
+```
+
+**Glenn's wake-time ritual:** read `BLOCKED.md` first (empty = good
+news); then `integration.md` (X1 / X2 status); then track logs in
+order A, B, C, D, E for any decisions worth re-examining.
+
+### Failure protocol
+
+If an agent hits a blocker it cannot resolve from the workplan +
+project context:
+
+1. Commit any partial work that compiles and passes tests on its
+   own branch.
+2. Append the blocked tranche's entry to its track log with
+   `status: BLOCKED` and a one-paragraph description of the
+   ambiguity.
+3. Append a one-line entry to `docs/workplan/agent_logs/BLOCKED.md`
+   pointing at the track log entry.
+4. Stop. Do NOT continue to the next tranche on the same track —
+   downstream tranches likely depend on the blocked one.
+5. Continue is not automatic; Glenn reviews `BLOCKED.md` in the
+   morning, decides, edits the workplan if needed, restarts the
+   agent.
+
+### Self-checks at agent startup
+
+Every agent's first action (before tranche 1) is a self-check
+that fails fast if its environment isn't right:
+
+1. `cd` to repo root; confirm on the kickoff SHA's history.
+2. `git checkout -b agent/<track>` (or fast-forward if the branch
+   already exists from a prior aborted run).
+3. Run `make verify` — must be green. If not, the kickoff state
+   itself is broken; agent stops and writes to `BLOCKED.md`.
+4. Read `docs/workplan/2026-04-25-strategy-execution-agent-orchestration.md`
+   AND `docs/workplan/2026-04-25-strategy-execution-kickoff.md`.
+5. Confirm any agent-specific prerequisites listed in the kickoff
+   doc (e.g. Track E confirms `TWELVEDATA_API_KEY` env var is set).
+6. Begin tranche 1.
+
 
 ## QUALITY GATES
 
@@ -651,6 +838,45 @@ workplan when prioritised:
 
 ---
 
+## M5 — STRETCH TRANCHES (opt-in, only after M3.X2 hard floor)
+
+These tranches give the overnight run something to do if it finishes
+early. None of them is required for the "viable candidate"
+definition. Agents pick these up in the order listed below ONLY
+after M3.X2 hard floor is green.
+
+#### M5.S1 — Walk-forward execution path
+- Wire the existing `WalkForwardConfig` into `BacktestEngine` via
+  the IR compiler. Each strategy's `experiment_plan.json` already
+  defines `walk_forward.train_window_months / test_window_months /
+  step_months`.
+- **Acceptance:** WF run produces a `walk_forward_summary` artifact
+  with one row per (train, test) window.
+
+#### M5.S2 — Monte Carlo trade-resampling
+- Implement `monte_carlo.method == "trade_sequence_resampling"`
+  using the existing trade blotter. 500 iterations.
+- **Acceptance:** MC run produces P5/P50/P95 envelope around the
+  equity curve.
+
+#### M5.S3 — Basket execution (= M3.X2.5)
+- See above. Promotes Turn-of-Month strategy from xfail to passing.
+
+#### M5.S4 — Paper-trading orchestrator (Phase 4 preview)
+- Build `PaperDeploymentService` that runs a passed backtest's
+  compiled strategy continuously against live (or replayed-recent)
+  FX data through `PaperBrokerAdapter`. Risk gates from
+  `risk_model.daily_loss_limit_pct` and `max_drawdown_halt_pct` are
+  enforced pre-trade.
+- **Acceptance:** an operator can click "Promote to paper" on a
+  passed backtest and see live position state on a paper-trading
+  page.
+- **Note:** Phase 4 originally; brought into scope as a stretch
+  here ONLY because the user's original ask explicitly mentioned
+  paper trading. Not gated; agents try it after M5.S1, S2 are done.
+
+---
+
 ## RISKS
 
 | # | Risk | Mitigation |
@@ -696,14 +922,61 @@ Phase completion (per §16 Rule 4) requires the assertion
 
 ---
 
+## WAKE-TIME REVIEW PROTOCOL FOR GLENN
+
+This is the morning checklist when the overnight run is done. The
+intent is that Glenn can determine in <5 minutes whether the run
+succeeded, partially-succeeded, or failed — without reading any
+code.
+
+1. **Open `docs/workplan/agent_logs/BLOCKED.md`** (created only if an
+   agent blocked).
+   - **Empty / file does not exist** → no agent hit a blocker. Best
+     case.
+   - **Has entries** → at least one agent stopped. Each entry points
+     at the specific track log + tranche. Glenn opens those, reads
+     the agent's notes, decides the unblock.
+
+2. **Open `docs/workplan/agent_logs/integration.md`**.
+   - Look for the "M3.X1" entry — single-strategy CLI backtest. If
+     present and `status: DONE`, the foundation works.
+   - Look for the "M3.X2" entry — viable candidate via UI. If
+     present and `status: DONE`, the run hit the hard floor.
+
+3. **Open `docs/workplan/2026-04-25-strategy-execution-progress.md`**
+   and scan the status column. Count of DONE vs NOT_STARTED tells
+   the overall arc.
+
+4. **If hard floor is green:** open
+   `http://192.168.1.5/strategy-studio` in a browser, run the
+   acceptance flow manually
+   (import FX_TimeSeriesMomentum_Breakout_D1, execute backtest, view
+   results). One human-in-the-loop confirmation that the agents
+   didn't fool themselves.
+
+5. **If stretch tranches landed (M5.*):** check track logs for
+   walk-forward / Monte Carlo / paper-trading status. These are
+   gravy.
+
+6. **`make verify`** on a fresh shell — final sanity that everything
+   compiles, lints, and tests pass on `main` after integration
+   merges.
+
+If any of steps 1-6 surface a problem, Glenn either (a) restarts the
+specific blocked agent with edited workplan instructions, or (b)
+pauses the project and writes a remediation tranche in the rhythm
+established by Tranches A-L.
+
+
 ## END
 
 This document is the canonical workplan for the strategy execution
-buildout. Glenn approves it (or requests revisions) before any
-implementation begins. After approval, Glenn's choice of agent
-orchestration platform launches the five agents, each pointing at
-its assigned track.
+buildout. v2 (this revision) makes it autonomous: every previously-
+named decision gate is resolved with a default agents use without
+pausing. The minimal set of operator actions Glenn must take BEFORE
+launching agents is documented in
+`docs/workplan/2026-04-25-strategy-execution-kickoff.md`.
 
-Estimated total effort with five agents: **9 working days to
-M3.X2 acceptance**, two integration gates, four decision gates, no
-stubs, no shortcuts.
+Estimated total effort with five agents: **9 working days serial
+equivalent** compressed into one overnight run via parallelism. No
+stubs, no shortcuts. Five-agent budget: ~50 agent-hours.
