@@ -27,7 +27,7 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -55,7 +55,7 @@ class QueueDepthSnapshot(BaseModel):
         description="Contention index (0=idle, 100=fully saturated)",
     )
     captured_at: datetime = Field(
-        default_factory=datetime.utcnow,
+        default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp of this snapshot",
     )
 
@@ -87,7 +87,7 @@ class ContentionReport(BaseModel):
         description="Aggregate contention index across all queues",
     )
     generated_at: datetime = Field(
-        default_factory=datetime.utcnow,
+        default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when the report was generated",
     )
 

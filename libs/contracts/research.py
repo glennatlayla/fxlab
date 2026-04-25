@@ -4,7 +4,7 @@ Research run and candidate contracts.
 Pydantic v2 schemas for research and optimization runs.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -135,4 +135,4 @@ class ExperimentPlan(BaseModel):
     )
     description: str | None = Field(None, description="Human-readable notes")
     created_by: str | None = Field(None, description="ULID of the requesting user")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

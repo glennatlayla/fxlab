@@ -37,7 +37,7 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -129,7 +129,11 @@ class ChartCacheService(ChartCacheServiceInterface):
             )
         """
         cache_key = f"{run_id}:{chart_type}"
-        now = datetime.utcnow()
+        # Naive UTC to match the database's DateTime column (declared without
+        # timezone=True; round-trips as naive under SQLite and Postgres).
+        # A TZ-aware value here would raise TypeError when compared with
+        # entry.expires_at (which arrives naive from the DB).
+        now = datetime.now(UTC).replace(tzinfo=None)
 
         # Attempt to fetch valid (non-expired) cache entry
         entry = self.db.query(ChartCache).filter(ChartCache.cache_key == cache_key).first()
@@ -224,7 +228,11 @@ class ChartCacheService(ChartCacheServiceInterface):
         Example:
             cache.eviction_cleanup()  # Runs in a scheduled background job.
         """
-        now = datetime.utcnow()
+        # Naive UTC to match the database's DateTime column (declared without
+        # timezone=True; round-trips as naive under SQLite and Postgres).
+        # A TZ-aware value here would raise TypeError when compared with
+        # entry.expires_at (which arrives naive from the DB).
+        now = datetime.now(UTC).replace(tzinfo=None)
         count = self.db.query(ChartCache).filter(ChartCache.expires_at <= now).delete()
         self.db.commit()
 

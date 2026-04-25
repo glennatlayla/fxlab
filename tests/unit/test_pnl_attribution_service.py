@@ -20,7 +20,7 @@ Dependencies (all mocked):
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -114,7 +114,7 @@ def _seed_order(
             status="filled",
             filled_quantity=fq,
             average_fill_price=afp,
-            filled_at=datetime.utcnow().isoformat(),
+            filled_at=datetime.now(UTC).isoformat(),
         )
         order["status"] = "filled"
         order["filled_quantity"] = fq

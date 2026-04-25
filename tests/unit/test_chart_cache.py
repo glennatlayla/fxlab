@@ -11,7 +11,7 @@ Responsibilities:
 Uses in-memory SQLite for test isolation (no transactional overhead).
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -138,8 +138,8 @@ class TestChartCacheHit:
             run_id="run_123",
             chart_type="equity_curve",
             data={"points": [1, 2, 3]},
-            created_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         test_db.add(entry)
         test_db.commit()
@@ -185,8 +185,8 @@ class TestChartCacheHit:
             run_id="run_123",
             chart_type="equity_curve",
             data=cached_data,
-            created_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         test_db.add(entry)
         test_db.commit()
@@ -229,8 +229,8 @@ class TestChartCacheExpiration:
             run_id="run_123",
             chart_type="equity_curve",
             data={"points": [1, 2, 3]},  # old data
-            created_at=datetime.utcnow() - timedelta(hours=2),
-            expires_at=datetime.utcnow() - timedelta(hours=1),  # expired!
+            created_at=datetime.now(UTC) - timedelta(hours=2),
+            expires_at=datetime.now(UTC) - timedelta(hours=1),  # expired!
         )
         test_db.add(entry)
         test_db.commit()
@@ -252,7 +252,9 @@ class TestChartCacheExpiration:
             test_db.query(ChartCache).filter_by(run_id="run_123", chart_type="equity_curve").first()
         )
         assert updated_entry.data == {"points": [4, 5, 6]}
-        assert updated_entry.expires_at > datetime.utcnow()
+        # ChartCache.expires_at is a naive DateTime column; the value comes
+        # back from SQLite without tzinfo. Compare against naive UTC.
+        assert updated_entry.expires_at > datetime.now(UTC).replace(tzinfo=None)
 
 
 class TestChartCacheInvalidation:
@@ -280,24 +282,24 @@ class TestChartCacheInvalidation:
             run_id="run_123",
             chart_type="equity_curve",
             data={"points": [1, 2, 3]},
-            created_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         entry2 = ChartCache(
             cache_key="run_123:drawdown",
             run_id="run_123",
             chart_type="drawdown",
             data={"points": [-0.1, -0.2]},
-            created_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         entry3 = ChartCache(
             cache_key="run_456:equity_curve",
             run_id="run_456",
             chart_type="equity_curve",
             data={"points": [10, 20]},
-            created_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         test_db.add_all([entry1, entry2, entry3])
         test_db.commit()
@@ -335,7 +337,7 @@ class TestChartCacheEviction:
         - Valid entries are NOT affected.
         """
         # Pre-populate cache with mixed entries
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         expired_entry = ChartCache(
             cache_key="run_123:equity_curve",
@@ -379,7 +381,7 @@ class TestChartCacheEviction:
         Expected:
         - All entries remain.
         """
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         entries = [
             ChartCache(
@@ -421,7 +423,7 @@ class TestChartCacheWithDifferentTTLs:
         - Both are cached.
         - Expiration times differ by ~55 minutes.
         """
-        datetime.utcnow()
+        datetime.now(UTC)
 
         compute_fn = MagicMock(return_value={"points": [1, 2, 3]})
 

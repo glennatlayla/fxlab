@@ -27,7 +27,7 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -114,7 +114,7 @@ class Job(BaseModel):
         description="ULID of the strategy this job belongs to, if any",
     )
     created_at: datetime = Field(
-        default_factory=datetime.utcnow,
+        default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when the job was enqueued",
     )
     started_at: datetime | None = Field(

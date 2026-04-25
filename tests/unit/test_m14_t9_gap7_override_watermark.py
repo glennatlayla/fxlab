@@ -19,7 +19,7 @@ Test naming: test_<response_shape>_<scenario>_<expected_outcome>
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from libs.contracts.export import ExportJobResponse
 from libs.contracts.governance import OverrideDetail, PromotionRequestResponse
@@ -40,7 +40,7 @@ EXPORT_JOB_ID = "01H2EXPORTJOB00000000000000F"
 WATERMARK_DATA = {
     "override_id": OVERRIDE_ID,
     "is_active": True,
-    "created_at": datetime.utcnow(),
+    "created_at": datetime.now(UTC),
     "reason": "Grade override approved by governance",
 }
 
@@ -70,9 +70,9 @@ class TestOverrideDetailResponse:
             "submitter_id": "01H2USER1",
             "status": "approved",
             "reviewed_by": APPROVER_ID,
-            "reviewed_at": datetime.utcnow(),
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "reviewed_at": datetime.now(UTC),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
         }
         override = OverrideDetail(**data)
         assert override.id == OVERRIDE_ID
@@ -94,9 +94,9 @@ class TestOverrideDetailResponse:
             "submitter_id": "01H2USER1",
             "status": "approved",
             "reviewed_by": APPROVER_ID,
-            "reviewed_at": datetime.utcnow(),
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "reviewed_at": datetime.now(UTC),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
             "override_watermark": WATERMARK_DATA,
         }
         override = OverrideDetail(**data)
@@ -126,8 +126,8 @@ class TestRunCandidateResponse:
             "readiness_grade": "B",
             "blockers": [],
             "artifact_uri": "s3://bucket/candidate.pkl",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
         }
         candidate = RunCandidateResponse(**data)
         assert candidate.id == CANDIDATE_ID
@@ -146,8 +146,8 @@ class TestRunCandidateResponse:
             "readiness_grade": "B",
             "blockers": [],
             "artifact_uri": "s3://bucket/candidate.pkl",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
             "override_watermark": WATERMARK_DATA,
         }
         candidate = RunCandidateResponse(**data)
@@ -172,7 +172,7 @@ class TestReadinessReportResponse:
             "grade": "B",
             "score": 85.0,
             "blockers": [],
-            "generated_at": datetime.utcnow(),
+            "generated_at": datetime.now(UTC),
         }
         report = ReadinessReportResponse(**data)
         assert report.candidate_id == CANDIDATE_ID
@@ -187,7 +187,7 @@ class TestReadinessReportResponse:
             "grade": "B",
             "score": 85.0,
             "blockers": [],
-            "generated_at": datetime.utcnow(),
+            "generated_at": datetime.now(UTC),
             "override_watermark": WATERMARK_DATA,
         }
         report = ReadinessReportResponse(**data)
@@ -213,8 +213,8 @@ class TestPromotionRequestResponse:
             "target_environment": "paper",
             "submitted_by": "01H2USER1",
             "status": "pending",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
         }
         promotion = PromotionRequestResponse(**data)
         assert promotion.id == "01H2PROMOTION0000000000000G"
@@ -230,8 +230,8 @@ class TestPromotionRequestResponse:
             "target_environment": "paper",
             "submitted_by": "01H2USER1",
             "status": "pending",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
             "override_watermark": WATERMARK_DATA,
         }
         promotion = PromotionRequestResponse(**data)
@@ -258,8 +258,8 @@ class TestStrategyBuildResponse:
             "artifact_uri": "s3://bucket/strategy.pkl",
             "source_hash": "abc123def456",
             "created_by": "01H2USER1",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
         }
         build = StrategyBuildResponse(**data)
         assert build.id == "01H2BUILD00000000000000000H"
@@ -276,8 +276,8 @@ class TestStrategyBuildResponse:
             "artifact_uri": "s3://bucket/strategy.pkl",
             "source_hash": "abc123def456",
             "created_by": "01H2USER1",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
             "override_watermark": WATERMARK_DATA,
         }
         build = StrategyBuildResponse(**data)
@@ -304,8 +304,8 @@ class TestExportJobResponse:
             "status": "complete",
             "artifact_uri": "s3://bucket/export.csv",
             "requested_by": "01H2USER1",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
         }
         job = ExportJobResponse(**data)
         assert job.id == EXPORT_JOB_ID
@@ -322,8 +322,8 @@ class TestExportJobResponse:
             "status": "complete",
             "artifact_uri": "s3://bucket/export.csv",
             "requested_by": "01H2USER1",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
             "override_watermark": WATERMARK_DATA,
         }
         job = ExportJobResponse(**data)

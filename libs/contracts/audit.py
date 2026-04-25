@@ -23,7 +23,7 @@ Example:
     )
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import ulid as _ulid
@@ -44,7 +44,9 @@ class AuditEventSchema(BaseModel):
     object_type: str | None = Field(None, description="Type of affected object")
     source: str | None = Field(None, description="Source client (web-desktop, web-mobile, api)")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Action-specific context")
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="Event timestamp")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC), description="Event timestamp"
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

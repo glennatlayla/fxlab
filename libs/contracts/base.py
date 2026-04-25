@@ -5,7 +5,7 @@ Provides foundation classes used across all contract definitions.
 """
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Generic, TypeVar
 
 import structlog
@@ -72,15 +72,15 @@ class ULIDModel(FXLabBaseModel):
     """Base model for entities with ULID primary keys."""
 
     id: str = Field(..., pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class TimestampedModel(FXLabBaseModel):
     """Base model for entities that track creation and update times."""
 
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # -- merged (accumulator): libs/contracts/base.py --

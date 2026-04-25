@@ -21,8 +21,26 @@ Example:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
+
+
+def _utcnow() -> datetime:
+    """Return current UTC time as a naive datetime.
+
+    Replacement for the deprecated `datetime.utcnow()`. Returns a NAIVE
+    datetime (tzinfo=None) to preserve byte-for-byte compatibility with
+    the existing SQLAlchemy ``DateTime`` columns in this module — those
+    columns are declared without ``timezone=True`` and therefore round-trip
+    naive datetimes via SQLite (and as naive-in-UTC via Postgres).
+
+    Used as a callable default for SQLAlchemy Column definitions and as
+    inline timestamps for ORM-construction call sites (``_utcnow()``).
+    Application-layer code that wants a TZ-aware UTC stamp should call
+    ``datetime.now(UTC)`` directly.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
+
 
 from sqlalchemy import (
     JSON,
@@ -87,14 +105,14 @@ class TimestampMixin:
     created_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
     updated_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=_utcnow,
+        onupdate=_utcnow,
         server_default=func.now(),
     )
 
@@ -524,7 +542,7 @@ class AuditEvent(Base):
     created_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -577,7 +595,7 @@ class FeedHealthEvent(Base):
         String(26), ForeignKey("feeds.id", ondelete="CASCADE"), nullable=False, index=True
     )
     status: Any = Column(String(50), nullable=False)
-    checked_at: Any = Column(DateTime, nullable=False, default=datetime.utcnow)
+    checked_at: Any = Column(DateTime, nullable=False, default=_utcnow)
     details: Any = Column(JSON, nullable=True)
 
     feed: Any = relationship("Feed", back_populates="health_events")
@@ -614,7 +632,7 @@ class ParityEvent(Base):
     )
     parity_score: Any = Column(String(20), nullable=True)  # stored as string for precision
     status: Any = Column(String(50), nullable=False, default="unknown")
-    checked_at: Any = Column(DateTime, nullable=False, default=datetime.utcnow)
+    checked_at: Any = Column(DateTime, nullable=False, default=_utcnow)
     details: Any = Column(JSON, nullable=True)
 
 
@@ -755,7 +773,7 @@ class OverrideWatermark(Base):
     created_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -848,7 +866,7 @@ class ChartCache(Base):
     created_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
     expires_at: Any = Column(DateTime, nullable=False, index=True)
@@ -984,7 +1002,7 @@ class RefreshToken(Base):
     created_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -1021,7 +1039,7 @@ class RevokedToken(Base):
     revoked_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
     expires_at: Any = Column(DateTime, nullable=False)
@@ -1067,7 +1085,7 @@ class SymbolLineageEntry(Base):
     created_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -1715,7 +1733,7 @@ class ArchivedAuditEvent(Base):
     archived_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -1755,7 +1773,7 @@ class ArchivedOrder(Base):
     archived_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -1789,7 +1807,7 @@ class AuditExportJob(Base):
     created_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
     completed_at: Any = Column(DateTime, nullable=True)
@@ -1910,7 +1928,7 @@ class DataGapRecord(Base):
     detected_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -1959,8 +1977,8 @@ class RiskAlertConfigRecord(Base):
     updated_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=_utcnow,
+        onupdate=_utcnow,
         server_default=func.now(),
     )
 
@@ -2001,7 +2019,7 @@ class DataAnomalyRecord(Base):
             interval="1m",
             anomaly_type="ohlcv_violation",
             severity="critical",
-            detected_at=datetime.utcnow(),
+            detected_at=_utcnow(),
             details={"high": "170.00", "low": "175.00"},
         )
     """
@@ -2105,7 +2123,7 @@ class QualityScoreRecord(Base):
     scored_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
     )
 
@@ -2150,7 +2168,7 @@ class SignalRecord(Base):
             signal_type="entry",
             strength="strong",
             confidence=0.85,
-            generated_at=datetime.utcnow(),
+            generated_at=_utcnow(),
             correlation_id="corr-001",
         )
     """
@@ -2215,7 +2233,7 @@ class SignalEvaluationRecord(Base):
             id="eval-001",
             signal_id="01HTEST0000000000000000001",
             approved=True,
-            evaluated_at=datetime.utcnow(),
+            evaluated_at=_utcnow(),
         )
     """
 
@@ -2285,10 +2303,8 @@ class ExportJob(Base):
     requested_by: Any = Column(String(255), nullable=False, index=True)
     error_message: Any = Column(Text, nullable=True)
     override_watermark: Any = Column(JSON, nullable=True)
-    created_at: Any = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Any = Column(
-        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    created_at: Any = Column(DateTime, nullable=False, default=_utcnow)
+    updated_at: Any = Column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
 
 
 class ResearchRun(Base):
@@ -2344,10 +2360,8 @@ class ResearchRun(Base):
     error_message: Any = Column(String(2000), nullable=True)
     summary_metrics: Any = Column(JSON, nullable=True)
     created_by: Any = Column(String(26), nullable=False, index=True)
-    created_at: Any = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Any = Column(
-        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    created_at: Any = Column(DateTime, nullable=False, default=_utcnow)
+    updated_at: Any = Column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
     started_at: Any = Column(DateTime, nullable=True)
     completed_at: Any = Column(DateTime, nullable=True)
     row_version: Any = Column(Integer, nullable=False, default=1, server_default="1")
@@ -2398,8 +2412,8 @@ class AlertNotificationRecord(Base):
             status="firing",
             alertname="APIHighLatency",
             severity="warning",
-            starts_at=datetime.utcnow(),
-            received_at=datetime.utcnow(),
+            starts_at=_utcnow(),
+            received_at=_utcnow(),
             receiver="default_webhook",
             group_key="{}:{alertname='APIHighLatency'}",
         )
@@ -2429,7 +2443,7 @@ class AlertNotificationRecord(Base):
     received_at: Any = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=_utcnow,
         server_default=func.now(),
         index=True,
     )

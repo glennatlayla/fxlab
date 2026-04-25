@@ -34,7 +34,7 @@ Example:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -218,7 +218,7 @@ class IncidentRecord(BaseModel):
     title: str
     details: dict = Field(default_factory=dict)
     affected_services: list[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     acknowledged_at: datetime | None = Field(default=None)
     resolved_at: datetime | None = Field(default=None)
     escalated_at: datetime | None = Field(default=None)

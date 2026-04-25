@@ -88,8 +88,8 @@ mypy==1.20.1
 # commit a3accd9 once stubs landed locally. Living in requirements.txt
 # (not requirements-dev.txt) so the CI quality job picks them up
 # alongside mypy itself.
-types-requests>=2.31
-types-PyYAML>=6.0
+types-requests==2.33.0.20260408
+types-PyYAML==6.0.12.20260408
 pip-audit==2.10.0
 bandit==1.9.4
 nodeenv==1.10.0

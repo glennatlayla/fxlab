@@ -11,7 +11,7 @@ Responsibilities:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import inspect
 
@@ -87,7 +87,7 @@ class TestAuditEventRecordIncludesSource:
             object_id="01HQPROM0AAAAAAAAAAAAAAA0",
             object_type="promotion_request",
             source="api",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(UTC),
         )
         assert record.source == "api"
 
@@ -99,7 +99,7 @@ class TestAuditEventRecordIncludesSource:
             action="approve_promotion",
             object_id="01HQPROM0AAAAAAAAAAAAAAA0",
             object_type="promotion_request",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(UTC),
         )
         assert record.source == ""
 

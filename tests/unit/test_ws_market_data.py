@@ -146,21 +146,31 @@ class TestWsMarketDataAuth:
 
     def test_weak_jwt_secret_rejects_connection(self, client: TestClient) -> None:
         """Connection should be rejected when JWT secret is too short."""
+        import warnings
+
         import jwt
+        from jwt.warnings import InsecureKeyLengthWarning
 
         # Create a token with the weak secret
         weak_secret = "short"
         original_secret = os.environ.get("JWT_SECRET_KEY", "")
         os.environ["JWT_SECRET_KEY"] = weak_secret
 
-        token = jwt.encode(
-            {
-                "sub": "user-001",
-                "exp": datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp(),
-            },
-            weak_secret,
-            algorithm="HS256",
-        )
+        # PyJWT emits InsecureKeyLengthWarning when encoding with a sub-32-byte
+        # HS256 key (RFC 7518 §3.2). That is exactly the scenario this test
+        # exercises — verifying the WS endpoint rejects too-short secrets — so
+        # the warning is intentional and silenced at this single call site
+        # rather than via a global filter that would mask real regressions.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=InsecureKeyLengthWarning)
+            token = jwt.encode(
+                {
+                    "sub": "user-001",
+                    "exp": datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp(),
+                },
+                weak_secret,
+                algorithm="HS256",
+            )
 
         try:
             with (

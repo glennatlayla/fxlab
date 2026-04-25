@@ -13,7 +13,7 @@ Tests verify:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 from libs.contracts.mocks.mock_chart_cache_service import MockChartCacheService
@@ -167,7 +167,7 @@ class TestMockChartCacheServiceExpiration:
         cache = MockChartCacheService()
 
         # Manually insert an expired entry (bypass get_or_compute)
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         cache._store["run_123:equity_curve"] = {
             "data": {"old": "data"},
             "created_at": now - timedelta(hours=2),
@@ -280,7 +280,7 @@ class TestMockChartCacheServiceEvictionCleanup:
         - Valid entries are NOT affected.
         """
         cache = MockChartCacheService()
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         # Insert valid entry
         cache._store["run_1:valid"] = {
@@ -318,7 +318,7 @@ class TestMockChartCacheServiceEvictionCleanup:
         - All entries remain.
         """
         cache = MockChartCacheService()
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         # Insert multiple valid entries
         for i in range(5):

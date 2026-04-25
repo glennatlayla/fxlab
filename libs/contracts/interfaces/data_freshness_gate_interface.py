@@ -10,7 +10,7 @@ Does NOT:
 - Know about specific clock implementations or time providers.
 
 Implementations:
-- DataFreshnessGate: Production implementation (stdlib datetime.utcnow).
+- DataFreshnessGate: Production implementation (stdlib datetime.now(UTC)).
 - MockDataFreshnessGate: In-memory test double with injectable time.
 
 Example:

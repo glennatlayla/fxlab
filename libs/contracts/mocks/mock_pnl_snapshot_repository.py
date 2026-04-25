@@ -30,7 +30,7 @@ Example:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from libs.contracts.interfaces.pnl_snapshot_repository_interface import (
@@ -98,7 +98,7 @@ class MockPnlSnapshotRepository(PnlSnapshotRepositoryInterface):
             Dict with all snapshot fields.
         """
         composite_key = (deployment_id, snapshot_date.isoformat())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
 
         if composite_key in self._composite_index:
             # Upsert: update existing

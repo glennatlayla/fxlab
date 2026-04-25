@@ -34,7 +34,7 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from services.api.services.interfaces.chart_cache_service_interface import (
@@ -84,7 +84,7 @@ class MockChartCacheService(ChartCacheServiceInterface):
             Chart data (from cache or freshly computed).
         """
         cache_key = f"{run_id}:{chart_type}"
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         # Check for valid (non-expired) cache entry
         if cache_key in self._store:
@@ -121,7 +121,7 @@ class MockChartCacheService(ChartCacheServiceInterface):
 
         Deletes entries where expires_at <= now.
         """
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired_keys = [k for k, v in self._store.items() if v["expires_at"] <= now]
         for key in expired_keys:
             del self._store[key]

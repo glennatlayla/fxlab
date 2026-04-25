@@ -4,7 +4,7 @@ Strategy draft and build contracts.
 Pydantic v2 schemas for strategy lifecycle.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -108,4 +108,4 @@ class CompiledStrategy(BaseModel):
     artifact_uri: str = Field(..., description="Storage URI of the compiled artefact")
     source_hash: str = Field(..., description="SHA-256 of the source definition")
     version: str = Field(..., description="SemVer build tag")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
