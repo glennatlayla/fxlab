@@ -41,6 +41,11 @@ class BollingerBandsCalculator:
 
     Multi-output: upper, middle (SMA), lower, bandwidth, percent_b.
 
+    Standard deviation: ddof=1 (sample stddev). Matches numpy.std(..., ddof=1),
+    pandas.Series.rolling().std(), pandas-ta, and the M1.B4 RollingStddevCalculator.
+    This was switched from ddof=0 (population) on 2026-04-25 to bring the
+    indicator in line with the rest of the FXLab strategy-execution stack.
+
     Example:
         calc = BollingerBandsCalculator()
         result = calc.calculate(o, h, l, c, v, t, period=20, std_dev=2.0)
@@ -73,23 +78,33 @@ class BollingerBandsCalculator:
         middle = np.full(n, np.nan, dtype=np.float64)
         std = np.full(n, np.nan, dtype=np.float64)
 
+        # SMA via cumulative-sum trick — numerically stable for the mean and
+        # required regardless of ddof choice for the band centre.
         if n >= period and period >= 1:
-            # Compute SMA and rolling std using cumulative approach
             cumsum = np.cumsum(close)
-            cumsum2 = np.cumsum(close**2)
-
             middle[period - 1] = cumsum[period - 1] / period
             middle[period:] = (cumsum[period:] - cumsum[:-period]) / period
 
-            # Rolling variance: E[X²] - E[X]²
-            mean_sq = np.full(n, np.nan, dtype=np.float64)
-            mean_sq[period - 1] = cumsum2[period - 1] / period
-            mean_sq[period:] = (cumsum2[period:] - cumsum2[:-period]) / period
-
-            variance = mean_sq - middle**2
-            # Clamp negative variance from floating point errors
-            variance = np.maximum(variance, 0.0)
-            std = np.sqrt(variance)
+        # Sample stddev (ddof=1). 2026-04-25: M1.B4 follow-up reconciled BB to
+        # ddof=1 for numpy/pandas/pandas-ta parity. We use the centred two-pass
+        # form (sum((x - mean)^2) / (N - 1)) via sliding_window_view — the same
+        # approach as the M1.B4 RollingStddevCalculator. The textbook
+        # E[X²] - E[X]² cumulative-sum trick suffers catastrophic cancellation
+        # in the FX regime (closes ~ 1.10, deviations ~ 0.005); the centred
+        # form matches numpy.std(ddof=1) bit-for-bit. Sample stddev needs
+        # N >= 2 (denominator N - 1 must be > 0); falls back to all-NaN if
+        # period < 2 or n < period.
+        if n >= period and period >= 2:
+            x = close.astype(np.float64, copy=False)
+            windows = np.lib.stride_tricks.sliding_window_view(x, window_shape=period)
+            means = windows.mean(axis=1, keepdims=True)
+            deviations = windows - means
+            sum_sq = np.einsum("ij,ij->i", deviations, deviations)
+            sample_var = sum_sq / (period - 1)
+            # Clamp tiny negative drift (cannot occur for centred form, but
+            # cheap insurance against future refactors / weird inputs).
+            sample_var = np.maximum(sample_var, 0.0)
+            std[period - 1 :] = np.sqrt(sample_var)
 
         upper = middle + std_mult * std
         lower = middle - std_mult * std
@@ -336,6 +351,11 @@ class StandardDeviationCalculator:
     """
     Rolling standard deviation of close prices.
 
+    Standard deviation: ddof=1 (sample stddev). Matches numpy.std(..., ddof=1),
+    pandas.Series.rolling().std(), pandas-ta, and the M1.B4 RollingStddevCalculator.
+    This was switched from ddof=0 (population) on 2026-04-25 to bring the
+    indicator in line with the rest of the FXLab strategy-execution stack.
+
     Example:
         calc = StandardDeviationCalculator()
         std = calc.calculate(o, h, l, c, v, t, period=20)
@@ -367,21 +387,23 @@ class StandardDeviationCalculator:
         if n < period or period < 2:
             return result
 
-        # Use cumulative sums for O(n) computation
-        cumsum = np.cumsum(close)
-        cumsum2 = np.cumsum(close**2)
-
-        mean = np.full(n, np.nan, dtype=np.float64)
-        mean[period - 1] = cumsum[period - 1] / period
-        mean[period:] = (cumsum[period:] - cumsum[:-period]) / period
-
-        mean_sq = np.full(n, np.nan, dtype=np.float64)
-        mean_sq[period - 1] = cumsum2[period - 1] / period
-        mean_sq[period:] = (cumsum2[period:] - cumsum2[:-period]) / period
-
-        variance = mean_sq - mean**2
-        variance = np.maximum(variance, 0.0)
-        result = np.sqrt(variance)
+        # Sample stddev (ddof=1). 2026-04-25: M1.B4 follow-up reconciled STDDEV
+        # to ddof=1 for numpy/pandas/pandas-ta parity. We use the centred
+        # two-pass form (sum((x - mean)^2) / (N - 1)) via sliding_window_view
+        # — the same approach as the M1.B4 RollingStddevCalculator. The
+        # textbook E[X²] - E[X]² cumulative-sum trick suffers catastrophic
+        # cancellation in the FX regime (closes ~ 1.10, deviations ~ 0.005);
+        # the centred form matches numpy.std(ddof=1) bit-for-bit.
+        x = close.astype(np.float64, copy=False)
+        windows = np.lib.stride_tricks.sliding_window_view(x, window_shape=period)
+        means = windows.mean(axis=1, keepdims=True)
+        deviations = windows - means
+        sum_sq = np.einsum("ij,ij->i", deviations, deviations)
+        sample_var = sum_sq / (period - 1)
+        # Clamp tiny negative drift (cannot occur for centred form, but cheap
+        # insurance against future refactors / weird inputs).
+        sample_var = np.maximum(sample_var, 0.0)
+        result[period - 1 :] = np.sqrt(sample_var)
 
         return result
 

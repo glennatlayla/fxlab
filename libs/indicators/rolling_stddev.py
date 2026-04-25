@@ -51,16 +51,16 @@ class RollingStddevCalculator:
     ``numpy.std(..., ddof=1)``, ``pandas.Series(arr).rolling(N).std()``,
     and pandas-ta. The denominator is (N - 1) where N == ``length_bars``.
 
-    Note: the in-tree ``BollingerBandsCalculator`` and
-    ``StandardDeviationCalculator`` (in ``libs/indicators/volatility.py``)
-    currently use population stddev (ddof=0). The M1.B4 workplan called
-    for "matches BollingerBandsCalculator convention" but on inspection
-    that convention diverges from numpy/pandas/pandas-ta. We follow the
-    industry default (ddof=1) here so M1.B2 z-score (which references
-    bb_std and is verified against numpy) stays consistent with the
-    rest of the strategy execution stack. A future tranche can audit
-    BollingerBandsCalculator's ddof=0 choice and either reconcile or
-    document the asymmetry.
+    Reconciliation (2026-04-25): the in-tree ``BollingerBandsCalculator``
+    and ``StandardDeviationCalculator`` (in ``libs/indicators/volatility.py``)
+    were originally implemented with ddof=0 (population stddev). The M1.B4
+    workplan called for "matches BollingerBandsCalculator convention" but on
+    inspection that convention diverged from numpy/pandas/pandas-ta. As of
+    the M1.B4 follow-up audit on 2026-04-25, both BollingerBandsCalculator
+    and StandardDeviationCalculator have been switched to ddof=1 — the entire
+    FXLab indicator stack now agrees on sample-stddev semantics, and M1.B2
+    z-score (which references bb_std and is verified against numpy ddof=1)
+    is consistent with the volatility indicators end-to-end.
 
     The first ``length_bars - 1`` outputs are NaN (insufficient samples to
     compute a sample stddev with the full window). Thereafter every
@@ -130,16 +130,19 @@ class RollingStddevCalculator:
             return result
 
         # Numerical-stability note. The textbook one-pass formula
-        # var = E[X^2] - E[X]^2 (cumulative-sum trick used by
-        # BollingerBandsCalculator) suffers catastrophic cancellation when
-        # the variance is small relative to the mean — exactly the FX
-        # regime (closes ~ 1.10, deviations ~ 0.005). At length_bars=20 the
-        # cancellation error reaches ~1e-12 of the price, blowing the
-        # 1e-12 acceptance bar. We instead use the centred two-pass form
-        # var = sum((x - mean)^2) / (N - 1) which is the accepted stable
-        # algorithm and matches numpy.std(ddof=1) bit-for-bit on every
-        # window we tested. Done vectorially via sliding_window_view so
-        # cost stays modest for typical N (< ~200) without a Python loop.
+        # var = E[X^2] - E[X]^2 (cumulative-sum trick) suffers catastrophic
+        # cancellation when the variance is small relative to the mean —
+        # exactly the FX regime (closes ~ 1.10, deviations ~ 0.005). At
+        # length_bars=20 the cancellation error reaches ~1e-12 of the price,
+        # blowing the 1e-12 acceptance bar. We instead use the centred
+        # two-pass form var = sum((x - mean)^2) / (N - 1) which is the
+        # accepted stable algorithm and matches numpy.std(ddof=1) bit-for-bit
+        # on every window we tested. Done vectorially via sliding_window_view
+        # so cost stays modest for typical N (< ~200) without a Python loop.
+        # 2026-04-25 reconciliation: BollingerBandsCalculator and
+        # StandardDeviationCalculator (libs/indicators/volatility.py) now also
+        # use this same centred two-pass form with ddof=1 — the FXLab
+        # indicator stack is uniform on sample-stddev semantics.
         x = close.astype(np.float64, copy=False)
         windows = np.lib.stride_tricks.sliding_window_view(x, window_shape=length_bars)
         # windows.shape == (n - length_bars + 1, length_bars)
