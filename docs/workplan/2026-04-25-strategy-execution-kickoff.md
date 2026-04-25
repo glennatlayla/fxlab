@@ -123,48 +123,64 @@ If `make verify` fails on main, fix it before launching agents.
 Agents start by running `make verify` themselves and stop if it's
 not green — a broken main poisons every track simultaneously.
 
-### 5. Launch the five agents (operator action)
+### 5. Launch the orchestrator (single Claude Code session)
 
-Use whatever orchestration platform you prefer (Claude Code Task
-agents, your own subagent setup, separate terminal windows, etc.).
-Each agent's launch command is identical except for the track letter:
+From a terminal in the dev-Mac fxlab clone:
 
-```
-Read docs/workplan/2026-04-25-strategy-execution-agent-orchestration.md
-and docs/workplan/2026-04-25-strategy-execution-kickoff.md.
-
-You are the agent for Track <X> (where X ∈ {A, B, C, D, E}).
-
-Execute every tranche in your track in order, following the agent
-coordination protocol exactly. Branch: agent/<X>. Commit per tranche.
-Append progress to docs/workplan/agent_logs/<X>.md.
-
-Do not ask the operator any questions. Use the locked defaults in
-the workplan. If you encounter a true blocker that the workplan does
-not resolve, follow the failure protocol — commit partial work,
-write to agent_logs/BLOCKED.md, stop.
-
-After your final tranche, do nothing else. The integration gates
-M3.X1 and M3.X2 are run by a separate integration agent.
-
-Begin.
+```bash
+cd ~/Documents/Coding\ Projects/fxlab
+claude
 ```
 
-### 6. (Optional) Launch an integration agent
-
-After agents A, B, E reach their final tranches (or after all five
-if you prefer), launch one more agent with this assignment:
+When the prompt opens, paste exactly:
 
 ```
-Read the workplan. You are the integration agent. Run the M3.X1
-gate, then M3.X2. Merge each track's branch to main in the order
-specified in the workplan's "Branching" section. Resolve conflicts
-per the rules. Run the e2e acceptance test. Append to
-docs/workplan/agent_logs/integration.md.
+You are the orchestrator session described in
+docs/workplan/2026-04-25-strategy-execution-agent-orchestration.md
+section "ORCHESTRATOR PROTOCOL (v2.2 — Claude Code single-session
+model)".
+
+Read that section, the MILESTONE INDEX, and the current state of
+docs/workplan/2026-04-25-strategy-execution-progress.md.
+
+Execute the run autonomously: dispatch parallel Task subagents per
+the protocol's "Subagent dispatch contract", commit atomically per
+tranche, update progress.md, and proceed until either the M3.X2
+hard-floor acceptance test passes or your context approaches its
+limit (in which case stop cleanly per the protocol).
+
+Do NOT ask me questions during execution. Use the locked defaults
+in the "DEFAULTS LOCKED" section. If a tranche genuinely blocks,
+follow the failure protocol and stop.
+
+If you find docs/workplan/agent_logs/BLOCKED.md non-empty on
+startup, surface it to me and halt — do not retry.
+
+Begin with the orchestrator startup ritual.
 ```
 
-If you do not launch an integration agent, run the integration
-manually after wake-up.
+That's the entire launch. No `--track`, no per-agent assignment,
+no separate sessions — one orchestrator that uses `Task` subagents
+for parallelism internally.
+
+### 6. (If interrupted) Resume the run
+
+If the orchestrator session terminates before M3.X2 hard floor
+(rate limit, context limit, you Ctrl-C'd it, the dev Mac restarted),
+just relaunch with the same prompt. The orchestrator startup ritual
+reads `progress.md`, finds the first NOT_STARTED milestone, and
+resumes. Per-tranche atomic commits guarantee no work is lost.
+
+Glenn's Max plan: 2M tokens / 4 hours. Realistic estimate is one
+orchestrator session covers a meaningful chunk of M1 (Track A + a
+couple of B's tranches) before context fills. A second session
+picks up from progress.md and continues. Most overnight runs that
+require true autonomy across multiple bucket resets need 3–4
+relaunches; setting up a tiny watchdog script (`while true; do
+claude --dangerously-skip-permissions --resume <session-id>; sleep
+300; done`) is the cleanest answer if you want true unattended
+overnight progress. The watchdog is **your** infrastructure — not
+covered by this workplan.
 
 ---
 

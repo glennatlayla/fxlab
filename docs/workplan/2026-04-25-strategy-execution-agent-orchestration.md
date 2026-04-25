@@ -11,6 +11,7 @@
 - **v1.0 (2026-04-25)** — Initial decomposition. 5 agents, 25 milestones, ~12 working days of parallel effort.
 - **v2.0 (2026-04-25)** — Autonomy revision per Glenn's directive: agents do NOT pause at decision gates during execution. Defaults baked in for every previously-named decision gate, with the rationale documented inline. The minimal set of questions that genuinely require Glenn's input before kickoff is consolidated into a new `kickoff` companion doc; agents read those answers at startup and never ask Glenn anything mid-run. Integration model tightened: per-agent feature branches, atomic per-tranche commits, append-only progress logs Glenn can scan at wake-time.
 - **v2.1 (2026-04-25)** — Forex provider revision per Glenn's directive: NO manual CSV downloads. Verified Schwab's public Trader API does not expose FX programmatically (the existing `SchwabBrokerAdapter` is equities-only). Switched to **Oanda v20 REST API** as the single provider for both historical FX data AND live broker interface (paper via `fxpractice`, live via `fxtrade`). Track E grows by two tranches (M4.E5 OandaBrokerAdapter, M4.E6 broker registry) so a paper-trade smoke test is part of the M3.X2 hard floor. Total milestones: 27 (was 25).
+- **v2.2 (2026-04-25)** — Orchestration revision: Glenn confirmed the run is launched as a single `claude` CLI session on the dev Mac, given this workplan as input. Replaces the previous "5 separate sessions, one per track" execution model with "one Claude Code orchestrator session that spawns Task subagents to parallelize tracks." Adds an ORCHESTRATOR PROTOCOL section that pins down: how to read this plan; how to spawn parallel Task subagents per round; how to resume from `progress.md` after a session interruption; how to commit atomically per tranche so context-fill or rate-limit hits don't lose work. Kickoff doc step 5 reduced to a single launch command.
 
 ---
 
@@ -40,6 +41,128 @@ Cross-track integration milestones:             M3.X1 (single-strategy CLI backt
 This block is the canonical source of truth for milestone scope. Any
 distillation of this document MUST honour the integrity-header
 discipline in CLAUDE.md §16 Rule 2.
+
+---
+
+## ORCHESTRATOR PROTOCOL (v2.2 — Claude Code single-session model)
+
+The execution model is: **one Claude Code CLI session on the dev Mac
+acts as the orchestrator**. It reads this document, dispatches work
+to `Task`-tool subagents (which Claude Code spawns in-process for
+parallel sub-jobs), commits atomically after each tranche, updates
+the progress file, and either continues to the next round or stops
+cleanly when context or token budget is exhausted.
+
+If interrupted (rate limit, context full, operator Ctrl-C), the
+operator relaunches `claude` with the same prompt; the new session
+reads `docs/workplan/2026-04-25-strategy-execution-progress.md`,
+finds the first NOT_STARTED milestone, and resumes from there.
+Atomic per-tranche commits make the state persistent across
+sessions.
+
+### Orchestrator startup ritual (every session, including resumes)
+
+1. **Verify `make verify` is green on `main`.** If not, fix is the
+   first task — a broken main poisons every track.
+2. **Read `docs/workplan/2026-04-25-strategy-execution-progress.md`**
+   to determine which milestones are DONE and which are pending.
+3. **Read `docs/workplan/agent_logs/BLOCKED.md`** if it exists.
+   If non-empty, halt and surface the block to the operator —
+   another session left an unresolved blocker. Do NOT attempt to
+   re-execute a blocked tranche; the operator decides the unblock.
+4. **Compute the next round of dispatchable tranches.** A tranche
+   is dispatchable when every milestone listed in its
+   `Dependencies` line is DONE in the progress file.
+5. **Dispatch the round in parallel via the `Task` tool**, sending
+   all parallel calls in a single message so Claude Code's tool
+   harness runs them concurrently. Maximum recommended fan-out per
+   round: 5 subagents (matches the documented "send them in a
+   single message" pattern). For tranches with no parallelism
+   available, dispatch one subagent.
+6. **After the round returns**, review each subagent's commit (run
+   `git log -1` on each agent branch), run `make verify`, and
+   update the progress file.
+7. **Decide next action**:
+   - If milestones remain dispatchable → goto step 4.
+   - If only blocked-on-dependency milestones remain → wait for
+     prerequisite tranches, dispatch next round when unblocked.
+   - If `M3.X2` hard-floor milestones are all DONE → run the
+     M3.X2 acceptance test, mark integration.md, stop with
+     success.
+   - If context budget is approaching exhaustion → commit any
+     pending state, append a `session_handoff` entry to each
+     active track log naming the next dispatchable milestone, and
+     stop. The operator's next session resumes from progress.md.
+
+### Subagent dispatch contract
+
+Each Task subagent dispatched by the orchestrator receives a
+**self-contained brief** — the orchestrator does NOT assume the
+subagent has read this document. The brief MUST include:
+
+1. The exact tranche ID (e.g., `M1.A1`).
+2. The tranche's full text from this document (copy-paste the
+   tranche section).
+3. The agent's track brief from the AGENT BRIEFS section.
+4. The QUALITY GATES section (CLAUDE.md §0 / §5 / §6 / §7 / §8).
+5. The AGENT COORDINATION PROTOCOL — specifically which files this
+   tranche may touch and which it must not.
+6. An explicit instruction: "When done, return the commit SHA, a
+   one-paragraph summary, the test output, and the next
+   recommended tranche on this track."
+
+This removes the need for subagents to load the entire workplan into
+their context — they get only what their tranche requires. Keeps
+the orchestrator's token budget healthy across rounds.
+
+### Atomicity contract
+
+- Every tranche ends in exactly one commit on the agent's branch.
+- Commit messages follow the convention in AGENT COORDINATION
+  PROTOCOL > "Per-tranche commit convention".
+- The orchestrator updates the progress file's status row in the
+  SAME commit (or in a follow-up commit before the next dispatch
+  round). Never leave a tranche DONE in code but NOT_STARTED in
+  progress.md.
+
+### Branching under one orchestrator
+
+The v2.0 plan said "per-agent feature branches `agent/A` etc."
+That still applies — even with one orchestrator session,
+subagents work on per-track branches so an integration agent can
+merge them in dependency order. However, with a single orchestrator
+the branch creation is the orchestrator's responsibility on first
+dispatch to a track, not the subagent's.
+
+If a single orchestrator would prefer to work directly on `main`
+(simpler — no merges needed), that's acceptable when **only one
+track is in flight at a time** (i.e., no parallel dispatch). But the
+default for multi-track parallel rounds is per-track branches.
+
+### Rate-limit / context-limit handling
+
+**Rate limit (HTTP 429 from Anthropic):** Claude Code's own retry
+logic handles transient 429s. If the limit is the user's plan
+ceiling (4-hour bucket exhausted), the session terminates. The
+orchestrator's prior commits and progress.md updates persist. The
+operator relaunches `claude` after the bucket resets.
+
+**Context limit (orchestrator session approaches its window):**
+the orchestrator commits any uncommitted work, appends
+`session_handoff` entries to each active track log, and stops. No
+auto-compaction; clean stop preferred over recovered state.
+
+### What the orchestrator NEVER does
+
+- Speculatively dispatch tranches whose dependencies are not yet
+  DONE per progress.md.
+- Edit files an agent does not own (per the file-ownership table).
+- Skip the `make verify` gate before commit.
+- Merge agent branches to `main` mid-run; merges happen only at
+  M3.X1 / M3.X2 integration gates by an integration step the
+  orchestrator runs as a single dedicated dispatch.
+- Resume work from a `BLOCKED.md` entry without operator
+  acknowledgement.
 
 ---
 
