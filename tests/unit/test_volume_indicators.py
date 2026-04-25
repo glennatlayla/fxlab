@@ -349,8 +349,17 @@ class TestM6Registration:
         for name in expected:
             assert default_registry.has(name), f"{name} not registered"
 
-    def test_default_registry_has_24_indicators(self) -> None:
-        """13 from M5 + 11 from M6 = 24 total."""
+    def test_default_registry_has_expected_indicators(self) -> None:
+        """
+        13 from M5 (trend + momentum) + 11 from M6 (volatility + volume) +
+        9 from the strategy-execution buildout (M1.B1: ADX, M1.B2: ZSCORE,
+        M1.B3: ROLLING_HIGH / ROLLING_LOW / ROLLING_MAX / ROLLING_MIN,
+        M1.B4: ROLLING_STDDEV, M1.B5: CALENDAR_BUSINESS_DAY_INDEX /
+        CALENDAR_DAYS_TO_MONTH_END) = 33 total.
+
+        When new indicators are added, update the count AND the
+        rationale comment so the next reader knows what the delta is.
+        """
         from libs.indicators import default_registry
 
-        assert default_registry.count() == 24
+        assert default_registry.count() == 33

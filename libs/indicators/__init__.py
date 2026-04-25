@@ -86,6 +86,20 @@ default_registry.register("ADL", ADLCalculator())
 default_registry.register("MFI", MFICalculator())
 default_registry.register("CMF", CMFCalculator())
 
+# Strategy-execution buildout indicators (M1.B1–B5).
+# adx, rolling_extremes, rolling_stddev, and zscore self-register into
+# default_registry at module-bottom (idempotent via .has() guard); merely
+# importing the module wires them. calendar.py exposes an explicit
+# register(registry) helper instead of self-registering, so call it for
+# the default registry. Order: deterministic, alphabetical.
+import libs.indicators.adx  # noqa: F401  (registers ADX)
+import libs.indicators.rolling_extremes  # noqa: F401  (registers ROLLING_HIGH/LOW/MAX/MIN)
+import libs.indicators.rolling_stddev  # noqa: F401  (registers ROLLING_STDDEV)
+import libs.indicators.zscore  # noqa: F401  (registers ZSCORE)
+from libs.indicators.calendar import register as _register_calendar_indicators
+
+_register_calendar_indicators(default_registry)
+
 # ---------------------------------------------------------------------------
 # Default engine — ready to use
 # ---------------------------------------------------------------------------
