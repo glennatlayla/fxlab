@@ -154,6 +154,13 @@ ROLE_SCOPES: dict[str, list[str]] = {
         "deployments:approve",
         "live:trade",
         "compliance:read",
+        # admin:manage gates the admin sub-tree in the frontend
+        # (frontend/src/pages/Admin/* and router.tsx /admin/*).
+        # Without it, the seeded admin user gets 403 on every admin
+        # page even after Tranche L's frontend↔backend scope alignment.
+        # No other role gets this scope; the admin sub-tree is
+        # admin-only by design.
+        "admin:manage",
     ],
     "operator": [
         "strategies:write",

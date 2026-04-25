@@ -12,17 +12,19 @@
  *   /login           — public login page
  *   /                — authenticated shell with sidebar
  *     /              — Dashboard (index, no scope required)
- *     /strategy-studio — M25 Strategy Studio (create_strategy scope)
- *     /runs          — M26 Run Monitor (view_runs scope)
- *     /runs/:runId/readiness — M28 Readiness Report (view_runs scope)
- *     /feeds         — M30 Feed Operations (view_feeds scope)
- *     /approvals     — M29 Governance Approvals (approve_promotion scope)
- *     /overrides     — M29 Governance Overrides (manage_overrides scope)
- *     /audit         — M29 Audit Explorer (view_audit scope)
- *     /queues        — M30 Queue Dashboard (view_feeds scope)
- *     /parity        — M30 Parity Dashboard (view_feeds scope)
- *     /artifacts     — M31 Artifact Browser (export_data scope)
- *     /admin         — M2 Admin Panel (admin:manage scope)
+ *     /strategy-studio — M25 Strategy Studio (strategies:write scope)
+ *     /runs          — M26 Run Monitor (runs:write scope)
+ *     /runs/:runId/readiness — M28 Readiness Report (runs:write scope)
+ *     /feeds         — M30 Feed Operations (feeds:read scope)
+ *     /approvals     — M29 Governance Approvals (approvals:write scope)
+ *     /overrides     — M29 Governance Overrides (overrides:approve scope)
+ *     /audit         — M29 Audit Explorer (audit:read scope)
+ *     /queues        — M30 Queue Dashboard (feeds:read scope)
+ *     /parity        — M30 Parity Dashboard (feeds:read scope)
+ *     /pnl           — M9  P&L Attribution (deployments:read scope)
+ *     /artifacts     — M31 Artifact Browser (exports:read scope)
+ *     /kill-switch   — M27 Kill Switch (live:trade scope)
+ *     /admin         — M2  Admin Panel (admin:manage scope)
  *       /users       — User Management
  *       /secrets     — Secret Rotation
  *
@@ -35,7 +37,16 @@
  *   AuthGuard checks requiredScope against user's JWT scopes before rendering the page.
  *   If scope is missing, user sees a 403 (Access Denied) view.
  *   Dashboard requires no scope, so all authenticated users can access it.
- *   Scope names map directly to Permission enum values (e.g., "view_strategies").
+ *
+ *   Scope vocabulary is defined by the backend in services/api/auth.py
+ *   (ROLE_SCOPES). Frontend MUST use those literal strings — see
+ *   tests/unit/test_frontend_backend_scope_alignment.py which fails
+ *   any drift at pytest time. The 2026-04-25 first-clean-install
+ *   incident exposed a schism where the frontend used snake_case
+ *   verb names (create_strategy, view_runs…) and the backend issued
+ *   colon-separated names (strategies:write, runs:write…); admin's
+ *   JWT carried the right scopes but every route guard rejected
+ *   them. Tranche L standardised on the backend names.
  */
 
 import { lazy, Suspense } from "react";
@@ -89,11 +100,11 @@ export const router = createBrowserRouter(
       children: [
         // Dashboard: no scope required, accessible to all authenticated users
         { index: true, element: <Dashboard /> },
-        // Strategy Studio: requires create_strategy permission
+        // Strategy Studio: requires strategies:write scope
         {
           path: "strategy-studio",
           element: (
-            <AuthGuard requiredScope="create_strategy">
+            <AuthGuard requiredScope="strategies:write">
               <FeatureErrorBoundary featureName="Strategy Studio">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <StrategyStudio />
@@ -102,11 +113,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Run Monitor: requires view_runs permission
+        // Run Monitor: requires runs:write scope
         {
           path: "runs",
           element: (
-            <AuthGuard requiredScope="view_runs">
+            <AuthGuard requiredScope="runs:write">
               <FeatureErrorBoundary featureName="Run Monitor">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Runs />
@@ -115,11 +126,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Readiness Report: requires view_runs permission (readiness is part of run inspection)
+        // Readiness Report: requires runs:write scope (readiness is part of run inspection)
         {
           path: "runs/:runId/readiness",
           element: (
-            <AuthGuard requiredScope="view_runs">
+            <AuthGuard requiredScope="runs:write">
               <FeatureErrorBoundary featureName="Readiness Report">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <RunReadiness />
@@ -128,11 +139,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Feed Operations: requires view_feeds permission
+        // Feed Operations: requires feeds:read scope
         {
           path: "feeds",
           element: (
-            <AuthGuard requiredScope="view_feeds">
+            <AuthGuard requiredScope="feeds:read">
               <FeatureErrorBoundary featureName="Feed Operations">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Feeds />
@@ -144,7 +155,7 @@ export const router = createBrowserRouter(
         {
           path: "feeds/:feedId",
           element: (
-            <AuthGuard requiredScope="view_feeds">
+            <AuthGuard requiredScope="feeds:read">
               <FeatureErrorBoundary featureName="Feed Detail">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <FeedDetail />
@@ -153,11 +164,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Governance Approvals: requires approve_promotion permission
+        // Governance Approvals: requires approvals:write scope
         {
           path: "approvals",
           element: (
-            <AuthGuard requiredScope="approve_promotion">
+            <AuthGuard requiredScope="approvals:write">
               <FeatureErrorBoundary featureName="Governance Approvals">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Approvals />
@@ -166,11 +177,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Governance Overrides: requires manage_overrides permission
+        // Governance Overrides: requires overrides:approve scope
         {
           path: "overrides",
           element: (
-            <AuthGuard requiredScope="manage_overrides">
+            <AuthGuard requiredScope="overrides:approve">
               <FeatureErrorBoundary featureName="Governance Overrides">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Overrides />
@@ -182,7 +193,7 @@ export const router = createBrowserRouter(
         {
           path: "overrides/:id",
           element: (
-            <AuthGuard requiredScope="manage_overrides">
+            <AuthGuard requiredScope="overrides:approve">
               <FeatureErrorBoundary featureName="Governance Overrides">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Overrides />
@@ -191,11 +202,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Audit Explorer: requires view_audit permission
+        // Audit Explorer: requires audit:read scope
         {
           path: "audit",
           element: (
-            <AuthGuard requiredScope="view_audit">
+            <AuthGuard requiredScope="audit:read">
               <FeatureErrorBoundary featureName="Audit Explorer">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Audit />
@@ -204,11 +215,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Queue Dashboard: requires view_feeds permission (queues are feed-related)
+        // Queue Dashboard: requires feeds:read scope (queues are feed-related)
         {
           path: "queues",
           element: (
-            <AuthGuard requiredScope="view_feeds">
+            <AuthGuard requiredScope="feeds:read">
               <FeatureErrorBoundary featureName="Queue Dashboard">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Queues />
@@ -217,11 +228,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Parity Dashboard: requires view_feeds permission (parity is feed-related)
+        // Parity Dashboard: requires feeds:read scope (parity is feed-related)
         {
           path: "parity",
           element: (
-            <AuthGuard requiredScope="view_feeds">
+            <AuthGuard requiredScope="feeds:read">
               <FeatureErrorBoundary featureName="Parity Dashboard">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Parity />
@@ -243,11 +254,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Artifact Browser: requires export_data permission
+        // Artifact Browser: requires exports:read scope
         {
           path: "artifacts",
           element: (
-            <AuthGuard requiredScope="export_data">
+            <AuthGuard requiredScope="exports:read">
               <FeatureErrorBoundary featureName="Artifact Browser">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Artifacts />
@@ -256,11 +267,11 @@ export const router = createBrowserRouter(
             </AuthGuard>
           ),
         },
-        // Emergency Controls: requires activate_kill_switch permission
+        // Emergency Controls: requires live:trade scope
         {
           path: "emergency",
           element: (
-            <AuthGuard requiredScope="activate_kill_switch">
+            <AuthGuard requiredScope="live:trade">
               <FeatureErrorBoundary featureName="Emergency Controls">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Emergency />
