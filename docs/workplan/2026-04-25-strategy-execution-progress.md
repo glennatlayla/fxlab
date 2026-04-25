@@ -49,12 +49,12 @@ Track B integration commit (default_registry wiring): `d11c83c`.
 
 ## Track D — Frontend (parallel after C contracts)
 
-| ID     | Milestone                                  | Status      | Commit | Owner |
-|--------|--------------------------------------------|-------------|--------|-------|
-| M2.D1  | "Load from repo" panel                     | NOT_STARTED |        |       |
-| M2.D2  | IR detail view                             | NOT_STARTED |        |       |
-| M2.D3  | "Run backtest" flow                        | NOT_STARTED |        |       |
-| M2.D4  | Results viewer page                        | NOT_STARTED |        |       |
+| ID     | Milestone                                  | Status      | Commit  | Owner       |
+|--------|--------------------------------------------|-------------|---------|-------------|
+| M2.D1  | "Load from repo" panel                     | DONE        | 9c5d1dc | orchestrator |
+| M2.D2  | IR detail view                             | DONE        | df05ebe | orchestrator |
+| M2.D3  | "Run backtest" flow                        | DONE        | 7d9eb2f | orchestrator |
+| M2.D4  | Results viewer page                        | DONE        | 4d4f365 | orchestrator |
 
 ## Track E — Oanda data + broker (independent)
 
