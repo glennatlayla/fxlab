@@ -12,6 +12,12 @@
 #                       silently change what "malformed" means.
 #   - *.golden.*        Golden snapshots are byte-exact; auto-fixing
 #                       breaks the snapshot semantics.
+#   - **/__snapshots__/  Vitest snapshot files (*.snap) are also
+#                       byte-exact auto-generated artefacts; trailing
+#                       whitespace inside React-rendered HTML is
+#                       semantically meaningful and stripping it
+#                       breaks the snapshot match the next time the
+#                       test runs.
 #   - .venv/, node_modules/   Vendored deps.
 
 exclude: |
@@ -21,6 +27,7 @@ exclude: |
     User\ Spec/.*|
     tests/fixtures/.*|
     .*\.golden\..*|
+    .*/__snapshots__/.*|
     \.venv/.*|
     .*/node_modules/.*|
     fxlab_test\.db.*
