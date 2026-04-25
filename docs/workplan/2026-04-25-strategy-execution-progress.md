@@ -1,7 +1,7 @@
 # FXLab Strategy Execution Buildout — Progress Tracker
 
-**Source:** `docs/workplan/2026-04-25-strategy-execution-agent-orchestration.md` (v2.1)
-**Total milestones:** 27
+**Source:** `docs/workplan/2026-04-25-strategy-execution-agent-orchestration.md` (v2.3)
+**Total milestones:** 28
 **Started:** (not yet)
 
 Per CLAUDE.md §16 Rule 3, this file is seeded from the source
@@ -68,6 +68,7 @@ Per §16 Rule 4, phase completion requires
 | ID     | Milestone                                  | Status      | Commit | Owner |
 |--------|--------------------------------------------|-------------|--------|-------|
 | M3.X1  | Single-strategy CLI backtest end-to-end    | NOT_STARTED |        |       |
+| M3.X1.5| Single Engine Mode Parity Test             | NOT_STARTED |        |       |
 | M3.X2  | Five strategies via UI (final acceptance)  | NOT_STARTED |        |       |
 
 ---
@@ -75,7 +76,7 @@ Per §16 Rule 4, phase completion requires
 ## Reconciliation (per §16 Rule 4, run before declaring phase complete)
 
 ```
-source_count = 27            (from Milestone Index above; v2.1)
+source_count = 28            (from Milestone Index above; v2.3)
 done_count   = ?             (count rows where status == DONE)
 open_count   = ?             (count rows where status in {NOT_STARTED, IN_PROGRESS})
 assert source_count == done_count + open_count
