@@ -64,7 +64,6 @@ groups:
           description: |
             Kill switch activation p99 latency exceeded 500ms safety threshold.
             p99 latency: {{ $value | humanizeDuration }}
-            Current time: {{ $timestamp }}
             This indicates the platform is too slow to halt positions in an emergency.
             Investigate broker adapter latency, network delays, and order cancellation
             queuing. Check kill_switch_mtth_seconds histogram in Prometheus.

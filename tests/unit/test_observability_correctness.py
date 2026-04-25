@@ -185,6 +185,102 @@ def test_every_alert_has_a_non_empty_expr(
 
 
 # ---------------------------------------------------------------------------
+# Template-variable correctness (Tranche K — 2026-04-24)
+# ---------------------------------------------------------------------------
+#
+# Prometheus alert template annotations (summary, description) are
+# evaluated as Go text/template strings with a small fixed set of
+# variables provided by Prometheus:
+#
+#   $labels         — the firing alert's label set (use $labels.<key>)
+#   $value          — the value that triggered the alert
+#   $externalLabels — global external labels from prometheus.yml
+#
+# Anything else (e.g. ``$timestamp``, ``$startsAt``, ``$endsAt``,
+# ``$generatorURL``) causes Prometheus to fail loading the rules file
+# at startup with ``undefined variable "$X"``. Worse: it then refuses
+# to apply ANY config change — the rules manager reverts to the
+# previous rule set, the scrape manager stops, the notifier stops,
+# and the process exits non-zero. Under our on-failure:3 restart
+# policy that produces the exact "Prometheus not responding" symptom
+# the 2026-04-24 install verify hit.
+#
+# This test scans every annotation field of every alert rule for
+# ``$<word>`` references and asserts each one is in the allowlist.
+# ---------------------------------------------------------------------------
+
+#: The complete set of variables Prometheus exposes inside alert
+#: template annotations. Sub-attribute access (``$labels.severity``)
+#: is permitted as long as the bare prefix is one of these.
+ALLOWED_PROMETHEUS_TEMPLATE_VARIABLES: frozenset[str] = frozenset(
+    {
+        "$labels",
+        "$value",
+        "$externalLabels",
+    }
+)
+
+#: Regex matching ``$<identifier>`` at a word boundary. Identifiers
+#: are letters / digits / underscore; the leading ``$`` is required.
+_TEMPLATE_VAR_RE: re.Pattern[str] = re.compile(r"\$[A-Za-z_][A-Za-z_0-9]*")
+
+
+def _iter_alert_annotations(
+    alerts_doc: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    """Yield (alert_name, annotation_key, annotation_value) tuples.
+
+    Prometheus rules can have arbitrary annotation keys; commonly
+    ``summary``, ``description``, ``runbook_url``. We test every
+    string-valued annotation regardless of key — a bad template
+    variable in any of them breaks rule loading.
+    """
+    results: list[tuple[str, str, str]] = []
+    for group in alerts_doc.get("groups", []) or []:
+        for rule in group.get("rules", []) or []:
+            name = rule.get("alert") or rule.get("record") or "<unnamed>"
+            annotations = rule.get("annotations") or {}
+            for key, value in annotations.items():
+                if value is None:
+                    continue
+                results.append((str(name), str(key), str(value)))
+    return results
+
+
+def test_alert_annotations_only_use_allowed_template_variables(
+    alerts_config: dict[str, Any],
+) -> None:
+    """Every ``$<var>`` in alert annotations must be Prometheus-known.
+
+    Regression guard for the 2026-04-20 → 2026-04-24 minitux symptom
+    where Prometheus refused to load rules with
+    ``undefined variable "$timestamp"`` and the entire rule manager
+    + scrape manager + notifier shut down. The container then
+    crash-looped under the on-failure:3 policy and the install
+    verify reported "Prometheus not responding" — a misleadingly
+    mild symptom for a complete observability outage.
+
+    The fix is a static check at pytest time, well before any
+    deploy.
+    """
+    offenders: list[str] = []
+    for alert_name, annotation_key, annotation_value in _iter_alert_annotations(alerts_config):
+        for match in _TEMPLATE_VAR_RE.finditer(annotation_value):
+            var = match.group(0)
+            if var not in ALLOWED_PROMETHEUS_TEMPLATE_VARIABLES:
+                offenders.append(f"{alert_name}.annotations.{annotation_key}: {var!r}")
+    assert not offenders, (
+        "Alert annotations reference template variable(s) Prometheus does "
+        f"NOT define: {offenders!r}. "
+        f"Allowed variables: {sorted(ALLOWED_PROMETHEUS_TEMPLATE_VARIABLES)!r}. "
+        "Sub-attribute access ($labels.severity, $externalLabels.cluster) is "
+        "fine; bare $X for unknown X causes Prometheus to refuse the entire "
+        "rules file at startup and exit (see 2026-04-24 minitux "
+        "Prometheus-not-responding incident)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Exporter service presence
 # ---------------------------------------------------------------------------
 
