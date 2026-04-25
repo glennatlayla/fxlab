@@ -1147,6 +1147,113 @@ async def lifespan(app: FastAPI):
             # This permits other endpoints to function while live trading is unavailable.
 
         # ---------------------------------------------------------------------
+        # Wire StrategyService for /strategies/* endpoints (M2.C1)
+        # ---------------------------------------------------------------------
+        # The /strategies/import-ir endpoint (and related strategy endpoints)
+        # depend on a StrategyService registered via set_strategy_service().
+        # Without this wiring the route raises RuntimeError on first request.
+        #
+        # Each call to set_strategy_service() reassigns a module-level global,
+        # so re-invocation under repeated lifespan startup overwrites cleanly
+        # (idempotent by design — see services/api/routes/strategies.py).
+        try:
+            with _startup_phase("strategy_service_wiring"):
+                from services.api.db import SessionLocal
+                from services.api.repositories.sql_strategy_repository import (
+                    SqlStrategyRepository,
+                )
+                from services.api.routes.strategies import set_strategy_service
+                from services.api.services.strategy_service import StrategyService
+
+                # Dedicated long-lived session for the StrategyService, mirroring
+                # the LiveExecutionService wiring pattern above.
+                db_session_strategy = SessionLocal()
+                strategy_repo = SqlStrategyRepository(db=db_session_strategy)
+                strategy_service = StrategyService(strategy_repo=strategy_repo)
+                set_strategy_service(strategy_service)
+
+                app.state.strategy_db_session = db_session_strategy
+                app.state.strategy_service = strategy_service
+
+                logger.info(
+                    "startup.strategy_service_wired",
+                    component="startup",
+                    detail="StrategyService wired and registered with /strategies routes.",
+                )
+        except Exception as exc:
+            logger.critical(
+                "startup.strategy_service_failed",
+                error=str(exc),
+                component="startup",
+                detail="Failed to wire StrategyService at startup. "
+                "/strategies/import-ir and related endpoints will return 500.",
+            )
+            # Do not re-raise — allow the API to start; the route guard will
+            # surface a clear RuntimeError on the first request to that endpoint.
+
+        # ---------------------------------------------------------------------
+        # Wire ResearchRunService + DatasetResolver for /runs/* endpoints (M2.C2)
+        # ---------------------------------------------------------------------
+        # The /runs/from-ir endpoint depends on both:
+        #   - a ResearchRunService registered via set_research_run_service()
+        #   - a DatasetResolverInterface registered via set_dataset_resolver()
+        # M2.C2 wires the InMemoryDatasetResolver seeded with default datasets;
+        # M4.E3 will swap in the catalog-backed DatasetService without touching
+        # main.py — only the resolver instance changes here.
+        #
+        # Like the strategy wiring above, both setters reassign module-level
+        # globals so repeated startup invocations overwrite cleanly.
+        try:
+            with _startup_phase("research_run_service_wiring"):
+                from libs.strategy_ir.dataset_resolver import (
+                    InMemoryDatasetResolver,
+                    seed_default_datasets,
+                )
+                from services.api.db import SessionLocal
+                from services.api.repositories.sql_research_run_repository import (
+                    SqlResearchRunRepository,
+                )
+                from services.api.routes.runs import (
+                    set_dataset_resolver,
+                    set_research_run_service,
+                )
+                from services.api.services.research_run_service import (
+                    ResearchRunService,
+                )
+
+                db_session_research = SessionLocal()
+                research_run_repo = SqlResearchRunRepository(db=db_session_research)
+                research_run_service = ResearchRunService(repo=research_run_repo)
+                set_research_run_service(research_run_service)
+
+                # Seed the in-memory dataset resolver. Rebuilt from the default
+                # set on every boot — there is no persisted state to migrate.
+                dataset_resolver = InMemoryDatasetResolver()
+                seed_default_datasets(dataset_resolver)
+                set_dataset_resolver(dataset_resolver)
+
+                app.state.research_run_db_session = db_session_research
+                app.state.research_run_service = research_run_service
+                app.state.dataset_resolver = dataset_resolver
+
+                logger.info(
+                    "startup.research_run_service_wired",
+                    component="startup",
+                    detail="ResearchRunService and InMemoryDatasetResolver wired "
+                    "and registered with /runs routes.",
+                )
+        except Exception as exc:
+            logger.critical(
+                "startup.research_run_service_failed",
+                error=str(exc),
+                component="startup",
+                detail="Failed to wire ResearchRunService/DatasetResolver at startup. "
+                "/runs/from-ir and related endpoints will return 500.",
+            )
+            # Do not re-raise — allow the API to start; route guards will surface
+            # the misconfiguration on first request.
+
+        # ---------------------------------------------------------------------
         # Periodic broker-vs-internal reconciliation (M19 production hardening)
         # ---------------------------------------------------------------------
         # Startup-only reconciliation closes the crash-recovery window but a
