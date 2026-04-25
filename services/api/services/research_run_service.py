@@ -41,10 +41,13 @@ Example:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import structlog
 import ulid as _ulid
 
 from libs.contracts.errors import NotFoundError
+from libs.contracts.experiment_plan import ExperimentPlan
 from libs.contracts.interfaces.research_run_repository import (
     ResearchRunRepositoryInterface,
 )
@@ -56,6 +59,10 @@ from libs.contracts.research_run import (
     ResearchRunRecord,
     ResearchRunResult,
     ResearchRunStatus,
+    ResearchRunType,
+)
+from libs.strategy_ir.interfaces.dataset_resolver_interface import (
+    ResolvedDataset,
 )
 
 logger = structlog.get_logger(__name__)
@@ -144,6 +151,108 @@ class ResearchRunService(ResearchRunServiceInterface):
         )
 
         return queued_record
+
+    # ------------------------------------------------------------------
+    # submit_from_ir (M2.C2)
+    # ------------------------------------------------------------------
+
+    def submit_from_ir(
+        self,
+        strategy_id: str,
+        experiment_plan: ExperimentPlan,
+        resolved_dataset: ResolvedDataset,
+        user_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> ResearchRunRecord:
+        """
+        Submit a research run derived from a parsed ExperimentPlan.
+
+        This is the M2.C2 entry point used by ``POST /runs/from-ir``.
+        It maps the experiment plan's data-selection block to a
+        :class:`ResearchRunConfig`, then delegates to
+        :meth:`submit_run` so the standard PENDING -> QUEUED transition
+        and structured logging are preserved.
+
+        Run-type selection rule for this tranche: if
+        ``plan.validation.walk_forward.enabled`` is True we submit a
+        ``WALK_FORWARD`` run, otherwise a plain ``BACKTEST``. The
+        engine-config bodies (BacktestConfig / WalkForwardConfig) are
+        intentionally left ``None`` here -- a future tranche will
+        translate the plan's validation block into the concrete
+        engine configs. The acceptance test in this tranche only
+        requires that the run is created, queued, and routed to the
+        correct engine type.
+
+        Args:
+            strategy_id: ULID of the strategy this plan targets.
+            experiment_plan: Parsed and validated
+                :class:`ExperimentPlan` (caller owns parsing).
+            resolved_dataset: Output of
+                :meth:`DatasetResolverInterface.resolve` for
+                ``experiment_plan.data_selection.dataset_ref``.
+                Caller owns the resolution step so a missing dataset
+                surfaces as HTTP 404 in the route layer.
+            user_id: ULID of the user submitting the run.
+            correlation_id: Optional request correlation ID.
+
+        Returns:
+            The created :class:`ResearchRunRecord` in QUEUED status.
+
+        Example::
+
+            record = service.submit_from_ir(
+                strategy_id="01HSTRAT...",
+                experiment_plan=plan,
+                resolved_dataset=resolver.resolve(plan.data_selection.dataset_ref),
+                user_id="01HUSER...",
+            )
+            assert record.status == ResearchRunStatus.QUEUED
+        """
+        # Walk-forward gets routed to its own engine; otherwise treat
+        # the plan as a single backtest. We never silently downgrade --
+        # if the plan asks for walk-forward we honour it.
+        if experiment_plan.validation.walk_forward.enabled:
+            run_type = ResearchRunType.WALK_FORWARD
+        else:
+            run_type = ResearchRunType.BACKTEST
+
+        # Metadata pins enough of the plan for downstream audit /
+        # readiness reports to find the originating artifact without
+        # re-parsing the full plan body. The full plan body itself is
+        # not embedded here -- it lives in the strategy + plan
+        # repositories owned by Tracks A and E.
+        metadata: dict[str, object] = {
+            "source": "experiment_plan",
+            "experiment_plan_strategy_name": (experiment_plan.strategy_ref.strategy_name),
+            "experiment_plan_strategy_version": (experiment_plan.strategy_ref.strategy_version),
+            "experiment_plan_dataset_ref": (experiment_plan.data_selection.dataset_ref),
+            "experiment_plan_dataset_id": resolved_dataset.dataset_id,
+            "experiment_plan_random_seed": (experiment_plan.run_metadata.random_seed),
+            "experiment_plan_run_purpose": (experiment_plan.run_metadata.run_purpose),
+        }
+
+        config = ResearchRunConfig(
+            run_type=run_type,
+            strategy_id=strategy_id,
+            symbols=resolved_dataset.symbols,
+            initial_equity=Decimal("100000"),
+            metadata=metadata,
+        )
+
+        logger.info(
+            "research_run.submit_from_ir.called",
+            strategy_id=strategy_id,
+            dataset_ref=experiment_plan.data_selection.dataset_ref,
+            dataset_id=resolved_dataset.dataset_id,
+            symbol_count=len(resolved_dataset.symbols),
+            run_type=run_type.value,
+            user_id=user_id,
+            correlation_id=correlation_id,
+            component="research_run_service",
+        )
+
+        return self.submit_run(config, user_id, correlation_id=correlation_id)
 
     # ------------------------------------------------------------------
     # get_run
