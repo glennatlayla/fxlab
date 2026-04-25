@@ -49,6 +49,18 @@ jobs:
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements-dev.txt
 
+      - name: Bootstrap node + frontend deps (mirrors `make bootstrap`)
+        # `make verify` -> `make test-unit` includes
+        # tests/unit/test_m0_frontend_structure.py::test_ac8_npm_build_succeeds
+        # which by design FAILS HARD (does not skip) when
+        # frontend/node_modules is missing. The local `make bootstrap`
+        # target provisions both node-via-nodeenv and the npm deps;
+        # this CI step does the same so CI stays in parity with what
+        # a dev sees locally.
+        run: |
+          .venv/bin/python -m nodeenv --python-virtualenv --node=lts --prebuilt
+          cd frontend && PATH="${GITHUB_WORKSPACE}/.venv/bin:$PATH" npm install --silent
+
       - name: make verify
         run: make verify
 
@@ -72,6 +84,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m venv .venv
+          .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
       - name: Format check
@@ -108,6 +121,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m venv .venv
+          .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
       - name: Dependency audit (pip-audit)
@@ -162,18 +176,27 @@ jobs:
       - name: Install dependencies
         run: |
           python -m venv .venv
+          .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
       - name: Run tests
+        # Scope explicitly to tests/unit/. Without this, pytest's default
+        # collection sweeps in tests/integration/ which includes
+        # test_docker_compose_startup.py and test_docker_compose_services.py
+        # — both require a live docker daemon and the full compose stack
+        # to be running, which this CI worker does not provide. Those
+        # belong in a separate integration job (or `make install-smoke`).
+        # The local `make test-unit` and `make verify` already use this
+        # same scope; this brings CI into parity.
         run: |
-          .venv/bin/python -m pytest \
+          .venv/bin/python -m pytest tests/unit/ \
             --tb=short -q \
             --cov=services --cov=libs \
             --cov-report=xml \
             --cov-report=term-missing
 
       - name: Coverage gate (≥80%)
-        run: .venv/bin/python -m pytest --cov=services --cov=libs --cov-fail-under=80 --tb=no -q
+        run: .venv/bin/python -m pytest tests/unit/ --cov=services --cov=libs --cov-fail-under=80 --tb=no -q
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -228,6 +251,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m venv .venv
+          .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
       - name: Round-trip migration validation (upgrade → downgrade → upgrade)
