@@ -79,6 +79,17 @@ httpx==0.27.2
 # --- Dev tools ---
 ruff==0.15.10
 mypy==1.20.1
+# Type stubs that mypy needs to resolve `import requests` / `import yaml`
+# in our codebase (slack/pagerduty notification providers, compose
+# validators). Without these, CI's Code Quality job emits
+# `Library stubs not installed for requests` errors on the
+# slack_notification_provider / pagerduty_notification_provider modules
+# whose `# type: ignore[import-untyped]` comments were removed in
+# commit a3accd9 once stubs landed locally. Living in requirements.txt
+# (not requirements-dev.txt) so the CI quality job picks them up
+# alongside mypy itself.
+types-requests>=2.31
+types-PyYAML>=6.0
 pip-audit==2.10.0
 bandit==1.9.4
 nodeenv==1.10.0
