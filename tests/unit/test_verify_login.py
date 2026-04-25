@@ -25,7 +25,6 @@ from sqlalchemy.pool import StaticPool
 
 from libs.contracts.models import Base, User
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -45,9 +44,7 @@ def _make_user(
     return User(
         id=str(_ulid_mod.ULID()),
         email=email,
-        hashed_password=bcrypt.hashpw(
-            password.encode("utf-8"), bcrypt.gensalt()
-        ).decode("utf-8"),
+        hashed_password=bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
         role=role,
         is_active=is_active,
     )

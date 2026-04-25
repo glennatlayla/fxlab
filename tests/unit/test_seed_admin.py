@@ -24,12 +24,11 @@ from unittest.mock import MagicMock, patch
 
 import bcrypt
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from libs.contracts.models import Base, User
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -274,7 +273,9 @@ class TestCLIEntrypoint:
         """main() returns 0 when seed is skipped (idempotent, not an error)."""
         from services.api.cli.seed_admin import main
 
-        with patch("services.api.cli.seed_admin._create_session", return_value=db_session_with_user):
+        with patch(
+            "services.api.cli.seed_admin._create_session", return_value=db_session_with_user
+        ):
             exit_code = main(argv=[])
 
         assert exit_code == 0

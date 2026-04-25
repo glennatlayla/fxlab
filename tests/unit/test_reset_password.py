@@ -28,7 +28,6 @@ from sqlalchemy.pool import StaticPool
 
 from libs.contracts.models import Base, User
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

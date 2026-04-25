@@ -46,8 +46,9 @@ class TestRoleScopes:
     """ROLE_SCOPES mapping is complete and consistent."""
 
     def test_admin_has_all_scopes(self):
-        """Admin role includes all Phase 3 + Phase 4 deployment + Phase 6 live + Phase 7 operator + compliance scopes."""
-        assert len(ROLE_SCOPES["admin"]) == 16
+        """Admin role includes all Phase 3 + Phase 4 deployment + Phase 6 live + Phase 7 operator + compliance scopes, plus admin:manage (Tranche L)."""
+        assert len(ROLE_SCOPES["admin"]) == 17
+        assert "admin:manage" in ROLE_SCOPES["admin"]
 
     def test_operator_cannot_approve(self):
         """Operator role does not include approval scopes."""
