@@ -16,6 +16,7 @@ Hierarchy:
     │   └── RiskGateRejectionError — order blocked by risk gate
     ├── NotFoundError          — resource does not exist
     ├── SeparationOfDutiesError — submitter == reviewer on governance action
+    ├── StrategyNameConflictError — clone target name already exists (409)
     ├── AuthError              — authentication / authorisation failure
     ├── ExternalServiceError   — downstream API / DB failure
     │   ├── TransientError     — retriable subset
@@ -46,6 +47,34 @@ class SeparationOfDutiesError(FXLabError):
     by the same user who submitted the request.  Maps to HTTP 409 Conflict
     at the controller layer.
     """
+
+
+class StrategyNameConflictError(FXLabError):
+    """
+    A strategy with the requested name already exists.
+
+    Raised by ``StrategyService.clone_strategy`` (and any future write
+    path that needs name-uniqueness semantics) when the operator-supplied
+    ``new_name`` collides with an existing active strategy. Maps to
+    HTTP 409 Conflict at the controller layer.
+
+    The ``strategies.name`` column does not carry a database-level
+    UNIQUE constraint (see :class:`libs.contracts.models.Strategy`), so
+    the check is enforced at the service layer using a case-insensitive
+    name lookup against the repository. This means a tight race between
+    two concurrent clones with the same ``new_name`` could in principle
+    let both succeed; that risk is bounded because the clone surface is
+    operator-driven (a single human clicking a button), and the name
+    collision will be visible immediately on the next list refresh.
+
+    Attributes:
+        name: The conflicting strategy name (case-preserved as supplied
+            by the caller, for inclusion in the error response body).
+    """
+
+    def __init__(self, message: str, *, name: str = "") -> None:
+        super().__init__(message)
+        self.name = name
 
 
 class AuthError(FXLabError):

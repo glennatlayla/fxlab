@@ -110,6 +110,52 @@ class StrategyServiceInterface(ABC):
         """
 
     @abstractmethod
+    def clone_strategy(
+        self,
+        source_id: str,
+        *,
+        new_name: str,
+        requested_by: str,
+    ) -> dict[str, Any]:
+        """
+        Duplicate an existing strategy under a new name (POST /clone).
+
+        The clone is a structural copy of the source's persisted ``code``
+        body — the parsed JSON is round-tripped through
+        ``json.loads``/``json.dumps`` so the clone never aliases the
+        source's in-memory dict. Identity flags that anchor the clone to
+        its source are preserved (``source`` provenance,
+        ``version``); identity fields that must be unique per row are
+        regenerated (``id``, ``created_at``, ``updated_at``,
+        ``row_version=1``). Run history, deployments, and approvals are
+        deliberately NOT copied — they belong to the source row.
+
+        Args:
+            source_id: ULID of the strategy to clone.
+            new_name: Display name for the clone. Must be non-empty,
+                ≤255 characters (matches the ``Strategy.name`` column),
+                and unique (case-insensitive) within the strategies
+                catalogue.
+            requested_by: ULID of the user performing the clone — recorded
+                as the clone's ``created_by`` so audit history attributes
+                ownership to the operator who clicked the button rather
+                than the source's original author.
+
+        Returns:
+            Dict representation of the persisted clone (same shape as
+            ``create_strategy``'s ``strategy`` field).
+
+        Raises:
+            NotFoundError: If ``source_id`` does not resolve to an
+                existing strategy.
+            ValidationError: If ``new_name`` is empty, whitespace-only,
+                or longer than 255 characters.
+            StrategyNameConflictError: If a strategy with ``new_name``
+                (case-insensitive) already exists. Maps to HTTP 409 at
+                the controller layer.
+        """
+
+    @abstractmethod
     def get_strategy(self, strategy_id: str) -> dict[str, Any]:
         """
         Retrieve a strategy by ID.
