@@ -348,6 +348,29 @@ clean:  ## Remove build artefacts and caches
 verify: format-check lint test-unit compose-check  ## Run local pre-commit gate (safe for Claude to invoke autonomously)
 
 # ---------------------------------------------------------------------------
+# Strategy backtest (CLI, synthetic data — Oanda-blocked path bypassed)
+# ---------------------------------------------------------------------------
+# Until Oanda fxpractice creds are wired, every IR in Strategy Repo/ can be
+# backtested against deterministic synthetic FX bars. Override IR=, START=,
+# END=, SEED= as needed. The result blotter lands in /tmp/blotter.json.
+#
+# When Oanda creds arrive, services/cli/run_synthetic_backtest.py swaps two
+# constructor args (synthetic -> Oanda); this target's invocation stays the
+# same, so muscle memory carries over.
+backtest: IR ?= Strategy Repo/fxlab_kathy_lien_public_strategy_pack/FX_DoubleBollinger_TrendZone.strategy_ir.json
+backtest: START ?= 2026-01-01
+backtest: END ?= 2026-04-01
+backtest: SEED ?= 42
+backtest: OUTPUT ?= /tmp/blotter.json
+backtest:  ## Run a strategy backtest against synthetic FX data (override IR=, START=, END=, SEED=, OUTPUT=)
+	$(PYTHON) -m services.cli.run_synthetic_backtest \
+		--ir "$(IR)" \
+		--start "$(START)" \
+		--end "$(END)" \
+		--seed "$(SEED)" \
+		--output "$(OUTPUT)"
+
+# ---------------------------------------------------------------------------
 # minitux read-only diagnostics
 # ---------------------------------------------------------------------------
 # Prerequisites: the operator must have an SSH alias for the minitux

@@ -28,6 +28,32 @@ cp .env.example .env    # copy environment config (one-time)
 
 `make bootstrap` is idempotent — re-running on an already-bootstrapped clone is safe and skips work that is already done. It is the canonical setup path; the manual `python3 -m venv .venv` / `pip install` recipe still works but is no longer the recommended starting point. Node.js is installed into the venv by nodeenv (no system Node install required).
 
+## Running a Strategy Backtest (CLI, synthetic data)
+
+Until Oanda fxpractice creds are wired, every strategy in
+`Strategy Repo/` can be backtested against deterministic synthetic
+FX bars:
+
+```bash
+.venv/bin/python -m services.cli.run_synthetic_backtest \
+    --ir "Strategy Repo/fxlab_kathy_lien_public_strategy_pack/FX_DoubleBollinger_TrendZone.strategy_ir.json" \
+    --start 2026-01-01 --end 2026-04-01 --seed 42 \
+    --output /tmp/blotter.json
+```
+
+- `--seed`: deterministic. Same IR + same window + same seed = byte-identical blotter.
+- `--output`: JSON file with one entry per trade (entry/exit times,
+  prices, side, units, realized PnL).
+- Stdout: summary (total trades, win rate, total return, Sharpe).
+
+Synthetic provider (`libs/strategy_ir/synthetic_market_data_provider.py`)
+emits seeded GBM bars for the 7 FX majors across timeframes
+{15m, 1h, 4h, 1d}. The CLI uses `PaperBrokerAdapter`
+(`libs/strategy_ir/paper_broker_adapter.py`) for fully simulated
+fills. When Oanda creds land, the constructor args swap to
+`OandaMarketDataProvider` + `OandaBrokerAdapter` — no other code
+changes.
+
 ## Running Tests
 
 ```bash

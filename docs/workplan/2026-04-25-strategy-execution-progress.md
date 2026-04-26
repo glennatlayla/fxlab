@@ -69,11 +69,27 @@ Track B integration commit (default_registry wiring): `d11c83c`.
 
 ## Cross-track integration gates
 
-| ID     | Milestone                                  | Status      | Commit | Owner |
-|--------|--------------------------------------------|-------------|--------|-------|
-| M3.X1  | Single-strategy CLI backtest end-to-end    | NOT_STARTED |        |       |
-| M3.X1.5| Single Engine Mode Parity Test             | NOT_STARTED |        |       |
-| M3.X2  | Five strategies via UI (final acceptance)  | NOT_STARTED |        |       |
+| ID     | Milestone                                  | Status                   | Commit  | Owner       |
+|--------|--------------------------------------------|--------------------------|---------|-------------|
+| M3.X1  | Single-strategy CLI backtest end-to-end    | DONE (synthetic variant) | e4e483d | orchestrator |
+| M3.X1.5| Single Engine Mode Parity Test             | OANDA-BLOCKED            |         |             |
+| M3.X2  | Five strategies via UI (final acceptance)  | OANDA-BLOCKED            |         |             |
+
+M3.X1 was originally specified to use Oanda data; the synthetic-data
+variant ships in commit `e4e483d` (`services/cli/run_synthetic_backtest.py`).
+When Oanda lands, the same CLI re-runs against the real provider —
+two constructor swaps, no other changes.
+
+## M5 stretch tranches (workplan default 4)
+
+The v2.1 workplan permits M5 stretch tranches to ship if the 25-milestone
+floor completes with budget remaining. With 19/19 non-Oanda milestones
+done, the budget was there.
+
+| ID         | Milestone              | Status | Commit  | Owner       |
+|------------|------------------------|--------|---------|-------------|
+| M5-stretch | PaperBrokerAdapter     | DONE   | c3e926a | orchestrator |
+| M5-stretch | SyntheticFxMarketData  | DONE   | aeec17b | orchestrator |
 
 ---
 
