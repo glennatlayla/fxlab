@@ -107,10 +107,22 @@ _TERMINAL_STATUSES = frozenset(
 )
 
 # Valid state transitions — guards against illegal jumps.
+#
+# RUNNING -> CANCELLED is permitted so the operator-driven cancellation
+# flow (POST /runs/{id}/cancel) can persist a terminal CANCELLED row even
+# when the executor task is mid-execution. The pool aborts the in-flight
+# asyncio task before the status write so we never race against a worker
+# that is still updating the same row.
 VALID_STATUS_TRANSITIONS: dict[ResearchRunStatus, frozenset[ResearchRunStatus]] = {
     ResearchRunStatus.PENDING: frozenset({ResearchRunStatus.QUEUED, ResearchRunStatus.CANCELLED}),
     ResearchRunStatus.QUEUED: frozenset({ResearchRunStatus.RUNNING, ResearchRunStatus.CANCELLED}),
-    ResearchRunStatus.RUNNING: frozenset({ResearchRunStatus.COMPLETED, ResearchRunStatus.FAILED}),
+    ResearchRunStatus.RUNNING: frozenset(
+        {
+            ResearchRunStatus.COMPLETED,
+            ResearchRunStatus.FAILED,
+            ResearchRunStatus.CANCELLED,
+        }
+    ),
     ResearchRunStatus.COMPLETED: frozenset(),
     ResearchRunStatus.FAILED: frozenset(),
     ResearchRunStatus.CANCELLED: frozenset(),

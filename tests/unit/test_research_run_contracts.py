@@ -102,9 +102,10 @@ class TestResearchRunStatus:
     def test_valid_transitions_from_running(self) -> None:
         assert validate_status_transition(ResearchRunStatus.RUNNING, ResearchRunStatus.COMPLETED)
         assert validate_status_transition(ResearchRunStatus.RUNNING, ResearchRunStatus.FAILED)
-        assert not validate_status_transition(
-            ResearchRunStatus.RUNNING, ResearchRunStatus.CANCELLED
-        )
+        # RUNNING -> CANCELLED is the operator-driven cancellation path used
+        # by POST /runs/{id}/cancel; the executor pool aborts the in-flight
+        # task and the service writes the terminal CANCELLED row.
+        assert validate_status_transition(ResearchRunStatus.RUNNING, ResearchRunStatus.CANCELLED)
 
     def test_terminal_states_have_no_transitions(self) -> None:
         for terminal in (
