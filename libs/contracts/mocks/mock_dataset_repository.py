@@ -106,6 +106,38 @@ class MockDatasetRepository(DatasetRepositoryInterface):
         """Return every registered ``dataset_ref``, sorted."""
         return sorted(self._store.keys())
 
+    def list_paged(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        source: str | None = None,
+        is_certified: bool | None = None,
+        q: str | None = None,
+    ) -> tuple[list[DatasetRecord], int]:
+        """
+        Return a paginated slice of the in-memory store + total count.
+
+        Filters compose: ``source``, ``is_certified``, and ``q`` are
+        applied before pagination. ``q`` is a case-insensitive substring
+        match against ``dataset_ref``. Results are sorted by
+        ``dataset_ref`` ascending so test assertions are deterministic.
+        """
+        rows = [self._store[ref] for ref in sorted(self._store.keys())]
+        if source is not None:
+            rows = [r for r in rows if r.source == source]
+        if is_certified is not None:
+            rows = [r for r in rows if bool(r.is_certified) is bool(is_certified)]
+        if q is not None and q.strip():
+            needle = q.strip().lower()
+            rows = [r for r in rows if needle in r.dataset_ref.lower()]
+        total = len(rows)
+        # Defensive bounds — pagination params are validated upstream
+        # but the mock should not crash if a test passes negative values.
+        start = max(0, offset)
+        end = start + max(0, limit)
+        return rows[start:end], total
+
     # ------------------------------------------------------------------
     # Test introspection helpers
     # ------------------------------------------------------------------

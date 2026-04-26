@@ -43,7 +43,7 @@ from datetime import datetime
 from typing import cast
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -240,6 +240,70 @@ class SqlDatasetRepository(DatasetRepositoryInterface):
             raise DatasetRepositoryError("Failed to list dataset refs") from exc
 
         return refs
+
+    def list_paged(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        source: str | None = None,
+        is_certified: bool | None = None,
+        q: str | None = None,
+    ) -> tuple[list[DatasetRecord], int]:
+        """
+        Return one page of catalog rows + the total filtered count.
+
+        Filters are applied as SQL WHERE clauses so the database does
+        the work — never load the whole catalog and slice in Python.
+        Sort order is ``dataset_ref ASC`` so the alphabetical view stays
+        stable across page boundaries.
+
+        Args:
+            limit: Page size.
+            offset: Rows to skip (page index * page size).
+            source: Optional exact-match filter on ``Dataset.source``.
+            is_certified: Optional exact-match filter on the boolean
+                column.
+            q: Optional case-insensitive ILIKE substring search on
+                ``Dataset.dataset_ref``.
+
+        Returns:
+            ``(rows, total_count)``.
+
+        Raises:
+            DatasetRepositoryError: On driver failure.
+        """
+        try:
+            base = select(Dataset)
+            if source is not None:
+                base = base.where(Dataset.source == source)
+            if is_certified is not None:
+                base = base.where(Dataset.is_certified == is_certified)
+            if q is not None and q.strip():
+                # ``ilike`` is portable across Postgres + SQLite (SQLite
+                # treats ``ilike`` as ``like`` with case-insensitive
+                # default collation, which matches the contract).
+                needle = f"%{q.strip().lower()}%"
+                base = base.where(func.lower(Dataset.dataset_ref).like(needle))
+
+            # Total count subquery — counts the FILTERED set, ignoring
+            # limit/offset, so the UI knows how many pages exist.
+            count_stmt = select(func.count()).select_from(base.subquery())
+            total = int(self._db.execute(count_stmt).scalar_one())
+
+            page_stmt = base.order_by(Dataset.dataset_ref.asc()).limit(limit).offset(offset)
+            rows = list(self._db.execute(page_stmt).scalars().all())
+        except SQLAlchemyError as exc:
+            logger.error(
+                "dataset_repository.list_paged.failed",
+                component="SqlDatasetRepository",
+                operation="list_paged",
+                error=str(exc),
+                exc_info=True,
+            )
+            raise DatasetRepositoryError("Failed to list paged datasets") from exc
+
+        return [_to_record(r) for r in rows], total
 
 
 # ---------------------------------------------------------------------------

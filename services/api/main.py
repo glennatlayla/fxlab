@@ -50,6 +50,7 @@ from services.api.routes import (
     compliance,
     data_certification,
     data_quality,
+    datasets,
     deployments,
     drills,
     execution_analysis,
@@ -1476,6 +1477,15 @@ async def lifespan(app: FastAPI):
                 dataset_resolver = CatalogBackedResolver(dataset_service)
                 set_dataset_resolver(dataset_resolver)
 
+                # M4.E3 admin endpoints share the same DatasetService
+                # instance — the route layer reads through the same
+                # request-scoped session.
+                from services.api.routes.datasets import (
+                    set_dataset_service as set_admin_dataset_service,
+                )
+
+                set_admin_dataset_service(dataset_service)
+
                 app.state.research_run_db_session = db_session_research
                 app.state.research_run_service = research_run_service
                 app.state.dataset_db_session = db_session_dataset
@@ -1762,6 +1772,7 @@ app.include_router(feed_health.router)
 app.include_router(feeds.router)  # M6: Feed Registry + Versioned Config
 app.include_router(artifacts.router)  # M5: Artifact Registry + Storage Abstraction
 app.include_router(admin.router)  # M14-T8b: Admin panel (secrets + Keycloak user mgmt)
+app.include_router(datasets.router)  # M4.E3: Dataset catalog admin browse + register
 app.include_router(
     deployments.router, prefix="/deployments", tags=["deployments"]
 )  # Phase 4 M2: Deployment State Machine

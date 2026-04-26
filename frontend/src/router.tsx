@@ -82,6 +82,9 @@ const AdminLayout = lazy(() => import("./pages/Admin/AdminLayout"));
 const UserManagement = lazy(() => import("./pages/Admin/UserManagement"));
 const SecretManagement = lazy(() => import("./pages/Admin/SecretManagement"));
 
+// Dataset catalog admin browse + register (M4.E3)
+const Datasets = lazy(() => import("./pages/Datasets"));
+
 // Mobile navigation pages (FE-01, FE-02)
 const Emergency = lazy(() => import("./pages/Emergency"));
 const Alerts = lazy(() => import("./pages/Alerts"));
@@ -376,6 +379,15 @@ export const router = createBrowserRouter(
               element: (
                 <Suspense fallback={<PageLoadingFallback />}>
                   <SecretManagement />
+                </Suspense>
+              ),
+            },
+            // Dataset catalog (M4.E3) — admin sub-tree.
+            {
+              path: "datasets",
+              element: (
+                <Suspense fallback={<PageLoadingFallback />}>
+                  <Datasets />
                 </Suspense>
               ),
             },

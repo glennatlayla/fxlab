@@ -56,6 +56,7 @@ from __future__ import annotations
 import structlog
 import ulid
 
+from libs.contracts.dataset import DatasetListItem, PagedDatasets
 from libs.contracts.interfaces.dataset_repository_interface import (
     DatasetRecord,
     DatasetRepositoryInterface,
@@ -236,6 +237,184 @@ class DatasetService(DatasetServiceInterface):
             return False
         return bool(record.is_certified)
 
+    def list_paged(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        source_filter: str | None = None,
+        is_certified: bool | None = None,
+        q: str | None = None,
+    ) -> PagedDatasets:
+        """
+        Return one page of catalog rows as a :class:`PagedDatasets`
+        envelope (M4.E3 admin browse).
+
+        Translates 1-based ``page`` into ``offset`` for the repository,
+        delegates the SQL work, then projects the storage-layer
+        :class:`DatasetRecord` instances into the wire-shape
+        :class:`DatasetListItem`.
+
+        Args:
+            page: 1-based page index (validated by the route layer's
+                ``ge=1`` query parameter).
+            page_size: Datasets per page (validated by the route).
+            source_filter: Optional exact-match filter on ``source``.
+            is_certified: Optional certification flag filter.
+            q: Optional case-insensitive substring search on
+                ``dataset_ref``.
+
+        Returns:
+            :class:`PagedDatasets` ready for JSON serialisation.
+        """
+        offset = max(0, (page - 1) * page_size)
+        records, total_count = self._repo.list_paged(
+            limit=page_size,
+            offset=offset,
+            source=source_filter,
+            is_certified=is_certified,
+            q=q,
+        )
+
+        items = [_to_list_item(r) for r in records]
+        # ceil(total / page_size) without importing math.
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        result = PagedDatasets(
+            datasets=items,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=total_pages,
+        )
+
+        logger.debug(
+            "dataset_service.list_paged.completed",
+            component="DatasetService",
+            operation="list_paged",
+            page=page,
+            page_size=page_size,
+            returned=len(items),
+            total_count=total_count,
+            source_filter=source_filter,
+            is_certified=is_certified,
+            q=q,
+        )
+
+        return result
+
+    def get_record(self, dataset_ref: str) -> DatasetListItem:
+        """
+        Return the full catalog row as a wire-shape :class:`DatasetListItem`.
+
+        Used by the admin endpoints that need the full metadata
+        (timeframe, source, version, timestamps).
+
+        Raises:
+            DatasetNotFoundError: If ``dataset_ref`` is not registered.
+        """
+        if not dataset_ref:
+            raise DatasetNotFoundError(dataset_ref)
+        record = self._repo.find_by_ref(dataset_ref)
+        if record is None:
+            raise DatasetNotFoundError(dataset_ref)
+        return _to_list_item(record)
+
+    def update_version(self, dataset_ref: str, *, version: str) -> None:
+        """
+        Update the ``version`` string on an existing dataset row.
+
+        Preserves every other field. The row must already exist.
+
+        Raises:
+            DatasetNotFoundError: If the reference is not registered.
+            ValueError: If ``version`` is empty.
+        """
+        if not dataset_ref:
+            raise DatasetNotFoundError(dataset_ref)
+        if not version:
+            raise ValueError("version must be non-empty")
+
+        existing = self._repo.find_by_ref(dataset_ref)
+        if existing is None:
+            logger.warning(
+                "dataset_service.update_version.miss",
+                component="DatasetService",
+                operation="update_version",
+                dataset_ref=dataset_ref,
+                result="not_found",
+            )
+            raise DatasetNotFoundError(dataset_ref)
+
+        updated = DatasetRecord(
+            id=existing.id,
+            dataset_ref=existing.dataset_ref,
+            symbols=list(existing.symbols),
+            timeframe=existing.timeframe,
+            source=existing.source,
+            version=version,
+            is_certified=bool(existing.is_certified),
+            created_by=existing.created_by,
+            created_at=existing.created_at,
+        )
+        self._repo.save(updated)
+
+        logger.info(
+            "dataset_service.update_version.succeeded",
+            component="DatasetService",
+            operation="update_version",
+            dataset_ref=dataset_ref,
+            version=version,
+            result="success",
+        )
+
+    def update_certification(self, dataset_ref: str, *, is_certified: bool) -> None:
+        """
+        Flip the certification flag on an existing dataset row.
+
+        Args:
+            dataset_ref: Catalog reference key. Must already exist.
+            is_certified: New value for the flag.
+
+        Raises:
+            DatasetNotFoundError: If the reference is not registered.
+        """
+        if not dataset_ref:
+            raise DatasetNotFoundError(dataset_ref)
+
+        existing = self._repo.find_by_ref(dataset_ref)
+        if existing is None:
+            logger.warning(
+                "dataset_service.update_certification.miss",
+                component="DatasetService",
+                operation="update_certification",
+                dataset_ref=dataset_ref,
+                result="not_found",
+            )
+            raise DatasetNotFoundError(dataset_ref)
+
+        updated = DatasetRecord(
+            id=existing.id,
+            dataset_ref=existing.dataset_ref,
+            symbols=list(existing.symbols),
+            timeframe=existing.timeframe,
+            source=existing.source,
+            version=existing.version,
+            is_certified=bool(is_certified),
+            created_by=existing.created_by,
+            created_at=existing.created_at,
+        )
+        self._repo.save(updated)
+
+        logger.info(
+            "dataset_service.update_certification.succeeded",
+            component="DatasetService",
+            operation="update_certification",
+            dataset_ref=dataset_ref,
+            is_certified=bool(is_certified),
+            result="success",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -254,6 +433,30 @@ def _to_resolved(record: DatasetRecord) -> ResolvedDataset:
         dataset_ref=record.dataset_ref,
         dataset_id=record.id,
         symbols=list(record.symbols),
+    )
+
+
+def _to_list_item(record: DatasetRecord) -> DatasetListItem:
+    """
+    Translate a storage :class:`DatasetRecord` into the wire-shape
+    :class:`DatasetListItem` returned by the M4.E3 admin browse
+    endpoint.
+
+    Timestamps are serialised via ``isoformat()`` so the JSON payload
+    carries ISO-8601 strings (Pydantic does not coerce ``datetime``
+    fields to strings on a ``str``-typed field, so we do it here).
+    """
+    return DatasetListItem(
+        id=record.id,
+        dataset_ref=record.dataset_ref,
+        symbols=list(record.symbols),
+        timeframe=record.timeframe,
+        source=record.source,
+        version=record.version,
+        is_certified=bool(record.is_certified),
+        created_by=record.created_by,
+        created_at=record.created_at.isoformat() if record.created_at else None,
+        updated_at=record.updated_at.isoformat() if record.updated_at else None,
     )
 
 

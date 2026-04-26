@@ -274,3 +274,239 @@ class TestIsCertified:
 
     def test_returns_false_for_empty_ref(self, service: DatasetService) -> None:
         assert service.is_certified("") is False
+
+
+# ---------------------------------------------------------------------------
+# list_paged
+# ---------------------------------------------------------------------------
+
+
+class TestListPaged:
+    def test_empty_catalog_returns_empty_envelope(
+        self,
+        service: DatasetService,
+    ) -> None:
+        page = service.list_paged(page=1, page_size=20)
+        assert page.datasets == []
+        assert page.total_count == 0
+        assert page.total_pages == 0
+        assert page.page == 1
+        assert page.page_size == 20
+
+    def test_returns_paged_slice_sorted_by_ref(
+        self,
+        service: DatasetService,
+    ) -> None:
+        for ref in ["z-ref", "a-ref", "m-ref"]:
+            service.register_dataset(
+                ref,
+                symbols=["X"],
+                timeframe="1d",
+                source="synthetic",
+                version="v1",
+            )
+        page = service.list_paged(page=1, page_size=20)
+        assert [d.dataset_ref for d in page.datasets] == ["a-ref", "m-ref", "z-ref"]
+        assert page.total_count == 3
+        assert page.total_pages == 1
+
+    def test_filters_by_source(
+        self,
+        service: DatasetService,
+    ) -> None:
+        service.register_dataset(
+            "a-ref",
+            symbols=["X"],
+            timeframe="1d",
+            source="oanda",
+            version="v1",
+        )
+        service.register_dataset(
+            "b-ref",
+            symbols=["Y"],
+            timeframe="1d",
+            source="alpaca",
+            version="v1",
+        )
+        page = service.list_paged(page=1, page_size=20, source_filter="oanda")
+        assert [d.dataset_ref for d in page.datasets] == ["a-ref"]
+        assert page.total_count == 1
+
+    def test_filters_by_certification(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo, dataset_ref="cert-ref", is_certified=True)
+        _seed(repo, dataset_ref="uncert-ref", is_certified=False)
+        page = service.list_paged(page=1, page_size=20, is_certified=True)
+        assert [d.dataset_ref for d in page.datasets] == ["cert-ref"]
+
+    def test_filters_by_q_substring(
+        self,
+        service: DatasetService,
+    ) -> None:
+        service.register_dataset(
+            "fx-eurusd-15m",
+            symbols=["EURUSD"],
+            timeframe="15m",
+            source="oanda",
+            version="v1",
+        )
+        service.register_dataset(
+            "fx-gbpusd-1h",
+            symbols=["GBPUSD"],
+            timeframe="1h",
+            source="oanda",
+            version="v1",
+        )
+        page = service.list_paged(page=1, page_size=20, q="EUR")
+        assert [d.dataset_ref for d in page.datasets] == ["fx-eurusd-15m"]
+        # Empty q returns everything (treated as unset).
+        page2 = service.list_paged(page=1, page_size=20, q="")
+        assert len(page2.datasets) == 2
+
+    def test_pagination_slices_correctly(
+        self,
+        service: DatasetService,
+    ) -> None:
+        for n in range(5):
+            service.register_dataset(
+                f"ref-{n}",
+                symbols=["X"],
+                timeframe="1d",
+                source="synthetic",
+                version="v1",
+            )
+        page1 = service.list_paged(page=1, page_size=2)
+        assert [d.dataset_ref for d in page1.datasets] == ["ref-0", "ref-1"]
+        assert page1.total_count == 5
+        assert page1.total_pages == 3
+        page3 = service.list_paged(page=3, page_size=2)
+        assert [d.dataset_ref for d in page3.datasets] == ["ref-4"]
+
+
+# ---------------------------------------------------------------------------
+# update_certification
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateCertification:
+    def test_flips_flag_to_true(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo, is_certified=False)
+        service.update_certification("fx-eurusd-15m-certified-v3", is_certified=True)
+        record = repo.find_by_ref("fx-eurusd-15m-certified-v3")
+        assert record is not None
+        assert record.is_certified is True
+
+    def test_flips_flag_to_false(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo, is_certified=True)
+        service.update_certification("fx-eurusd-15m-certified-v3", is_certified=False)
+        record = repo.find_by_ref("fx-eurusd-15m-certified-v3")
+        assert record is not None
+        assert record.is_certified is False
+
+    def test_unknown_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError):
+            service.update_certification("never-registered", is_certified=True)
+
+    def test_empty_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError):
+            service.update_certification("", is_certified=True)
+
+
+# ---------------------------------------------------------------------------
+# update_version
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateVersion:
+    def test_updates_version_in_place(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        service.update_version("fx-eurusd-15m-certified-v3", version="v9")
+        record = repo.find_by_ref("fx-eurusd-15m-certified-v3")
+        assert record is not None
+        assert record.version == "v9"
+
+    def test_preserves_other_fields(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        seeded = _seed(repo, is_certified=True)
+        service.update_version("fx-eurusd-15m-certified-v3", version="v9")
+        record = repo.find_by_ref("fx-eurusd-15m-certified-v3")
+        assert record is not None
+        assert record.is_certified is True
+        assert record.symbols == seeded.symbols
+        assert record.timeframe == seeded.timeframe
+        assert record.source == seeded.source
+
+    def test_unknown_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError):
+            service.update_version("never-registered", version="v1")
+
+    def test_empty_version_raises_value_error(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        with pytest.raises(ValueError):
+            service.update_version("fx-eurusd-15m-certified-v3", version="")
+
+
+# ---------------------------------------------------------------------------
+# get_record
+# ---------------------------------------------------------------------------
+
+
+class TestGetRecord:
+    def test_returns_full_metadata(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo, is_certified=True)
+        item = service.get_record("fx-eurusd-15m-certified-v3")
+        assert item.dataset_ref == "fx-eurusd-15m-certified-v3"
+        assert item.timeframe == "15m"
+        assert item.source == "synthetic"
+        assert item.version == "v3"
+        assert item.is_certified is True
+        assert item.symbols == ["EURUSD"]
+
+    def test_unknown_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError):
+            service.get_record("never-registered")
+
+    def test_empty_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError):
+            service.get_record("")

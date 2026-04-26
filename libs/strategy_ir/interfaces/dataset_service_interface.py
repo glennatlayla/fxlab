@@ -88,6 +88,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from libs.contracts.dataset import DatasetListItem, PagedDatasets
 from libs.strategy_ir.interfaces.dataset_resolver_interface import (
     DatasetNotFoundError,
     ResolvedDataset,
@@ -193,9 +194,97 @@ class DatasetServiceInterface(Protocol):
         """
         ...
 
+    def list_paged(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        source_filter: str | None = None,
+        is_certified: bool | None = None,
+        q: str | None = None,
+    ) -> PagedDatasets:
+        """
+        Return one page of catalog rows wrapped in a :class:`PagedDatasets`
+        envelope.
+
+        Used by the M4.E3 admin browse endpoint to drive the catalogue
+        table. Filters compose: every non-None argument narrows the
+        result set. Pagination is 1-based to match the strategies
+        endpoint and the UI's pagination component.
+
+        Args:
+            page: 1-based page index.
+            page_size: Datasets per page.
+            source_filter: Optional exact-match filter on ``source``.
+            is_certified: Optional exact-match filter on the certification
+                flag.
+            q: Optional case-insensitive substring search on
+                ``dataset_ref``.
+
+        Returns:
+            :class:`PagedDatasets` envelope ready for JSON serialisation.
+        """
+        ...
+
+    def update_certification(self, dataset_ref: str, *, is_certified: bool) -> None:
+        """
+        Flip the ``is_certified`` flag on an existing dataset row.
+
+        Used by the admin "Toggle certification" action. The row must
+        already exist; callers that want to register a new dataset must
+        call :meth:`register_dataset` first.
+
+        Args:
+            dataset_ref: Catalog reference key of the row to update.
+            is_certified: New certification flag value.
+
+        Raises:
+            DatasetNotFoundError: If the reference is not registered.
+        """
+        ...
+
+    def get_record(self, dataset_ref: str) -> DatasetListItem:
+        """
+        Return the full catalog row for ``dataset_ref`` as a wire-shape
+        :class:`DatasetListItem`.
+
+        Used by the admin endpoints that need to render the row's full
+        metadata (timeframe, source, version, timestamps) — fields that
+        the engine-facing :meth:`lookup` deliberately omits.
+
+        Args:
+            dataset_ref: Catalog reference key.
+
+        Returns:
+            :class:`DatasetListItem` populated from the catalog row.
+
+        Raises:
+            DatasetNotFoundError: If the reference is not registered.
+        """
+        ...
+
+    def update_version(self, dataset_ref: str, *, version: str) -> None:
+        """
+        Update the ``version`` string on an existing dataset row.
+
+        Preserves all other fields (symbols, timeframe, source,
+        is_certified, created_by). The row must already exist.
+
+        Args:
+            dataset_ref: Catalog reference key.
+            version: New non-empty version string.
+
+        Raises:
+            DatasetNotFoundError: If the reference is not registered.
+            ValueError: If ``version`` is empty.
+        """
+        ...
+
 
 __all__ = [
+    "DatasetListItem",
     "DatasetNotFoundError",
     "DatasetServiceInterface",
+    "PagedDatasets",
     "ResolvedDataset",
 ]

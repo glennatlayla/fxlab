@@ -27,6 +27,7 @@ import {
   ClipboardList,
   ListChecks,
   Package,
+  Database,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { useAuth } from "@/auth/useAuth";
@@ -94,6 +95,18 @@ const NAV_SECTIONS: { heading: string; items: NavItem[] }[] = [
         requiredScope: "overrides:approve",
       },
       { label: "Audit", to: "/audit", icon: ClipboardList, requiredScope: "audit:read" },
+    ],
+  },
+  {
+    heading: "Admin",
+    items: [
+      // M4.E3: Dataset catalog admin browse + register page.
+      {
+        label: "Datasets",
+        to: "/admin/datasets",
+        icon: Database,
+        requiredScope: "admin:manage",
+      },
     ],
   },
 ];

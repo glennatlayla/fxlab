@@ -240,3 +240,97 @@ def test_list_known_refs_wraps_driver_error(db_session: Session) -> None:
     ):
         with pytest.raises(DatasetRepositoryError):
             repo.list_known_refs()
+
+
+# ---------------------------------------------------------------------------
+# list_paged
+# ---------------------------------------------------------------------------
+
+
+def _seed_three(repo: SqlDatasetRepository) -> None:
+    """Seed three rows with varied source / certification / refs."""
+    repo.save(
+        _make_record(
+            id_="01HD0000000000000000000001",
+            dataset_ref="a-eurusd",
+            symbols=["EURUSD"],
+            source="oanda",
+            is_certified=True,
+        )
+    )
+    repo.save(
+        _make_record(
+            id_="01HD0000000000000000000002",
+            dataset_ref="b-gbpusd",
+            symbols=["GBPUSD"],
+            source="alpaca",
+            is_certified=False,
+        )
+    )
+    repo.save(
+        _make_record(
+            id_="01HD0000000000000000000003",
+            dataset_ref="c-usdjpy",
+            symbols=["USDJPY"],
+            source="oanda",
+            is_certified=False,
+        )
+    )
+
+
+def test_list_paged_returns_sorted_slice_with_total(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    _seed_three(repo)
+    rows, total = repo.list_paged(limit=2, offset=0)
+    assert [r.dataset_ref for r in rows] == ["a-eurusd", "b-gbpusd"]
+    assert total == 3
+
+
+def test_list_paged_offset_advances_correctly(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    _seed_three(repo)
+    rows, total = repo.list_paged(limit=2, offset=2)
+    assert [r.dataset_ref for r in rows] == ["c-usdjpy"]
+    assert total == 3
+
+
+def test_list_paged_filters_by_source(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    _seed_three(repo)
+    rows, total = repo.list_paged(limit=10, offset=0, source="oanda")
+    assert {r.dataset_ref for r in rows} == {"a-eurusd", "c-usdjpy"}
+    assert total == 2
+
+
+def test_list_paged_filters_by_is_certified(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    _seed_three(repo)
+    rows, total = repo.list_paged(limit=10, offset=0, is_certified=True)
+    assert [r.dataset_ref for r in rows] == ["a-eurusd"]
+    assert total == 1
+
+
+def test_list_paged_filters_by_q_substring(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    _seed_three(repo)
+    rows, total = repo.list_paged(limit=10, offset=0, q="usdjpy")
+    assert [r.dataset_ref for r in rows] == ["c-usdjpy"]
+    assert total == 1
+
+
+def test_list_paged_empty_returns_empty_with_zero_total(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    rows, total = repo.list_paged(limit=10, offset=0)
+    assert rows == []
+    assert total == 0
+
+
+def test_list_paged_wraps_driver_error(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    with patch.object(
+        db_session,
+        "execute",
+        side_effect=OperationalError("stmt", {}, Exception("db gone")),
+    ):
+        with pytest.raises(DatasetRepositoryError):
+            repo.list_paged(limit=10, offset=0)

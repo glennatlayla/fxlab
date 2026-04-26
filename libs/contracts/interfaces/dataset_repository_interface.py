@@ -177,6 +177,41 @@ class DatasetRepositoryInterface(ABC):
         """
         ...
 
+    @abstractmethod
+    def list_paged(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        source: str | None = None,
+        is_certified: bool | None = None,
+        q: str | None = None,
+    ) -> tuple[list[DatasetRecord], int]:
+        """
+        Return a single page of catalog rows + the total filtered count.
+
+        Used by the admin browse endpoint. The optional filters compose:
+        every non-None argument narrows the result set further.
+
+        Args:
+            limit: Maximum rows to return (page size).
+            offset: Number of rows to skip (page index * page size).
+            source: Optional exact-match filter on ``source``.
+            is_certified: Optional exact-match filter on ``is_certified``.
+            q: Optional case-insensitive substring search on
+                ``dataset_ref`` (the only human-readable identifier).
+
+        Returns:
+            Tuple ``(rows, total_count)`` where ``rows`` is the paginated
+            slice (sorted by ``dataset_ref`` ascending) and ``total_count``
+            is the total number of rows matching the filters (used by the
+            UI to compute total pages).
+
+        Raises:
+            DatasetRepositoryError: On driver failure.
+        """
+        ...
+
 
 __all__ = [
     "DatasetRecord",
