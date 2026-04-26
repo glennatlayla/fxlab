@@ -60,6 +60,8 @@ import { IrDetailView } from "@/components/strategy_studio/IrDetailView";
 import { RunBacktestModal } from "@/components/strategy_studio/RunBacktestModal";
 import {
   DEFAULT_STRATEGY_RUNS_PAGE_SIZE,
+  downloadStrategyIr,
+  DownloadIrError,
   getStrategy,
   getStrategyRuns,
   GetStrategyError,
@@ -586,6 +588,18 @@ export default function StrategyDetail() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  /**
+   * IR download lifecycle. ``isDownloading`` drives the disabled state on
+   * the button while the request is in flight; ``downloadStatus`` carries
+   * an inline success / error banner — same pattern the RunResults
+   * "Export blotter (CSV)" button uses, so the operator gets consistent
+   * feedback across the two download surfaces without pulling in a toast
+   * library at this layer.
+   */
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState<
+    { kind: "success"; message: string } | { kind: "error"; message: string } | null
+  >(null);
 
   useEffect(() => {
     if (!strategyId) {
@@ -627,6 +641,32 @@ export default function StrategyDetail() {
   const handleOpenModal = useCallback(() => setIsModalOpen(true), []);
   const handleCloseModal = useCallback(() => setIsModalOpen(false), []);
 
+  // Handle "Download IR (JSON)" click. Mirrors the RunResults
+  // exportBlotterCsv handler: disable the button while in flight, run
+  // the download (which spawns its own anchor + Blob URL inside the API
+  // helper), surface success or the typed error inline. The download
+  // helper itself owns the temporary anchor lifecycle so the page does
+  // not need to know about Blob URLs.
+  const handleDownloadIr = useCallback(async () => {
+    if (!strategy) return;
+    setIsDownloading(true);
+    setDownloadStatus(null);
+    try {
+      await downloadStrategyIr(strategy.id, strategy.name);
+      setDownloadStatus({ kind: "success", message: "IR downloaded." });
+    } catch (err) {
+      const message =
+        err instanceof DownloadIrError
+          ? err.detail ?? err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to download IR.";
+      setDownloadStatus({ kind: "error", message: `Download failed: ${message}` });
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [strategy]);
+
   if (isLoading) {
     return (
       <div className="space-y-6" data-testid="strategy-detail-loading">
@@ -664,21 +704,64 @@ export default function StrategyDetail() {
     <div className="space-y-6" data-testid="strategy-detail-page">
       <StrategyHeader strategy={strategy} />
 
-      <div className="flex items-center justify-end gap-3">
-        <button
-          type="button"
-          data-testid="execute-backtest-button"
-          onClick={handleOpenModal}
-          disabled={!canExecuteBacktest}
-          title={
-            canExecuteBacktest
-              ? "Submit a research run for this strategy"
-              : "Backtest is only available for IR-uploaded strategies."
-          }
-          className="inline-flex items-center rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-surface-300"
-        >
-          Execute backtest
-        </button>
+      <div className="flex flex-col items-end gap-2">
+        <div className="flex items-center justify-end gap-3">
+          {/*
+           * Download IR (JSON) — fetches /strategies/{id}/ir.json and
+           * triggers a browser download via the @/api/strategies
+           * downloadStrategyIr helper. Available on every strategy
+           * (the backend's get_strategy_ir_json falls back to a
+           * pretty-printed parsed_ir for legacy rows whose code is
+           * blank, so the download never 404's on a known strategy).
+           */}
+          <button
+            type="button"
+            data-testid="download-ir-button"
+            onClick={() => void handleDownloadIr()}
+            disabled={isDownloading}
+            title="Download the canonical Strategy IR JSON for off-line use"
+            className="inline-flex items-center gap-2 rounded-md border border-surface-300 bg-white px-3 py-1.5 text-sm font-medium text-surface-700 shadow-sm hover:bg-surface-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isDownloading ? (
+              <>
+                <span
+                  className="h-3 w-3 animate-spin rounded-full border-2 border-surface-400 border-t-transparent"
+                  aria-hidden="true"
+                  data-testid="download-ir-spinner"
+                />
+                Downloading…
+              </>
+            ) : (
+              "Download IR (JSON)"
+            )}
+          </button>
+          <button
+            type="button"
+            data-testid="execute-backtest-button"
+            onClick={handleOpenModal}
+            disabled={!canExecuteBacktest}
+            title={
+              canExecuteBacktest
+                ? "Submit a research run for this strategy"
+                : "Backtest is only available for IR-uploaded strategies."
+            }
+            className="inline-flex items-center rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-surface-300"
+          >
+            Execute backtest
+          </button>
+        </div>
+        {downloadStatus && (
+          <p
+            role={downloadStatus.kind === "error" ? "alert" : "status"}
+            data-testid="download-ir-status"
+            className={
+              "text-xs " +
+              (downloadStatus.kind === "success" ? "text-green-700" : "text-red-700")
+            }
+          >
+            {downloadStatus.message}
+          </p>
+        )}
       </div>
 
       {isIrUpload && strategy.parsed_ir ? (

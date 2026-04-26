@@ -26,19 +26,26 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { ImportIrPanel } from "./ImportIrPanel";
-import { importStrategyIr, ImportIrError } from "@/api/strategies";
+import {
+  importStrategyIr,
+  ImportIrError,
+  validateIr,
+  ValidateIrError,
+} from "@/api/strategies";
 
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
 
 vi.mock("@/api/strategies", async () => {
-  // Preserve the real ImportIrError class so `instanceof` checks in the
-  // component still work against a value the test produces.
+  // Preserve the real ImportIrError / ValidateIrError classes so
+  // `instanceof` checks in the component still work against a value
+  // the test produces.
   const actual = await vi.importActual<typeof import("@/api/strategies")>("@/api/strategies");
   return {
     ...actual,
     importStrategyIr: vi.fn(),
+    validateIr: vi.fn(),
   };
 });
 
@@ -52,6 +59,7 @@ vi.mock("react-router-dom", async () => {
 });
 
 const mockedImportStrategyIr = vi.mocked(importStrategyIr);
+const mockedValidateIr = vi.mocked(validateIr);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -205,5 +213,197 @@ describe("ImportIrPanel", () => {
     expect(screen.getByTestId("import-ir-error")).toHaveTextContent(/\.strategy_ir\.json/);
     expect(mockedImportStrategyIr).not.toHaveBeenCalled();
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("renders the Validate button disabled until a file is selected", () => {
+    renderPanel();
+    const validateButton = screen.getByTestId("import-ir-validate") as HTMLButtonElement;
+    expect(validateButton).toBeDisabled();
+  });
+
+  /**
+   * Helper that mocks the import path to fail with an inline error so
+   * the dropped file stays staged on the panel without navigation. We
+   * use a 400-class ImportIrError because that's the only shape the
+   * panel renders inline (anything else just shows a generic message).
+   *
+   * After this fixture fires, the panel is in the same observable
+   * state as a real operator who dropped a broken file: import
+   * attempted, rendered an error, file still staged, ready to
+   * validate.
+   */
+  function arrangeStagedAfterFailedImport(): void {
+    mockedImportStrategyIr.mockRejectedValue(
+      new ImportIrError("simulated import failure", 400, "simulated"),
+    );
+  }
+
+  it("renders a green panel when validateIr returns valid=true", async () => {
+    arrangeStagedAfterFailedImport();
+    mockedValidateIr.mockResolvedValueOnce({
+      valid: true,
+      parsed_ir: {
+        metadata: { strategy_name: "FX_DoubleBollinger_TrendZone" },
+        universe: { symbols: ["EUR_USD", "USD_JPY"] },
+      },
+      errors: [],
+      warnings: [],
+    });
+
+    renderPanel();
+    dropFileOn(screen.getByTestId("import-ir-dropzone"), makeIrFile());
+
+    // The drop's auto-import resolves to a 400 (inline error) so the
+    // file stays staged and the operator can click Validate.
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-selected-file")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("import-ir-validate"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-validate-success")).toBeInTheDocument();
+    });
+    const success = screen.getByTestId("import-ir-validate-success");
+    expect(success).toHaveTextContent(/IR is valid/i);
+    expect(success).toHaveTextContent(/FX_DoubleBollinger_TrendZone/);
+    expect(success).toHaveTextContent(/EUR_USD/);
+    expect(mockedValidateIr).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a red panel listing each issue when validateIr returns valid=false", async () => {
+    arrangeStagedAfterFailedImport();
+    mockedValidateIr.mockResolvedValueOnce({
+      valid: false,
+      parsed_ir: null,
+      errors: [
+        {
+          path: "/metadata/strategy_name",
+          code: "schema_violation",
+          message: "field required",
+        },
+        {
+          path: "/artifact_type",
+          code: "schema_violation",
+          message: "field required",
+        },
+      ],
+      warnings: [],
+    });
+
+    renderPanel();
+    dropFileOn(screen.getByTestId("import-ir-dropzone"), makeIrFile());
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-selected-file")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("import-ir-validate"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-validate-failure")).toBeInTheDocument();
+    });
+    const rows = screen.getAllByTestId("import-ir-validate-error-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("/metadata/strategy_name");
+    expect(rows[0]).toHaveTextContent("schema_violation");
+    expect(rows[0]).toHaveTextContent("field required");
+    expect(rows[1]).toHaveTextContent("/artifact_type");
+  });
+
+  it("renders warnings under a separate header when present", async () => {
+    arrangeStagedAfterFailedImport();
+    mockedValidateIr.mockResolvedValueOnce({
+      valid: false,
+      parsed_ir: null,
+      errors: [
+        {
+          path: "/",
+          code: "invalid_json",
+          message: "boom",
+        },
+      ],
+      warnings: [
+        {
+          path: "/data_requirements/dataset_ref",
+          code: "uncertified_dataset",
+          message: "Dataset is not certified.",
+        },
+      ],
+    });
+
+    renderPanel();
+    dropFileOn(screen.getByTestId("import-ir-dropzone"), makeIrFile());
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-selected-file")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("import-ir-validate"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-validate-warning-header")).toBeInTheDocument();
+    });
+    const warnRows = screen.getAllByTestId("import-ir-validate-warning-row");
+    expect(warnRows).toHaveLength(1);
+    expect(warnRows[0]).toHaveTextContent("uncertified_dataset");
+  });
+
+  it("disables Browse while Validate is in flight", async () => {
+    arrangeStagedAfterFailedImport();
+    // Make the validate request pend so we can observe the disabled state.
+    let resolveValidate: ((report: import("@/api/strategies").StrategyValidationReport) => void) =
+      () => {};
+    mockedValidateIr.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveValidate = resolve;
+        }),
+    );
+
+    renderPanel();
+    dropFileOn(screen.getByTestId("import-ir-dropzone"), makeIrFile());
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-selected-file")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("import-ir-validate"));
+
+    // While the validate promise is pending, the Browse button is
+    // disabled so the operator cannot trigger a concurrent upload that
+    // would compete with the in-flight validation.
+    const browse = screen.getByTestId("import-ir-browse") as HTMLButtonElement;
+    await waitFor(() => {
+      expect(browse).toBeDisabled();
+    });
+
+    // Resolve the validate so the test cleans up cleanly.
+    resolveValidate({ valid: true, parsed_ir: {}, errors: [], warnings: [] });
+  });
+
+  it("surfaces ValidateIrError detail inline when validateIr rejects", async () => {
+    arrangeStagedAfterFailedImport();
+    mockedValidateIr.mockRejectedValueOnce(
+      new ValidateIrError("validate failed", 401, "Unauthorized"),
+    );
+
+    renderPanel();
+    dropFileOn(screen.getByTestId("import-ir-dropzone"), makeIrFile());
+    await waitFor(() => {
+      expect(screen.getByTestId("import-ir-selected-file")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId("import-ir-validate"));
+
+    await waitFor(() => {
+      // Wait for the validate-induced error message to land. The
+      // import-ir-error element exists from the staged-import-failure
+      // state too, so we look for the Unauthorized text directly to
+      // avoid race-condition false positives.
+      expect(screen.getByTestId("import-ir-error")).toHaveTextContent(/Unauthorized/);
+    });
+    // The inline failure panel is NOT rendered (there was no report
+    // payload to surface — only an HTTP-level error).
+    expect(screen.queryByTestId("import-ir-validate-failure")).not.toBeInTheDocument();
   });
 });

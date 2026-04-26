@@ -830,6 +830,247 @@ export async function archiveStrategy(strategyId: string): Promise<ArchivedStrat
 }
 
 /**
+ * One issue surfaced by ``POST /strategies/validate-ir``.
+ *
+ * Mirrors :class:`libs.contracts.strategy.ValidationIssue`. The path is
+ * a JSON pointer (``"/metadata/strategy_name"``) — leading slash + slash
+ * separated segments — or ``"/"`` for root issues like malformed JSON.
+ */
+export interface StrategyValidationIssue {
+  /** JSON pointer (RFC 6901) into the IR document, or ``"/"`` for root. */
+  path: string;
+  /**
+   * Stable, machine-readable error code so the UI can branch on the
+   * failure kind without parsing free-form text.
+   * Known values: ``"invalid_json"``, ``"schema_violation"``,
+   * ``"undefined_reference"``, ``"dataset_not_found"``, ``"truncated"``,
+   * ``"unexpected_error"``.
+   */
+  code: string;
+  /** Human-readable explanation suitable for inline display. */
+  message: string;
+}
+
+/**
+ * Response body for ``POST /strategies/validate-ir``.
+ *
+ * Mirrors :class:`libs.contracts.strategy.StrategyValidationReport`.
+ *
+ * - ``valid===true`` → ``parsed_ir`` carries the canonical parsed IR
+ *   dict (deep-equals the input on success). ``errors`` is empty.
+ * - ``valid===false`` → ``errors`` lists every detected issue. Capped
+ *   server-side at 100 rows; truncation is surfaced as a trailing
+ *   ``code==="truncated"`` issue so the operator knows more errors
+ *   exist beyond what was rendered.
+ */
+export interface StrategyValidationReport {
+  /** True when every pipeline stage passed. */
+  valid: boolean;
+  /** Canonical parsed IR on success, ``null`` on failure. */
+  parsed_ir: Record<string, unknown> | null;
+  /** Fatal issues; empty when ``valid`` is true. */
+  errors: StrategyValidationIssue[];
+  /** Non-fatal issues (e.g. uncertified dataset references). */
+  warnings: StrategyValidationIssue[];
+}
+
+/**
+ * Typed error for ``POST /strategies/validate-ir`` failures.
+ *
+ * The endpoint returns 200 for both pass and fail; this error class
+ * covers the auth (401/403) and malformed-body (422) branches plus
+ * any network-level failures. A successful 200 response (regardless of
+ * the report's ``valid`` flag) is NOT an error.
+ */
+export class ValidateIrError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "ValidateIrError";
+  }
+}
+
+/**
+ * POST raw IR JSON text to ``/strategies/validate-ir`` and return the report.
+ *
+ * The endpoint always returns 200 on a well-formed request — both
+ * "this IR is valid" and "this IR is broken in N ways" share the same
+ * HTTP status. The verdict lives on the response body's ``valid`` flag.
+ *
+ * Args:
+ *   irText: Raw IR JSON text from the operator's textarea. Must be
+ *     non-empty (server enforces ``min_length=1`` and a 1 MiB cap).
+ *
+ * Returns:
+ *   A :class:`StrategyValidationReport` describing the verdict.
+ *
+ * Raises:
+ *   ValidateIrError on non-2xx responses (401, 403, 422 for empty
+ *     text, etc.). The caller should render the report inline on a
+ *     200 response without treating it as an error.
+ *   AxiosError on network failure.
+ *
+ * Example:
+ *   try {
+ *     const report = await validateIr(text);
+ *     if (report.valid) toast.success("IR is valid.");
+ *     else setErrors(report.errors);
+ *   } catch (err) {
+ *     if (err instanceof ValidateIrError) setError(err.detail ?? err.message);
+ *   }
+ */
+export async function validateIr(irText: string): Promise<StrategyValidationReport> {
+  try {
+    const resp = await apiClient.post<StrategyValidationReport>("/strategies/validate-ir", {
+      ir_text: irText,
+    });
+    return resp.data;
+  } catch (err) {
+    if (err instanceof AxiosError && err.response) {
+      const status = err.response.status;
+      const detailRaw = err.response.data?.detail;
+      const detail =
+        typeof detailRaw === "string"
+          ? detailRaw
+          : status === 422
+            ? "IR text is required (request body validation failed)"
+            : `Failed to validate IR (status ${status})`;
+      throw new ValidateIrError(
+        detail,
+        status,
+        typeof detailRaw === "string" ? detailRaw : undefined,
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Typed error for ``GET /strategies/{id}/ir.json`` download failures.
+ *
+ * Carries the HTTP status and the backend ``detail`` string so the page
+ * can branch on 404 (gone), 401/403 (auth), or 5xx (infrastructure)
+ * without parsing free-form messages.
+ */
+export class DownloadIrError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "DownloadIrError";
+  }
+}
+
+/**
+ * Sanitise a string for use as a download filename.
+ *
+ * Mirrors the backend's ``_sanitise_filename_token`` so the suggested
+ * filename in the browser's Save dialog matches the backend's
+ * Content-Disposition header even on platforms where the browser
+ * picks its own filename rather than honouring the server hint.
+ *
+ * Keeps alphanumerics, dots, hyphens, underscores, and spaces; replaces
+ * everything else with an underscore. Falls back to ``"strategy"`` when
+ * the resulting string is empty.
+ */
+function sanitiseFilenameToken(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = value.replace(/[^a-zA-Z0-9._\- ]/g, "_").trim();
+  return cleaned || "strategy";
+}
+
+/**
+ * Fetch the canonical IR JSON for a strategy and trigger a browser download.
+ *
+ * Pulls the JSON via ``GET /strategies/{strategyId}/ir.json`` (with the
+ * shared apiClient interceptors injecting the auth header) and wraps
+ * the response body in a ``Blob`` + temporary anchor + click + revoke
+ * sequence so the browser's Save dialog opens. Mirrors the
+ * ``exportBlotterCsv`` pattern in @/api/run_results so both download
+ * surfaces behave identically.
+ *
+ * Args:
+ *   strategyId: ULID of the strategy whose IR to download.
+ *   strategyName: Display name; embedded in the suggested filename
+ *     (sanitised to remove path separators / quoting characters).
+ *
+ * Returns:
+ *   ``Promise<void>`` — resolves once the browser has been handed the
+ *   Blob and the temporary URL has been revoked.
+ *
+ * Raises:
+ *   DownloadIrError on non-2xx responses (404 if the strategy does
+ *     not exist; 401/403 on auth failure).
+ *   AxiosError on network failure.
+ *
+ * Example:
+ *   try {
+ *     await downloadStrategyIr(strategy.id, strategy.name);
+ *     setStatus({ kind: "success", message: "IR downloaded." });
+ *   } catch (err) {
+ *     if (err instanceof DownloadIrError) setStatus({ kind: "error", message: err.message });
+ *   }
+ */
+export async function downloadStrategyIr(
+  strategyId: string,
+  strategyName: string,
+): Promise<void> {
+  let response;
+  try {
+    response = await apiClient.get<Blob>(`/strategies/${strategyId}/ir.json`, {
+      responseType: "blob",
+    });
+  } catch (err) {
+    if (err instanceof AxiosError && err.response) {
+      const status = err.response.status;
+      // axios returns a Blob even on error responses when responseType
+      // is "blob"; pull the detail by reading the blob if possible,
+      // otherwise fall back to a status-derived message.
+      let detail: string | undefined;
+      const data = err.response.data as unknown;
+      if (data && typeof (data as Blob).text === "function") {
+        try {
+          const text = await (data as Blob).text();
+          const parsed = JSON.parse(text) as { detail?: unknown };
+          if (typeof parsed.detail === "string") detail = parsed.detail;
+        } catch {
+          // Body wasn't a JSON envelope — fall through to status message.
+        }
+      }
+      const message =
+        detail ??
+        (status === 404
+          ? `Strategy ${strategyId} not found`
+          : `Failed to download IR (status ${status})`);
+      throw new DownloadIrError(message, status, detail);
+    }
+    throw err;
+  }
+
+  const blob = response.data;
+  const url = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${sanitiseFilenameToken(strategyName)}.strategy_ir.json`;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    try {
+      anchor.click();
+    } finally {
+      document.body.removeChild(anchor);
+    }
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
  * Restore a soft-archived strategy via ``POST /strategies/{id}/restore``.
  *
  * Inverse of :func:`archiveStrategy`. The backend clears ``archived_at``

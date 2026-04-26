@@ -47,6 +47,7 @@ vi.mock("@/api/strategies", async (importOriginal) => {
     ...original,
     getStrategy: vi.fn(),
     getStrategyRuns: vi.fn(),
+    downloadStrategyIr: vi.fn(),
   };
 });
 
@@ -89,6 +90,9 @@ vi.mock("react-hot-toast", () => {
 import * as strategiesApi from "@/api/strategies";
 const mockedGetStrategy = strategiesApi.getStrategy as unknown as ReturnType<typeof vi.fn>;
 const mockedGetStrategyRuns = strategiesApi.getStrategyRuns as unknown as ReturnType<typeof vi.fn>;
+const mockedDownloadStrategyIr = strategiesApi.downloadStrategyIr as unknown as ReturnType<
+  typeof vi.fn
+>;
 
 /**
  * Build an empty :class:`StrategyRunsPage` envelope for the recent-runs
@@ -651,6 +655,112 @@ describe("StrategyDetail page", () => {
       fireEvent.click(screen.getByTestId("recent-runs-cancel-confirm-dismiss"));
       expect(screen.queryByTestId("recent-runs-cancel-confirm")).not.toBeInTheDocument();
       expect(mockedCancelRun).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Download IR (JSON) button
+  // ---------------------------------------------------------------------
+
+  describe("Download IR (JSON) button", () => {
+    beforeEach(() => {
+      mockedDownloadStrategyIr.mockReset();
+    });
+
+    it("renders the Download IR (JSON) button on a loaded strategy", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+
+      renderPage();
+      await waitFor(() => {
+        expect(screen.getByTestId("download-ir-button")).toBeInTheDocument();
+      });
+      // Default label, not the spinner copy.
+      expect(screen.getByTestId("download-ir-button")).toHaveTextContent(/Download IR \(JSON\)/);
+    });
+
+    it("calls downloadStrategyIr with the strategy id + name on click", async () => {
+      const record = makeIrUploadRecord();
+      mockedGetStrategy.mockResolvedValueOnce(record);
+      mockedDownloadStrategyIr.mockResolvedValueOnce(undefined);
+
+      renderPage();
+      await waitFor(() => {
+        expect(screen.getByTestId("download-ir-button")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId("download-ir-button"));
+
+      await waitFor(() => {
+        expect(mockedDownloadStrategyIr).toHaveBeenCalledTimes(1);
+      });
+      expect(mockedDownloadStrategyIr).toHaveBeenCalledWith(record.id, record.name);
+
+      // Inline success status surfaces below the button.
+      await waitFor(() => {
+        expect(screen.getByTestId("download-ir-status")).toHaveTextContent(/IR downloaded/i);
+      });
+    });
+
+    it("disables the button while the download is in flight", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      // Make the download pend so we can observe the disabled state.
+      let resolveDownload: (() => void) = () => {};
+      mockedDownloadStrategyIr.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDownload = resolve;
+          }),
+      );
+
+      renderPage();
+      await waitFor(() => {
+        expect(screen.getByTestId("download-ir-button")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId("download-ir-button"));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("download-ir-button")).toBeDisabled();
+      });
+      // Spinner element appears while in flight.
+      expect(screen.getByTestId("download-ir-spinner")).toBeInTheDocument();
+
+      // Cleanup: resolve the pending promise so the test does not leak
+      // a dangling task into subsequent tests.
+      resolveDownload();
+    });
+
+    it("renders an inline error banner when downloadStrategyIr rejects", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      // Use the real DownloadIrError so the page's instanceof check
+      // routes through the typed-error branch.
+      mockedDownloadStrategyIr.mockRejectedValueOnce(
+        new strategiesApi.DownloadIrError("server unreachable", 503, "server unreachable"),
+      );
+
+      renderPage();
+      await waitFor(() => {
+        expect(screen.getByTestId("download-ir-button")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId("download-ir-button"));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("download-ir-status")).toHaveTextContent(
+          /Download failed: server unreachable/,
+        );
+      });
+    });
+
+    it("renders the button on a draft_form strategy too", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeDraftFormRecord());
+
+      renderPage();
+      await waitFor(() => {
+        // Available regardless of source — the backend handles legacy
+        // rows via the documented fallback path.
+        expect(screen.getByTestId("download-ir-button")).toBeInTheDocument();
+      });
     });
   });
 });
