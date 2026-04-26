@@ -53,6 +53,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import toast from "react-hot-toast";
 import { useAuth } from "@/auth/useAuth";
 import { LoadingState } from "@/components/ui/LoadingState";
 import { IrDetailView } from "@/components/strategy_studio/IrDetailView";
@@ -68,6 +69,7 @@ import {
   type StrategyDetail as StrategyDetailRecord,
   type StrategyRunsPage,
 } from "@/api/strategies";
+import { cancelRun, CancelRunError } from "@/api/runs";
 
 // ---------------------------------------------------------------------------
 // Helpers — defensive, formatting-only
@@ -261,6 +263,19 @@ function formatNumber(value: string | null): string {
  * whenever the page changes; surfaces empty / error states inline so a
  * failed history fetch never blocks the rest of the page from rendering.
  */
+/**
+ * Set of lifecycle statuses that the operator may cancel through the
+ * Recent runs UI. Mirrors the backend behaviour matrix in
+ * :meth:`ResearchRunService.cancel_run_with_abort`: PENDING / QUEUED
+ * skip the executor pool, RUNNING aborts the in-flight task, terminal
+ * statuses are no-ops (the backend returns 409 in that case).
+ */
+const CANCELLABLE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  "pending",
+  "queued",
+  "running",
+]);
+
 function RecentRunsSection({ strategyId }: { strategyId: string }) {
   const navigate = useNavigate();
 
@@ -268,6 +283,19 @@ function RecentRunsSection({ strategyId }: { strategyId: string }) {
   const [data, setData] = useState<StrategyRunsPage | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Per-run "is the cancel request in flight?" flag. Keyed by run id so
+  // multiple buttons can be in different states without re-rendering
+  // the whole table on every keystroke.
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  // ``confirmTargetId`` drives the confirm dialog; ``null`` means the
+  // dialog is closed. We deliberately use a lightweight inline dialog
+  // instead of pulling in a generic modal component to keep the
+  // recent-runs section self-contained.
+  const [confirmTargetId, setConfirmTargetId] = useState<string | null>(null);
+  // Bumping ``refreshKey`` forces the load effect to re-run so a
+  // successful cancel re-fetches the page without us having to thread
+  // refetch wiring through useQuery.
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,7 +322,7 @@ function RecentRunsSection({ strategyId }: { strategyId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [strategyId, page]);
+  }, [strategyId, page, refreshKey]);
 
   const handleViewResults = useCallback(
     (runId: string) => {
@@ -303,7 +331,38 @@ function RecentRunsSection({ strategyId }: { strategyId: string }) {
     [navigate],
   );
 
+  const handleConfirmCancel = useCallback(async () => {
+    if (confirmTargetId === null) return;
+    const runId = confirmTargetId;
+    // Close the dialog immediately so the operator gets visual feedback
+    // even if the network round-trip is slow; the per-row spinner picks
+    // up the in-flight state.
+    setConfirmTargetId(null);
+    setCancellingId(runId);
+    try {
+      await cancelRun(runId);
+      toast.success("Run cancelled.");
+      // Force a re-fetch so the row reflects the new status without the
+      // operator having to click Refresh.
+      setRefreshKey((k) => k + 1);
+    } catch (err) {
+      if (err instanceof CancelRunError) {
+        // 409 is the "already finished" branch; the backend's detail
+        // string already names the no-op reason so we surface it
+        // verbatim. 5xx and other shapes use the same path.
+        toast.error(err.detail ?? err.message);
+      } else if (err instanceof Error) {
+        toast.error(err.message);
+      } else {
+        toast.error("Failed to cancel run.");
+      }
+    } finally {
+      setCancellingId(null);
+    }
+  }, [confirmTargetId]);
+
   return (
+    <>
     <section
       aria-label="Recent runs"
       className="rounded-lg border border-surface-200 bg-white p-4"
@@ -396,14 +455,28 @@ function RecentRunsSection({ strategyId }: { strategyId: string }) {
                       {row.summary_metrics.trade_count}
                     </td>
                     <td className="px-3 py-2 text-right">
-                      <button
-                        type="button"
-                        data-testid={`recent-run-view-${row.id}`}
-                        onClick={() => handleViewResults(row.id)}
-                        className="inline-flex items-center rounded-md border border-brand-200 bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-800 hover:bg-brand-100"
-                      >
-                        View results
-                      </button>
+                      <div className="inline-flex items-center gap-2">
+                        {CANCELLABLE_STATUSES.has(row.status) && (
+                          <button
+                            type="button"
+                            data-testid={`recent-run-cancel-${row.id}`}
+                            aria-label={`Cancel run ${row.id}`}
+                            onClick={() => setConfirmTargetId(row.id)}
+                            disabled={cancellingId === row.id}
+                            className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {cancellingId === row.id ? "Cancelling…" : "Cancel"}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          data-testid={`recent-run-view-${row.id}`}
+                          onClick={() => handleViewResults(row.id)}
+                          className="inline-flex items-center rounded-md border border-brand-200 bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-800 hover:bg-brand-100"
+                        >
+                          View results
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -439,6 +512,48 @@ function RecentRunsSection({ strategyId }: { strategyId: string }) {
         </>
       )}
     </section>
+
+    {confirmTargetId !== null && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="recent-runs-cancel-confirm-title"
+        data-testid="recent-runs-cancel-confirm"
+      >
+        <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+          <h3
+            id="recent-runs-cancel-confirm-title"
+            className="text-lg font-semibold text-surface-900"
+          >
+            Cancel run?
+          </h3>
+          <p className="mt-2 text-sm text-surface-700">
+            Cancel run <span className="font-mono text-xs">{confirmTargetId}</span>?
+            This cannot be undone. Any in-flight backtest work will be aborted.
+          </p>
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              data-testid="recent-runs-cancel-confirm-dismiss"
+              onClick={() => setConfirmTargetId(null)}
+              className="inline-flex items-center rounded-md border border-surface-200 bg-white px-3 py-1.5 text-sm font-medium text-surface-700 hover:bg-surface-50"
+            >
+              Keep running
+            </button>
+            <button
+              type="button"
+              data-testid="recent-runs-cancel-confirm-submit"
+              onClick={() => void handleConfirmCancel()}
+              className="inline-flex items-center rounded-md border border-red-200 bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
+            >
+              Cancel run
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 

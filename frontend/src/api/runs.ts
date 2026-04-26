@@ -38,7 +38,7 @@
  *   navigate(`/runs/${run_id}`);
  */
 
-import type { AxiosResponse } from "axios";
+import { AxiosError, type AxiosResponse } from "axios";
 import { apiClient } from "@/api/client";
 import type { ExperimentPlan } from "@/types/experiment_plan";
 
@@ -90,6 +90,93 @@ export async function submitRunFromIr(
   return resp.data;
 }
 
+// ---------------------------------------------------------------------------
+// POST /runs/{runId}/cancel — operator-driven cancellation
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire-format payload returned by ``POST /runs/{run_id}/cancel``.
+ *
+ * Mirrors :class:`libs.contracts.run_results.RunCancelResult`. The
+ * ``cancelled`` flag is the canonical "did anything happen" signal —
+ * the backend returns 409 (so this body is only present on 200) when
+ * the row was already terminal, but the same shape is used in the
+ * detail string for log surfacing parity.
+ */
+export interface RunCancelResult {
+  /** ULID of the run the cancel was requested for. */
+  run_id: string;
+  /** Status the row carried just before the cancel attempt. */
+  previous_status: "pending" | "queued" | "running" | "completed" | "failed" | "cancelled";
+  /** Status the row carries after the cancel attempt. */
+  current_status: "pending" | "queued" | "running" | "completed" | "failed" | "cancelled";
+  /** True when the row was actually transitioned to CANCELLED. */
+  cancelled: boolean;
+  /** Free-form explanatory string ("user_requested" | "terminal_state" | ...). */
+  reason: string;
+}
+
+/**
+ * Typed error for ``POST /runs/{run_id}/cancel`` failures.
+ *
+ * Carries the HTTP status and the backend ``detail`` string so the
+ * Recent runs section can render a typed toast without parsing
+ * free-form messages.
+ */
+export class CancelRunError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "CancelRunError";
+  }
+}
+
+/**
+ * Cancel a research run, aborting any in-flight executor task.
+ *
+ * Args:
+ *   runId: ULID of the run to cancel.
+ *   reason: Optional operator-supplied reason. Surfaced in audit logs;
+ *     the backend uses the canonical ``error_message='user_requested'``
+ *     for the persisted record so the row state is consistent across
+ *     callers regardless of what reason was supplied.
+ *
+ * Returns:
+ *   A :class:`RunCancelResult` envelope on 200.
+ *
+ * Raises:
+ *   CancelRunError on any non-2xx response. ``statusCode`` carries the
+ *     HTTP status; ``detail`` carries the backend's ``detail`` string
+ *     when present.
+ *   AxiosError on network failure.
+ */
+export async function cancelRun(runId: string, reason?: string): Promise<RunCancelResult> {
+  try {
+    const body = reason !== undefined ? { reason } : undefined;
+    const resp = await apiClient.post<RunCancelResult>(`/runs/${runId}/cancel`, body);
+    return resp.data;
+  } catch (err) {
+    if (err instanceof AxiosError && err.response) {
+      const status = err.response.status;
+      const detailRaw = err.response.data?.detail;
+      const detail =
+        typeof detailRaw === "string"
+          ? detailRaw
+          : `Failed to cancel run ${runId} (status ${status})`;
+      throw new CancelRunError(
+        detail,
+        status,
+        typeof detailRaw === "string" ? detailRaw : undefined,
+      );
+    }
+    throw err;
+  }
+}
+
 export const runsFromIrApi = {
   submitRunFromIr,
+  cancelRun,
 };

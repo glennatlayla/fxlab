@@ -63,9 +63,27 @@ vi.mock("@/auth/useAuth", () => ({
 }));
 
 // Avoid the modal's submit-side dependency from spamming the test surface.
-vi.mock("@/api/runs", () => ({
-  submitRunFromIr: vi.fn(),
-}));
+// ``cancelRun`` is mocked so the Recent runs Cancel button can be exercised
+// without hitting axios; ``CancelRunError`` is re-exported as the real
+// class so the component's instanceof check still works.
+vi.mock("@/api/runs", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/api/runs")>();
+  return {
+    ...original,
+    submitRunFromIr: vi.fn(),
+    cancelRun: vi.fn(),
+  };
+});
+
+// Stub react-hot-toast so success/error toasts can be asserted without
+// rendering the actual <Toaster> tree (which is mounted at App level).
+vi.mock("react-hot-toast", () => {
+  const fn = vi.fn();
+  return {
+    default: Object.assign(fn, { success: vi.fn(), error: vi.fn() }),
+    toast: Object.assign(fn, { success: vi.fn(), error: vi.fn() }),
+  };
+});
 
 // Pull the mocked getStrategy / getStrategyRuns references for per-test arrangement.
 import * as strategiesApi from "@/api/strategies";
@@ -465,6 +483,174 @@ describe("StrategyDetail page", () => {
       expect(screen.getByTestId("strategy-recent-runs-error")).toHaveTextContent(
         /backend exploded/i,
       );
+    });
+
+    // --------------------------------------------------------------
+    // Cancel button (POST /runs/{id}/cancel)
+    // --------------------------------------------------------------
+
+    it("renders a Cancel button for cancellable rows and not for terminal rows", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      mockedGetStrategyRuns.mockResolvedValueOnce(
+        pageWithRuns([
+          {
+            id: "01HRUNCANCELRNNG000000001A",
+            status: "running",
+            started_at: "2026-04-25T11:55:00Z",
+            completed_at: null,
+            summary_metrics: {
+              total_return_pct: null,
+              sharpe_ratio: null,
+              win_rate: null,
+              trade_count: 0,
+            },
+          },
+          {
+            id: "01HRUNCANCELCMPL000000002B",
+            status: "completed",
+            started_at: "2026-04-24T11:55:00Z",
+            completed_at: "2026-04-24T12:00:00Z",
+            summary_metrics: {
+              total_return_pct: "5.00",
+              sharpe_ratio: "1.10",
+              win_rate: "0.5",
+              trade_count: 10,
+            },
+          },
+        ]),
+      );
+
+      renderPage();
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("recent-run-row-01HRUNCANCELRNNG000000001A"),
+        ).toBeInTheDocument();
+      });
+
+      // Running row has Cancel; completed row does not.
+      expect(
+        screen.getByTestId("recent-run-cancel-01HRUNCANCELRNNG000000001A"),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("recent-run-cancel-01HRUNCANCELCMPL000000002B"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("calls cancelRun and refreshes the list when Cancel is confirmed", async () => {
+      const runId = "01HRUNCANCELRNNG000000001A";
+      // Two list responses: the initial page (RUNNING) and the
+      // post-cancel refresh (CANCELLED). We assert below that
+      // cancelRun was called and the refresh fired.
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      mockedGetStrategyRuns.mockResolvedValueOnce(
+        pageWithRuns([
+          {
+            id: runId,
+            status: "running",
+            started_at: "2026-04-25T11:55:00Z",
+            completed_at: null,
+            summary_metrics: {
+              total_return_pct: null,
+              sharpe_ratio: null,
+              win_rate: null,
+              trade_count: 0,
+            },
+          },
+        ]),
+      );
+      // Refresh after successful cancel: same row, now CANCELLED so
+      // the Cancel button disappears.
+      mockedGetStrategyRuns.mockResolvedValueOnce(
+        pageWithRuns([
+          {
+            id: runId,
+            status: "cancelled",
+            started_at: "2026-04-25T11:55:00Z",
+            completed_at: "2026-04-25T11:56:00Z",
+            summary_metrics: {
+              total_return_pct: null,
+              sharpe_ratio: null,
+              win_rate: null,
+              trade_count: 0,
+            },
+          },
+        ]),
+      );
+
+      const runsApi = await import("@/api/runs");
+      const mockedCancelRun = runsApi.cancelRun as unknown as ReturnType<typeof vi.fn>;
+      mockedCancelRun.mockReset();
+      mockedCancelRun.mockResolvedValueOnce({
+        run_id: runId,
+        previous_status: "running",
+        current_status: "cancelled",
+        cancelled: true,
+        reason: "user_requested",
+      });
+
+      renderPage();
+      await waitFor(() => {
+        expect(screen.getByTestId(`recent-run-cancel-${runId}`)).toBeInTheDocument();
+      });
+
+      // Click Cancel -> dialog opens.
+      fireEvent.click(screen.getByTestId(`recent-run-cancel-${runId}`));
+      expect(screen.getByTestId("recent-runs-cancel-confirm")).toBeInTheDocument();
+
+      // Confirm -> cancelRun fires, list refreshes.
+      fireEvent.click(screen.getByTestId("recent-runs-cancel-confirm-submit"));
+
+      await waitFor(() => {
+        expect(mockedCancelRun).toHaveBeenCalledWith(runId);
+      });
+      // After refresh: the row now shows status=cancelled and the
+      // Cancel button is no longer present (terminal status).
+      await waitFor(() => {
+        expect(screen.getByTestId(`recent-run-status-${runId}`)).toHaveTextContent(
+          /cancelled/,
+        );
+      });
+      expect(screen.queryByTestId(`recent-run-cancel-${runId}`)).not.toBeInTheDocument();
+      // The list endpoint was hit twice (initial + refresh-after-cancel).
+      expect(mockedGetStrategyRuns).toHaveBeenCalledTimes(2);
+    });
+
+    it("dismissing the confirm dialog leaves the run untouched", async () => {
+      const runId = "01HRUNCANCELRNNG000000001A";
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      mockedGetStrategyRuns.mockResolvedValueOnce(
+        pageWithRuns([
+          {
+            id: runId,
+            status: "running",
+            started_at: "2026-04-25T11:55:00Z",
+            completed_at: null,
+            summary_metrics: {
+              total_return_pct: null,
+              sharpe_ratio: null,
+              win_rate: null,
+              trade_count: 0,
+            },
+          },
+        ]),
+      );
+
+      const runsApi = await import("@/api/runs");
+      const mockedCancelRun = runsApi.cancelRun as unknown as ReturnType<typeof vi.fn>;
+      mockedCancelRun.mockReset();
+
+      renderPage();
+      await waitFor(() => {
+        expect(screen.getByTestId(`recent-run-cancel-${runId}`)).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId(`recent-run-cancel-${runId}`));
+      expect(screen.getByTestId("recent-runs-cancel-confirm")).toBeInTheDocument();
+
+      // Dismiss -> dialog closes, cancelRun never called.
+      fireEvent.click(screen.getByTestId("recent-runs-cancel-confirm-dismiss"));
+      expect(screen.queryByTestId("recent-runs-cancel-confirm")).not.toBeInTheDocument();
+      expect(mockedCancelRun).not.toHaveBeenCalled();
     });
   });
 });
