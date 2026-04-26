@@ -58,6 +58,7 @@ vi.mock("lucide-react", () => ({
   FlaskConical: () => <div data-testid="icon-flask">Flask</div>,
   // FolderKanban: M2.D5 Strategies catalogue link in the Sidebar.
   FolderKanban: () => <div data-testid="icon-folderkanban">FolderKanban</div>,
+  Database: () => <div data-testid="icon-database">Database</div>,
   Play: () => <div data-testid="icon-play">Play</div>,
   Package: () => <div data-testid="icon-package">Package</div>,
   Rss: () => <div data-testid="icon-rss">Rss</div>,
