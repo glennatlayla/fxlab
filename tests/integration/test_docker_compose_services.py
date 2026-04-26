@@ -119,11 +119,21 @@ def test_ac4_api_service_has_restart_policy(compose_config):
 
 
 def test_ac4_api_restart_policy_is_on_failure(compose_config):
-    """AC4: 'api' service restart policy should be 'on-failure' or 'unless-stopped'."""
+    """AC4: 'api' service restart policy should be 'on-failure' or 'unless-stopped'.
+
+    `on-failure:N` (e.g. `on-failure:3`) is also accepted — it's the same
+    policy with a max retry count appended, which the M-prep #2 production
+    hardening (commit be19729 / be6632b) introduced explicitly to cap
+    crashloop blast radius.
+    """
     api_service = compose_config["services"]["api"]
     restart_policy = api_service.get("restart", "")
-    assert restart_policy in ["on-failure", "unless-stopped", "always"], (
-        f"'api' restart policy is '{restart_policy}', expected on-failure/unless-stopped/always"
+    accepted_prefixes = ("on-failure", "unless-stopped", "always")
+    assert any(
+        restart_policy == p or restart_policy.startswith(f"{p}:") for p in accepted_prefixes
+    ), (
+        f"'api' restart policy is '{restart_policy}', expected one of "
+        f"{accepted_prefixes} (with optional ':N' max-retry suffix)"
     )
 
 
