@@ -99,6 +99,34 @@ class ValidateDslRequest(BaseModel):
     expression: str = Field(..., description="DSL expression to validate")
 
 
+#: Hard cap on the size of an inbound IR text payload. Mirrors the IR
+#: file size we expect on the import path (production IRs run ~5-10 KB;
+#: 1 MiB is generous headroom while still preventing accidental abuse
+#: via a 100 MB textarea paste).
+_MAX_IR_TEXT_BYTES: int = 1_048_576
+
+
+class ValidateIrRequest(BaseModel):
+    """
+    Request payload for ``POST /strategies/validate-ir``.
+
+    Carries the raw IR JSON text the operator is drafting in the
+    Strategy Studio textarea. Validation runs the same parse + Pydantic
+    + reference-resolution pipeline as ``POST /strategies/import-ir``
+    but never persists.
+    """
+
+    ir_text: str = Field(
+        ...,
+        min_length=1,
+        max_length=_MAX_IR_TEXT_BYTES,
+        description=(
+            "Raw IR JSON text (1 byte to 1 MiB). The endpoint validates "
+            "without persisting; failures are surfaced via the report."
+        ),
+    )
+
+
 class CloneStrategyRequest(BaseModel):
     """
     Request payload for ``POST /strategies/{strategy_id}/clone``.
@@ -374,6 +402,234 @@ async def import_strategy_ir(
         content={"strategy": strategy},
         status_code=status.HTTP_201_CREATED,
     )
+
+
+@router.post(
+    "/validate-ir",
+    summary="Validate a strategy IR JSON body without persisting (no-save)",
+)
+async def validate_strategy_ir(
+    payload: ValidateIrRequest,
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Run the IR import pipeline against ``ir_text`` WITHOUT persisting.
+
+    The request body carries the raw IR JSON text the operator is
+    drafting in the Strategy Studio textarea; the response carries a
+    :class:`StrategyValidationReport` describing whether the IR would
+    pass the import path or not. Both pass and fail share HTTP 200 —
+    the request itself succeeded; the IR's validity is the report
+    payload. Only auth failures (401/403) and malformed request bodies
+    (422) yield non-2xx responses.
+
+    Behaviour contract:
+
+    - Delegates to :meth:`StrategyService.validate_ir` so the
+      validate-IR endpoint and the import-IR endpoint apply byte-
+      identical pipeline semantics.
+    - Persists nothing, regardless of validity.
+    - Always returns 200 (or one of 401/403/422); the report carries
+      the actual validity flag.
+    - Caps the error list at
+      :data:`libs.contracts.strategy.MAX_VALIDATION_ISSUES` to bound
+      response size; truncation is surfaced as a trailing
+      ``code="truncated"`` issue so the operator sees that more
+      errors exist beyond what was rendered.
+
+    Auth scope: ``strategies:write`` (matches the sibling
+    ``POST /strategies/import-ir`` — the project does not split read /
+    write scopes for strategy administration).
+
+    Args:
+        payload: ``ValidateIrRequest`` with ``ir_text`` (1 byte to 1
+            MiB; validated by Pydantic before the handler runs).
+        user: Authenticated user with ``strategies:write`` scope.
+
+    Returns:
+        200 ``JSONResponse`` with the
+        :class:`StrategyValidationReport` body. The body shape is
+        ``{"valid": bool, "parsed_ir": dict|None, "errors": [...],
+        "warnings": [...]}``.
+
+    Raises:
+        HTTPException 422: If ``ir_text`` is empty or exceeds the cap.
+
+    Example:
+        POST /strategies/validate-ir
+        {"ir_text": "{...}"}
+        → 200 {"valid": true, "parsed_ir": {...}, "errors": [],
+                "warnings": []}
+        POST /strategies/validate-ir
+        {"ir_text": "not json"}
+        → 200 {"valid": false, "parsed_ir": null,
+                "errors": [{"path": "/", "code": "invalid_json",
+                            "message": "..."}], "warnings": []}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    logger.info(
+        "strategies.validate_ir.called",
+        text_len=len(payload.ir_text),
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="validate_strategy_ir",
+    )
+
+    # The service guarantees this never raises — every failure is
+    # captured in the report.
+    report = service.validate_ir(payload.ir_text)
+
+    logger.info(
+        "strategies.validate_ir.completed",
+        valid=report.valid,
+        error_count=len(report.errors),
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="validate_strategy_ir",
+    )
+
+    return JSONResponse(content=report.model_dump(mode="json"))
+
+
+@router.get(
+    "/{strategy_id}/ir.json",
+    summary="Download the canonical Strategy IR JSON for a stored strategy",
+)
+async def download_strategy_ir_json(
+    strategy_id: str = Path(..., description="ULID of the strategy to download"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> Response:
+    """
+    Stream the canonical IR JSON text for ``strategy_id`` as a download.
+
+    The endpoint surfaces the strategy's persisted ``code`` column
+    verbatim — for ``source="ir_upload"`` rows this is the canonical
+    IR JSON written by ``create_from_ir`` (sort_keys=True). Legacy
+    rows whose ``code`` is blank fall back to a re-serialised parsed
+    IR (see :meth:`StrategyService.get_strategy_ir_json`) so the
+    download always produces a parseable JSON document.
+
+    Auth scope: ``strategies:write`` (matches every other strategy GET
+    in this module — the project does not define a distinct
+    ``strategies:read`` scope).
+
+    Args:
+        strategy_id: ULID of the strategy whose IR JSON to download.
+        user: Authenticated user with ``strategies:write`` scope.
+
+    Returns:
+        200 ``Response`` with body=IR JSON text and headers:
+        - ``Content-Type: application/json``
+        - ``Content-Disposition: attachment;
+          filename="{strategy_name}.strategy_ir.json"`` so the
+          browser's Save dialog uses the strategy's display name.
+
+    Raises:
+        HTTPException 404: If the strategy does not exist.
+        HTTPException 422: If the stored IR fails re-validation in the
+            fallback path (data integrity breach surfaced explicitly).
+
+    Example:
+        GET /strategies/01HSTRAT.../ir.json
+        → 200 application/json
+            Content-Disposition: attachment;
+                filename="FX_DoubleBollinger.strategy_ir.json"
+            {... canonical IR body ...}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    logger.info(
+        "strategies.download_ir.called",
+        strategy_id=strategy_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="download_strategy_ir_json",
+    )
+
+    try:
+        ir_text = service.get_strategy_ir_json(strategy_id)
+    except NotFoundError as exc:
+        logger.warning(
+            "strategies.download_ir.not_found",
+            strategy_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="download_strategy_ir_json",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Strategy {strategy_id} not found",
+        ) from exc
+
+    # Pull the strategy name for the filename hint. We deliberately do a
+    # second lookup rather than threading the name through
+    # get_strategy_ir_json — the service surface stays narrow (one
+    # responsibility per method) and the name lookup is a cheap repo
+    # hit that already lives behind the same NotFoundError gate above.
+    detail = service.get_strategy(strategy_id)
+    raw_name = str(detail.get("name") or strategy_id)
+    safe_name = _sanitise_filename_token(raw_name)
+    filename = f"{safe_name}.strategy_ir.json"
+
+    logger.info(
+        "strategies.download_ir.completed",
+        strategy_id=strategy_id,
+        bytes=len(ir_text),
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="download_strategy_ir_json",
+    )
+
+    # Return as a Response with explicit Content-Type so the browser's
+    # Save dialog respects the application/json mime type even on
+    # platforms where the filename suffix alone isn't sufficient.
+    return Response(
+        content=ir_text,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+def _sanitise_filename_token(value: str) -> str:
+    """
+    Strip path separators and quoting characters from a filename hint.
+
+    Strategy names are operator-supplied free text; the route exposes
+    them in the ``Content-Disposition`` header as the filename hint.
+    Without sanitisation a name like ``Foo"; rm -rf /; ".json`` could
+    inject a header line break or break out of the filename quoting.
+
+    The replacement set is conservative: keep alphanumerics, dots,
+    hyphens, underscores, and spaces; replace everything else with an
+    underscore. Falls back to ``"strategy"`` when the resulting token
+    is empty.
+
+    Args:
+        value: Raw strategy name (or any free-text token).
+
+    Returns:
+        Sanitised string safe to embed in the ``filename="..."`` header
+        value.
+
+    Example:
+        >>> _sanitise_filename_token('FX_DoubleBollinger Trend/Zone')
+        'FX_DoubleBollinger Trend_Zone'
+        >>> _sanitise_filename_token('"; rm -rf')
+        '_ rm -rf'
+    """
+    keep = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_ ")
+    sanitised = "".join(ch if ch in keep else "_" for ch in value).strip()
+    return sanitised or "strategy"
 
 
 @router.post(

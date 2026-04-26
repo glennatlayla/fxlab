@@ -280,6 +280,90 @@ class MockStrategyService:
             total_pages=total_pages,
         )
 
+    def validate_ir(self, ir_text: str):
+        """
+        Mock validate_ir mirroring StrategyService.validate_ir's contract.
+
+        Test hooks:
+        - ``validate_ir_force_invalid`` (truthy) → return a deterministic
+          invalid report so the route layer can be exercised against the
+          422-style error envelope without standing up the real parser.
+        - Default behaviour: if ``ir_text`` is empty / whitespace, return
+          an invalid_json report; otherwise return a valid report with
+          a parsed_ir derived from the input (best-effort json.loads,
+          falling back to ``{}``). This keeps the happy-path test honest
+          without requiring the real Pydantic schema.
+        """
+        from libs.contracts.strategy import StrategyValidationReport, ValidationIssue
+
+        if getattr(self, "validate_ir_force_invalid", False):
+            return StrategyValidationReport(
+                valid=False,
+                parsed_ir=None,
+                errors=[
+                    ValidationIssue(
+                        path="/metadata/strategy_name",
+                        code="schema_violation",
+                        message="field required",
+                    )
+                ],
+                warnings=[],
+            )
+
+        if not ir_text or not ir_text.strip():
+            return StrategyValidationReport(
+                valid=False,
+                parsed_ir=None,
+                errors=[
+                    ValidationIssue(
+                        path="/",
+                        code="invalid_json",
+                        message="IR text is empty.",
+                    )
+                ],
+                warnings=[],
+            )
+
+        try:
+            parsed = json.loads(ir_text)
+            if not isinstance(parsed, dict):
+                parsed = None
+        except json.JSONDecodeError:
+            return StrategyValidationReport(
+                valid=False,
+                parsed_ir=None,
+                errors=[
+                    ValidationIssue(
+                        path="/",
+                        code="invalid_json",
+                        message="not valid json",
+                    )
+                ],
+                warnings=[],
+            )
+
+        return StrategyValidationReport(
+            valid=True,
+            parsed_ir=parsed or {},
+            errors=[],
+            warnings=[],
+        )
+
+    def get_strategy_ir_json(self, strategy_id: str) -> str:
+        """
+        Mock get_strategy_ir_json mirroring StrategyService.get_strategy_ir_json.
+
+        - When ``raise_not_found`` is set → raise NotFoundError (route
+          maps to 404).
+        - Otherwise return a deterministic IR JSON string so the route
+          test can assert the body and Content-Disposition header.
+        """
+        from libs.contracts.errors import NotFoundError
+
+        if self.raise_not_found:
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+        return '{"strategy_name": "Test Strategy", "schema_version": "0.1-inferred"}'
+
     def validate_dsl_expression(self, expression: str) -> dict:
         if not expression or not expression.strip():
             return {
@@ -1689,6 +1773,241 @@ class TestCloneStrategyRoute:
         resp = client.post(
             "/strategies/01HSTRAT0000000000000001/clone",
             json={"new_name": "Whatever"},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Tests: POST /strategies/validate-ir (no-save validation)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateStrategyIrRoute:
+    """Tests for ``POST /strategies/validate-ir``.
+
+    The endpoint always returns 200 — both pass and fail share the same
+    HTTP status because the request itself succeeded; the IR's validity
+    is the report payload. Only auth (401/403) and malformed bodies
+    (422) yield non-2xx responses.
+    """
+
+    def test_validate_ir_valid_returns_200_with_valid_true(self, strategy_test_env) -> None:
+        """A valid IR text returns 200 with valid=true and parsed_ir populated."""
+        client, _, _ = strategy_test_env
+
+        resp = client.post(
+            "/strategies/validate-ir",
+            json={"ir_text": '{"foo": 1, "bar": "baz"}'},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is True
+        assert body["parsed_ir"] == {"foo": 1, "bar": "baz"}
+        assert body["errors"] == []
+        assert body["warnings"] == []
+
+    def test_validate_ir_invalid_returns_200_with_errors(self, strategy_test_env) -> None:
+        """A schema-violating IR returns 200 with structured errors."""
+        client, mock_service, _ = strategy_test_env
+        # Force the mock to return the invalid envelope so the route's
+        # error-rendering path is exercised regardless of how minimal
+        # the mock's default validate_ir is.
+        mock_service.validate_ir_force_invalid = True
+
+        resp = client.post(
+            "/strategies/validate-ir",
+            json={"ir_text": '{"missing_required_fields": true}'},
+            headers=_auth_headers(),
+        )
+
+        # 200 — the request succeeded; the report carries the verdict.
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is False
+        assert body["parsed_ir"] is None
+        assert len(body["errors"]) >= 1
+        first = body["errors"][0]
+        # Stable fields the frontend renders inline.
+        assert "path" in first
+        assert "code" in first
+        assert "message" in first
+
+    def test_validate_ir_invalid_json_returns_200_with_invalid_json_code(
+        self, strategy_test_env
+    ) -> None:
+        """Malformed JSON in the textarea returns 200 with code=invalid_json."""
+        client, _, _ = strategy_test_env
+
+        resp = client.post(
+            "/strategies/validate-ir",
+            json={"ir_text": "{not json}"},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is False
+        assert body["errors"][0]["code"] == "invalid_json"
+        assert body["errors"][0]["path"] == "/"
+
+    def test_validate_ir_empty_body_returns_422(self, strategy_test_env) -> None:
+        """An empty request body is rejected by the request schema."""
+        client, _, _ = strategy_test_env
+
+        resp = client.post(
+            "/strategies/validate-ir",
+            json={},
+            headers=_auth_headers(),
+        )
+
+        # FastAPI's Pydantic validation surfaces a 422 for the missing
+        # ir_text field BEFORE the handler runs.
+        assert resp.status_code == 422
+
+    def test_validate_ir_empty_string_returns_422(self, strategy_test_env) -> None:
+        """An empty ir_text string fails request-schema validation (min_length=1)."""
+        client, _, _ = strategy_test_env
+
+        resp = client.post(
+            "/strategies/validate-ir",
+            json={"ir_text": ""},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 422
+
+    def test_validate_ir_requires_auth(self, strategy_test_env) -> None:
+        """Request without auth is rejected before the handler runs."""
+        client, _, _app = strategy_test_env
+        _app.dependency_overrides.clear()
+
+        resp = client.post(
+            "/strategies/validate-ir",
+            json={"ir_text": "{}"},
+        )
+
+        assert resp.status_code in (401, 403, 422)
+
+    def test_validate_ir_rejects_user_without_strategies_write_scope(
+        self, strategy_test_env
+    ) -> None:
+        """A user without ``strategies:write`` is rejected with 403."""
+        client, _, _app = strategy_test_env
+        from services.api.auth import get_current_user
+
+        viewer = AuthenticatedUser(
+            user_id="01HVEWERFAKE00000000000001",
+            email="viewer@fxlab.test",
+            role="viewer",
+            scopes=set(),
+        )
+
+        async def _viewer() -> AuthenticatedUser:
+            return viewer
+
+        _app.dependency_overrides[get_current_user] = _viewer
+
+        resp = client.post(
+            "/strategies/validate-ir",
+            json={"ir_text": "{}"},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Tests: GET /strategies/{strategy_id}/ir.json (download)
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadStrategyIrJsonRoute:
+    """Tests for ``GET /strategies/{strategy_id}/ir.json`` (download endpoint)."""
+
+    def test_download_happy_path_returns_json_with_attachment_header(
+        self, strategy_test_env
+    ) -> None:
+        """A valid strategy returns 200 + JSON body + Content-Disposition."""
+        client, _, _ = strategy_test_env
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/ir.json",
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        # Content-Type is application/json (the body is JSON, not a
+        # binary blob).
+        assert "application/json" in resp.headers["content-type"]
+        # Content-Disposition is the download trigger; filename embeds
+        # the strategy name + the canonical .strategy_ir.json suffix.
+        cd = resp.headers["content-disposition"]
+        assert cd.startswith("attachment;")
+        assert ".strategy_ir.json" in cd
+        # Body parses as JSON (the contract is a JSON file).
+        body = json.loads(resp.text)
+        assert isinstance(body, dict)
+
+    def test_download_filename_uses_strategy_name(self, strategy_test_env) -> None:
+        """The Content-Disposition filename hint embeds the strategy's display name."""
+        client, _, _ = strategy_test_env
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/ir.json",
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        # The mock returns "Test Strategy" — sanitisation keeps the
+        # space and the alphanumerics, so the filename hint contains
+        # "Test Strategy.strategy_ir.json".
+        cd = resp.headers["content-disposition"]
+        assert "Test Strategy.strategy_ir.json" in cd
+
+    def test_download_unknown_strategy_returns_404(self, strategy_test_env) -> None:
+        """A missing strategy id returns 404."""
+        client, mock_service, _ = strategy_test_env
+        mock_service.raise_not_found = True
+
+        resp = client.get(
+            "/strategies/01HMISSING0000000000000001/ir.json",
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 404
+
+    def test_download_requires_auth(self, strategy_test_env) -> None:
+        """Request without auth is rejected before the handler runs."""
+        client, _, _app = strategy_test_env
+        _app.dependency_overrides.clear()
+
+        resp = client.get("/strategies/01HSTRAT0000000000000001/ir.json")
+
+        assert resp.status_code in (401, 403, 422)
+
+    def test_download_rejects_user_without_strategies_write_scope(self, strategy_test_env) -> None:
+        """A user without ``strategies:write`` is rejected with 403."""
+        client, _, _app = strategy_test_env
+        from services.api.auth import get_current_user
+
+        viewer = AuthenticatedUser(
+            user_id="01HVEWERFAKE00000000000002",
+            email="viewer@fxlab.test",
+            role="viewer",
+            scopes=set(),
+        )
+
+        async def _viewer() -> AuthenticatedUser:
+            return viewer
+
+        _app.dependency_overrides[get_current_user] = _viewer
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/ir.json",
             headers=_auth_headers(),
         )
 
