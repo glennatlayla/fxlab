@@ -51,6 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from libs.contracts.dataset import (
     DEFAULT_DATASET_LIST_PAGE_SIZE,
     MAX_DATASET_LIST_PAGE_SIZE,
+    DatasetDetail,
     DatasetListItem,
     PagedDatasets,
 )
@@ -411,9 +412,72 @@ async def update_dataset(
     return item
 
 
+# ---------------------------------------------------------------------------
+# GET /datasets/{dataset_ref}/detail — admin detail page
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{dataset_ref}/detail",
+    response_model=DatasetDetail,
+    summary="Dataset detail (admin only)",
+)
+async def dataset_detail(
+    dataset_ref: str,
+    user: AuthenticatedUser = Depends(require_scope("admin:manage")),
+    service: DatasetServiceInterface = Depends(get_dataset_service),
+) -> DatasetDetail:
+    """
+    Return the rich :class:`DatasetDetail` envelope for the
+    ``/admin/datasets/:ref`` page.
+
+    Args:
+        dataset_ref: Catalog reference key from the URL path.
+        user: Authenticated user with ``admin:manage`` scope.
+        service: Injected :class:`DatasetServiceInterface`.
+
+    Returns:
+        200 with a :class:`DatasetDetail`.
+
+    Raises:
+        HTTPException 404: If ``dataset_ref`` is not registered.
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    try:
+        detail = service.get_detail(dataset_ref)
+    except DatasetNotFoundError as exc:
+        logger.warning(
+            "datasets.detail.not_found",
+            dataset_ref=dataset_ref,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="datasets",
+            operation="dataset_detail",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{dataset_ref}' not registered.",
+        ) from exc
+
+    logger.info(
+        "datasets.detail.completed",
+        operation="dataset_detail",
+        component="datasets",
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        dataset_ref=dataset_ref,
+        inventory_rows=len(detail.bar_inventory),
+        strategies_count=len(detail.strategies_using),
+        recent_runs_count=len(detail.recent_runs),
+        result="success",
+    )
+    return detail
+
+
 __all__ = [
     "RegisterDatasetRequest",
     "UpdateDatasetRequest",
+    "dataset_detail",
     "get_dataset_service",
     "router",
     "set_dataset_service",

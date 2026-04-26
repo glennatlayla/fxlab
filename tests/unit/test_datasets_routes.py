@@ -513,3 +513,151 @@ class TestUpdateDataset:
             json={"is_certified": True, "rogue_field": "x"},
         )
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /datasets/{ref}/detail — admin detail page
+# ---------------------------------------------------------------------------
+
+
+class TestDatasetDetail:
+    def test_unknown_ref_returns_404(
+        self,
+        admin_client: tuple[TestClient, MockDatasetRepository],
+    ) -> None:
+        client, _ = admin_client
+        resp = client.get(
+            "/datasets/never-registered/detail",
+            headers=_admin_headers(),
+        )
+        assert resp.status_code == 404
+        body = resp.json()
+        assert "never-registered" in body["detail"]
+
+    def test_returns_full_envelope_for_registered_ref(
+        self,
+        admin_client: tuple[TestClient, MockDatasetRepository],
+    ) -> None:
+        client, repo = admin_client
+        # Register the dataset.
+        post_resp = client.post(
+            "/datasets/",
+            headers=_admin_headers(),
+            json={
+                "dataset_ref": "fx-eurusd-15m-detail",
+                "symbols": ["EURUSD", "GBPUSD"],
+                "timeframe": "15m",
+                "source": "oanda",
+                "version": "v1",
+                "is_certified": True,
+            },
+        )
+        assert post_resp.status_code == 201
+
+        # Seed bar inventory + run rows on the mock so the projections
+        # have something to return.
+        from datetime import datetime  # local import keeps test fixture self-contained
+
+        repo.seed_bars(
+            symbol="EURUSD",
+            timeframe="15m",
+            timestamps=[
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 4, 25, 23, 45, 0),
+            ],
+        )
+        repo.seed_run(
+            run_id="01HRUN00000000000000000001",
+            strategy_id="01HSTRAT00000000000000000A",
+            strategy_name="Test Strategy",
+            dataset_ref="fx-eurusd-15m-detail",
+            status="completed",
+            completed_at=datetime(2026, 4, 25, 14, 30, 0),
+        )
+
+        resp = client.get(
+            "/datasets/fx-eurusd-15m-detail/detail",
+            headers=_admin_headers(),
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["dataset_ref"] == "fx-eurusd-15m-detail"
+        assert body["symbols"] == ["EURUSD", "GBPUSD"]
+        assert body["is_certified"] is True
+        # Bar inventory has one row per symbol.
+        assert len(body["bar_inventory"]) == 2
+        eur = next(r for r in body["bar_inventory"] if r["symbol"] == "EURUSD")
+        gbp = next(r for r in body["bar_inventory"] if r["symbol"] == "GBPUSD")
+        assert eur["row_count"] == 2
+        assert gbp["row_count"] == 0
+        # Strategies-using populated from seeded runs.
+        assert len(body["strategies_using"]) == 1
+        assert body["strategies_using"][0]["strategy_id"] == "01HSTRAT00000000000000000A"
+        # Recent runs.
+        assert len(body["recent_runs"]) == 1
+        assert body["recent_runs"][0]["run_id"] == "01HRUN00000000000000000001"
+
+    def test_empty_inventory_when_no_bars_seeded(
+        self,
+        admin_client: tuple[TestClient, MockDatasetRepository],
+    ) -> None:
+        client, _ = admin_client
+        client.post(
+            "/datasets/",
+            headers=_admin_headers(),
+            json={
+                "dataset_ref": "fx-empty-detail",
+                "symbols": ["EURUSD"],
+                "timeframe": "15m",
+                "source": "synthetic",
+                "version": "v1",
+            },
+        )
+        resp = client.get(
+            "/datasets/fx-empty-detail/detail",
+            headers=_admin_headers(),
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        # Even with no candles, every requested symbol gets a zero row.
+        assert len(body["bar_inventory"]) == 1
+        assert body["bar_inventory"][0]["row_count"] == 0
+        assert body["bar_inventory"][0]["min_ts"] is None
+        assert body["bar_inventory"][0]["max_ts"] is None
+        assert body["strategies_using"] == []
+        assert body["recent_runs"] == []
+
+    def test_missing_auth_returns_401(self) -> None:
+        client = TestClient(app)
+        resp = client.get("/datasets/anything/detail")
+        assert resp.status_code == 401
+
+    def test_non_admin_returns_403(
+        self,
+        admin_client: tuple[TestClient, MockDatasetRepository],
+    ) -> None:
+        # Override the user dependency with a non-admin (no admin:manage).
+        client, _ = admin_client
+        viewer = AuthenticatedUser(
+            user_id="01HVEW00000000000000000001",
+            role="viewer",
+            email="viewer@fxlab.test",
+            scopes=ROLE_SCOPES["viewer"],
+        )
+
+        async def _fake_viewer() -> AuthenticatedUser:
+            return viewer
+
+        app.dependency_overrides[get_current_user] = _fake_viewer
+        try:
+            resp = client.get(
+                "/datasets/anything/detail",
+                headers=_admin_headers(),
+            )
+            assert resp.status_code == 403
+        finally:
+            # Restore the admin override the fixture set up so any later
+            # test runs that share the dependency overrides see the
+            # expected admin user. The fixture's finally block clears it
+            # at teardown, so this is just defence-in-depth.
+            app.dependency_overrides[get_current_user] = lambda: _ADMIN_USER  # type: ignore[assignment]
