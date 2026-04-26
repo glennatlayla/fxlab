@@ -92,6 +92,78 @@ export interface UpdateDatasetRequest {
   version?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Detail-page types — mirror libs.contracts.dataset.DatasetDetail
+// ---------------------------------------------------------------------------
+
+/**
+ * One row in the dataset Detail page's bar-inventory section.
+ *
+ * Mirrors :class:`libs.contracts.dataset.BarInventoryRow`.
+ */
+export interface BarInventoryRow {
+  /** Symbol the row applies to. */
+  symbol: string;
+  /** Bar resolution string. */
+  timeframe: string;
+  /** Number of candle bars stored for this pair. */
+  row_count: number;
+  /** ISO-8601 timestamp of oldest bar, or null when row_count == 0. */
+  min_ts: string | null;
+  /** ISO-8601 timestamp of newest bar, or null when row_count == 0. */
+  max_ts: string | null;
+}
+
+/**
+ * One entry in the dataset Detail page's Strategies-using section.
+ *
+ * Mirrors :class:`libs.contracts.dataset.StrategyRef`.
+ */
+export interface StrategyRef {
+  /** ULID of the strategy. */
+  strategy_id: string;
+  /** Display name (may be empty if the strategy row has been deleted). */
+  name: string;
+  /** ISO-8601 timestamp of the most recent completed run, or null. */
+  last_used_at: string | null;
+}
+
+/**
+ * One entry in the dataset Detail page's Recent-runs section.
+ *
+ * Mirrors :class:`libs.contracts.dataset.RecentRunRef`.
+ */
+export interface RecentRunRef {
+  /** ULID of the research run. */
+  run_id: string;
+  /** ULID of the strategy the run targets. */
+  strategy_id: string;
+  /** Lifecycle status string. */
+  status: string;
+  /** ISO-8601 timestamp of completion, or null when still in flight. */
+  completed_at: string | null;
+}
+
+/**
+ * Top-level envelope for the dataset Detail page.
+ *
+ * Mirrors :class:`libs.contracts.dataset.DatasetDetail`.
+ */
+export interface DatasetDetail {
+  dataset_ref: string;
+  dataset_id: string;
+  symbols: string[];
+  timeframe: string;
+  source: string;
+  version: string;
+  is_certified: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  bar_inventory: BarInventoryRow[];
+  strategies_using: StrategyRef[];
+  recent_runs: RecentRunRef[];
+}
+
 /**
  * Typed error for /datasets/ endpoint failures.
  *
@@ -167,9 +239,7 @@ export async function listDatasets(
  * Raises:
  *   :class:`DatasetsApiError` on non-2xx responses.
  */
-export async function registerDataset(
-  body: RegisterDatasetRequest,
-): Promise<DatasetListItem> {
+export async function registerDataset(body: RegisterDatasetRequest): Promise<DatasetListItem> {
   try {
     const resp = await apiClient.post<DatasetListItem>("/datasets/", body);
     return resp.data;
@@ -200,5 +270,29 @@ export async function updateDataset(
     return resp.data;
   } catch (err) {
     wrapAxiosError(err, "Failed to update dataset");
+  }
+}
+
+/**
+ * Fetch the rich :class:`DatasetDetail` envelope for a single
+ * registered dataset. Powers the ``/admin/datasets/:ref`` page.
+ *
+ * Args:
+ *   ref: Catalog reference key (will be percent-encoded for the URL).
+ *
+ * Returns:
+ *   :class:`DatasetDetail` populated with header metadata, bar
+ *   inventory, strategies-using, and recent runs.
+ *
+ * Raises:
+ *   :class:`DatasetsApiError` on non-2xx responses (404 if the ref is
+ *   not registered, 401/403 on auth failure).
+ */
+export async function getDatasetDetail(ref: string): Promise<DatasetDetail> {
+  try {
+    const resp = await apiClient.get<DatasetDetail>(`/datasets/${encodeURIComponent(ref)}/detail`);
+    return resp.data;
+  } catch (err) {
+    wrapAxiosError(err, "Failed to load dataset detail");
   }
 }

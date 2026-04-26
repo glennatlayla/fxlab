@@ -23,6 +23,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/auth/useAuth";
 import { LoadingState } from "@/components/ui/LoadingState";
 import {
@@ -162,10 +163,7 @@ function RegisterModal({ open, onClose, onRegistered }: RegisterModalProps) {
         data-testid="datasets-register-form"
       >
         <div className="flex items-baseline justify-between">
-          <h2
-            id="datasets-register-modal-title"
-            className="text-lg font-semibold text-surface-900"
-          >
+          <h2 id="datasets-register-modal-title" className="text-lg font-semibold text-surface-900">
             Register dataset
           </h2>
           <button
@@ -317,8 +315,7 @@ export default function Datasets() {
   const apiOpts = useMemo(
     () => ({
       source: sourceFilter.trim() || undefined,
-      is_certified:
-        certFilter === "all" ? undefined : certFilter === "true",
+      is_certified: certFilter === "all" ? undefined : certFilter === "true",
       q: searchQuery.trim() || undefined,
     }),
     [sourceFilter, certFilter, searchQuery],
@@ -375,26 +372,23 @@ export default function Datasets() {
     });
   }, [pageData?.total_pages]);
 
-  const handleToggleCert = useCallback(
-    async (row: DatasetListItem) => {
-      setTogglePending(row.dataset_ref);
-      setErrorMessage(null);
-      try {
-        await updateDataset(row.dataset_ref, { is_certified: !row.is_certified });
-        setReloadCounter((c) => c + 1);
-      } catch (err) {
-        if (err instanceof DatasetsApiError) {
-          setErrorMessage(err.detail ?? err.message);
-          setErrorStatus(err.statusCode ?? null);
-        } else {
-          setErrorMessage(err instanceof Error ? err.message : "Failed to toggle certification.");
-        }
-      } finally {
-        setTogglePending(null);
+  const handleToggleCert = useCallback(async (row: DatasetListItem) => {
+    setTogglePending(row.dataset_ref);
+    setErrorMessage(null);
+    try {
+      await updateDataset(row.dataset_ref, { is_certified: !row.is_certified });
+      setReloadCounter((c) => c + 1);
+    } catch (err) {
+      if (err instanceof DatasetsApiError) {
+        setErrorMessage(err.detail ?? err.message);
+        setErrorStatus(err.statusCode ?? null);
+      } else {
+        setErrorMessage(err instanceof Error ? err.message : "Failed to toggle certification.");
       }
-    },
-    [],
-  );
+    } finally {
+      setTogglePending(null);
+    }
+  }, []);
 
   const totalCount = pageData?.total_count ?? 0;
   const totalPages = pageData?.total_pages ?? 0;
@@ -556,7 +550,13 @@ export default function Datasets() {
               {pageData.datasets.map((row) => (
                 <tr key={row.id} data-testid={`dataset-row-${row.dataset_ref}`}>
                   <td className="px-4 py-3 align-top">
-                    <div className="font-medium text-surface-900">{row.dataset_ref}</div>
+                    <Link
+                      to={`/admin/datasets/${encodeURIComponent(row.dataset_ref)}`}
+                      data-testid={`dataset-detail-link-${row.dataset_ref}`}
+                      className="font-medium text-brand-700 hover:underline"
+                    >
+                      {row.dataset_ref}
+                    </Link>
                     <div className="mt-0.5 font-mono text-xs text-surface-500">{row.id}</div>
                   </td>
                   <td className="px-4 py-3 align-top text-sm text-surface-700">

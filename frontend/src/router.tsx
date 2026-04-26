@@ -84,6 +84,7 @@ const SecretManagement = lazy(() => import("./pages/Admin/SecretManagement"));
 
 // Dataset catalog admin browse + register (M4.E3)
 const Datasets = lazy(() => import("./pages/Datasets"));
+const DatasetDetail = lazy(() => import("./pages/DatasetDetail"));
 
 // Mobile navigation pages (FE-01, FE-02)
 const Emergency = lazy(() => import("./pages/Emergency"));
@@ -393,6 +394,18 @@ export const router = createBrowserRouter(
               element: (
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Datasets />
+                </Suspense>
+              ),
+            },
+            // Dataset detail page — drills into one catalog row.
+            // ``ref`` is the human-readable dataset_ref (UNIQUE) so URLs
+            // stay stable across renames; the page does its own 404
+            // handling when the ref is unknown.
+            {
+              path: "datasets/:ref",
+              element: (
+                <Suspense fallback={<PageLoadingFallback />}>
+                  <DatasetDetail />
                 </Suspense>
               ),
             },
