@@ -510,3 +510,39 @@ class TestGetRecord:
     ) -> None:
         with pytest.raises(DatasetNotFoundError):
             service.get_record("")
+
+
+# ---------------------------------------------------------------------------
+# count
+# ---------------------------------------------------------------------------
+
+
+class TestCount:
+    def test_empty_catalog_returns_zero(self, service: DatasetService) -> None:
+        assert service.count() == 0
+
+    def test_returns_repository_count(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        _seed(
+            repo,
+            dataset_ref="fx-gbpusd-15m-v1",
+            symbols=["GBPUSD"],
+        )
+        assert service.count() == 2
+
+    def test_delegates_to_repository(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        """count() must round-trip via the repository, not cache its own state."""
+        assert service.count() == 0
+        _seed(repo)
+        # The service must re-query — never cache.
+        assert service.count() == 1
+        repo.clear()
+        assert service.count() == 0

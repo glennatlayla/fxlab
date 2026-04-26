@@ -280,6 +280,20 @@ class DatasetServiceInterface(Protocol):
         """
         ...
 
+    def count(self) -> int:
+        """
+        Return the total number of registered datasets in the catalog.
+
+        Cheap inventory probe used by the ``/health/details`` endpoint to
+        surface catalog size without paginating any rows. Implementations
+        delegate to :meth:`DatasetRepositoryInterface.count`.
+
+        Returns:
+            Non-negative integer row count. Zero when the catalog is
+            empty.
+        """
+        ...
+
 
 __all__ = [
     "DatasetListItem",

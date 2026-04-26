@@ -23,6 +23,7 @@ Responsibilities:
       for the row id on first insert and preserves it on subsequent
       updates.
     - is_certified(): boolean check used by the certification gate.
+    - count(): cheap row-count probe used by ``/health/details``.
 
 Does NOT:
     - Drive ingestion or candle storage.
@@ -367,6 +368,24 @@ class DatasetService(DatasetServiceInterface):
             version=version,
             result="success",
         )
+
+    def count(self) -> int:
+        """
+        Return the number of registered datasets in the catalog.
+
+        Pure delegation to :meth:`DatasetRepositoryInterface.count`. The
+        service layer adds no caching — request-scoped sessions make
+        cached aggregates stale across operators registering new rows
+        in parallel.
+
+        Returns:
+            Non-negative integer row count.
+
+        Raises:
+            DatasetRepositoryError: Propagated from the repository on
+                driver / connection failure.
+        """
+        return self._repo.count()
 
     def update_certification(self, dataset_ref: str, *, is_certified: bool) -> None:
         """
