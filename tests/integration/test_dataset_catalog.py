@@ -21,9 +21,12 @@ isolation per test.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 from sqlalchemy.orm import Session
 
+from libs.contracts.models import CandleRecord, ResearchRun, Strategy, User
 from libs.strategy_ir.dataset_resolver import CatalogBackedResolver
 from libs.strategy_ir.interfaces.dataset_resolver_interface import (
     DatasetResolverInterface,
@@ -248,3 +251,109 @@ class TestCertification:
 
     def test_unknown_ref_is_not_certified(self, service: DatasetService) -> None:
         assert service.is_certified("never-registered") is False
+
+
+# ---------------------------------------------------------------------------
+# get_detail / detail-page projections — end to end
+# ---------------------------------------------------------------------------
+
+
+class TestGetDetailEndToEnd:
+    def test_unknown_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError):
+            service.get_detail("never-registered")
+
+    def test_returns_inventory_strategies_and_runs(
+        self,
+        service: DatasetService,
+        integration_db_session: Session,
+    ) -> None:
+        # Catalog row.
+        service.register_dataset(
+            "fx-eurusd-15m-it",
+            symbols=["EURUSD"],
+            timeframe="15m",
+            source="oanda",
+            version="v1",
+        )
+
+        # Bar fixtures.
+        base = datetime(2026, 4, 1, 0, 0, 0)
+        for n in range(3):
+            integration_db_session.add(
+                CandleRecord(
+                    symbol="EURUSD",
+                    interval="15m",
+                    timestamp=base + timedelta(minutes=15 * n),
+                    open="1.0",
+                    high="1.0",
+                    low="1.0",
+                    close="1.0",
+                    volume=1,
+                )
+            )
+
+        # User + strategy + run referencing the dataset.
+        user = User(
+            id="01HXSER000000000000000T001",
+            email="it@fxlab.test",
+            hashed_password="x",
+            role="admin",
+            is_active=True,
+        )
+        integration_db_session.add(user)
+        integration_db_session.flush()
+
+        strategy = Strategy(
+            id="01HSTRAT0000000000000T0001",
+            name="Integration Strategy",
+            code="def signals(): pass",
+            version="v1",
+            created_by="01HXSER000000000000000T001",
+            is_active=True,
+            source="draft_form",
+        )
+        integration_db_session.add(strategy)
+        integration_db_session.flush()
+
+        run = ResearchRun(
+            id="01HRXN000000000000000T0001",
+            run_type="backtest",
+            strategy_id="01HSTRAT0000000000000T0001",
+            status="completed",
+            config_json={
+                "run_type": "backtest",
+                "strategy_id": "01HSTRAT0000000000000T0001",
+                "data_selection": {"dataset_ref": "fx-eurusd-15m-it"},
+            },
+            result_json=None,
+            created_by="01HXSER000000000000000T001",
+            created_at=base,
+            updated_at=base,
+            started_at=None,
+            completed_at=base + timedelta(hours=2),
+        )
+        integration_db_session.add(run)
+        integration_db_session.flush()
+
+        detail = service.get_detail("fx-eurusd-15m-it")
+
+        assert detail.dataset_ref == "fx-eurusd-15m-it"
+        assert detail.symbols == ["EURUSD"]
+        assert detail.timeframe == "15m"
+
+        assert len(detail.bar_inventory) == 1
+        only = detail.bar_inventory[0]
+        assert only.symbol == "EURUSD"
+        assert only.row_count == 3
+
+        assert len(detail.strategies_using) == 1
+        assert detail.strategies_using[0].strategy_id == "01HSTRAT0000000000000T0001"
+        assert detail.strategies_using[0].name == "Integration Strategy"
+
+        assert len(detail.recent_runs) == 1
+        assert detail.recent_runs[0].run_id == "01HRXN000000000000000T0001"
+        assert detail.recent_runs[0].status == "completed"

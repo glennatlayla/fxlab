@@ -15,6 +15,7 @@ Scope:
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -26,7 +27,13 @@ from libs.contracts.interfaces.dataset_repository_interface import (
     DatasetRecord,
     DatasetRepositoryError,
 )
-from libs.contracts.models import Base
+from libs.contracts.models import (
+    Base,
+    CandleRecord,
+    ResearchRun,
+    Strategy,
+    User,
+)
 from services.api.repositories.sql_dataset_repository import SqlDatasetRepository
 
 # ---------------------------------------------------------------------------
@@ -375,3 +382,436 @@ def test_count_wraps_driver_error(db_session: Session) -> None:
     ):
         with pytest.raises(DatasetRepositoryError):
             repo.count()
+
+
+# ---------------------------------------------------------------------------
+# Detail-page helpers (M4.E3 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _seed_user(db: Session, *, user_id: str = "01HUSER000000000000000001") -> str:
+    """Insert a user row so Strategy.created_by FK can be satisfied."""
+    user = User(
+        id=user_id,
+        email=f"{user_id}@fxlab.test",
+        hashed_password="x",
+        role="admin",
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    return user_id
+
+
+def _seed_strategy(
+    db: Session,
+    *,
+    strategy_id: str,
+    name: str,
+    created_by: str,
+) -> str:
+    """Insert a strategy row tied to a pre-existing user."""
+    strategy = Strategy(
+        id=strategy_id,
+        name=name,
+        code="def signals(): pass",
+        version="v1",
+        created_by=created_by,
+        is_active=True,
+        source="draft_form",
+    )
+    db.add(strategy)
+    db.flush()
+    return strategy_id
+
+
+def _seed_run(
+    db: Session,
+    *,
+    run_id: str,
+    strategy_id: str,
+    dataset_ref: str | None,
+    status: str = "completed",
+    completed_at: datetime | None = None,
+    created_by: str = "01HUSER000000000000000001",
+    created_at: datetime | None = None,
+) -> str:
+    """Insert a research_runs row with a config_json carrying the ref."""
+    config: dict = {
+        "run_type": "backtest",
+        "strategy_id": strategy_id,
+    }
+    if dataset_ref is not None:
+        config["data_selection"] = {"dataset_ref": dataset_ref}
+
+    run = ResearchRun(
+        id=run_id,
+        run_type="backtest",
+        strategy_id=strategy_id,
+        status=status,
+        config_json=config,
+        result_json=None,
+        created_by=created_by,
+        created_at=created_at or datetime(2026, 4, 1, 12, 0, 0),
+        updated_at=created_at or datetime(2026, 4, 1, 12, 0, 0),
+        started_at=None,
+        completed_at=completed_at,
+    )
+    db.add(run)
+    db.flush()
+    return run_id
+
+
+# ---------------------------------------------------------------------------
+# get_bar_inventory
+# ---------------------------------------------------------------------------
+
+
+def test_get_bar_inventory_empty_symbols_returns_empty(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.get_bar_inventory(symbols=[], timeframe="15m") == []
+
+
+def test_get_bar_inventory_returns_zero_row_for_symbol_without_bars(
+    db_session: Session,
+) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    rows = repo.get_bar_inventory(symbols=["EURUSD"], timeframe="15m")
+    assert len(rows) == 1
+    assert rows[0].symbol == "EURUSD"
+    assert rows[0].timeframe == "15m"
+    assert rows[0].row_count == 0
+    assert rows[0].min_ts is None
+    assert rows[0].max_ts is None
+
+
+def test_get_bar_inventory_aggregates_count_min_max(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    base = datetime(2026, 4, 1, 0, 0, 0)
+    for n in range(5):
+        bar = CandleRecord(
+            symbol="EURUSD",
+            interval="15m",
+            timestamp=base + timedelta(minutes=15 * n),
+            open="1.0",
+            high="1.0",
+            low="1.0",
+            close="1.0",
+            volume=1,
+        )
+        db_session.add(bar)
+    db_session.flush()
+
+    rows = repo.get_bar_inventory(symbols=["EURUSD"], timeframe="15m")
+    assert len(rows) == 1
+    assert rows[0].row_count == 5
+    assert rows[0].min_ts == base
+    assert rows[0].max_ts == base + timedelta(minutes=60)
+
+
+def test_get_bar_inventory_filters_by_timeframe(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    base = datetime(2026, 4, 1, 0, 0, 0)
+    db_session.add(
+        CandleRecord(
+            symbol="EURUSD",
+            interval="15m",
+            timestamp=base,
+            open="1.0",
+            high="1.0",
+            low="1.0",
+            close="1.0",
+            volume=1,
+        )
+    )
+    db_session.add(
+        CandleRecord(
+            symbol="EURUSD",
+            interval="1h",
+            timestamp=base,
+            open="1.0",
+            high="1.0",
+            low="1.0",
+            close="1.0",
+            volume=1,
+        )
+    )
+    db_session.flush()
+
+    rows = repo.get_bar_inventory(symbols=["EURUSD"], timeframe="15m")
+    assert rows[0].row_count == 1
+
+
+def test_get_bar_inventory_returns_one_row_per_input_symbol(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    base = datetime(2026, 4, 1, 0, 0, 0)
+    db_session.add(
+        CandleRecord(
+            symbol="EURUSD",
+            interval="15m",
+            timestamp=base,
+            open="1.0",
+            high="1.0",
+            low="1.0",
+            close="1.0",
+            volume=1,
+        )
+    )
+    db_session.flush()
+
+    rows = repo.get_bar_inventory(symbols=["EURUSD", "GBPUSD"], timeframe="15m")
+    assert {r.symbol for r in rows} == {"EURUSD", "GBPUSD"}
+    eur = next(r for r in rows if r.symbol == "EURUSD")
+    gbp = next(r for r in rows if r.symbol == "GBPUSD")
+    assert eur.row_count == 1
+    assert gbp.row_count == 0
+    assert gbp.min_ts is None
+
+
+def test_get_bar_inventory_wraps_driver_error(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    with patch.object(
+        db_session,
+        "execute",
+        side_effect=OperationalError("stmt", {}, Exception("db gone")),
+    ):
+        with pytest.raises(DatasetRepositoryError):
+            repo.get_bar_inventory(symbols=["EURUSD"], timeframe="15m")
+
+
+# ---------------------------------------------------------------------------
+# get_strategies_using
+# ---------------------------------------------------------------------------
+
+
+def test_get_strategies_using_empty_ref_returns_empty(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.get_strategies_using("") == []
+
+
+def test_get_strategies_using_zero_limit_returns_empty(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.get_strategies_using("any-ref", limit=0) == []
+
+
+def test_get_strategies_using_no_runs_returns_empty(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.get_strategies_using("never-referenced") == []
+
+
+def test_get_strategies_using_returns_distinct_with_name(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    user_id = _seed_user(db_session)
+    strat_a = _seed_strategy(
+        db_session,
+        strategy_id="01HSTRAT00000000000000000A",
+        name="Strategy A",
+        created_by=user_id,
+    )
+    strat_b = _seed_strategy(
+        db_session,
+        strategy_id="01HSTRAT00000000000000000B",
+        name="Strategy B",
+        created_by=user_id,
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN00000000000000000001",
+        strategy_id=strat_a,
+        dataset_ref="match-ref",
+        completed_at=datetime(2026, 4, 24, 12, 0, 0),
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN00000000000000000002",
+        strategy_id=strat_a,
+        dataset_ref="match-ref",
+        completed_at=datetime(2026, 4, 25, 12, 0, 0),
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN00000000000000000003",
+        strategy_id=strat_b,
+        dataset_ref="match-ref",
+        completed_at=datetime(2026, 4, 24, 12, 0, 0),
+    )
+
+    rows = repo.get_strategies_using("match-ref")
+    assert [r.strategy_id for r in rows] == [strat_a, strat_b]
+    assert rows[0].name == "Strategy A"
+    assert rows[0].last_used_at == datetime(2026, 4, 25, 12, 0, 0)
+    assert rows[1].name == "Strategy B"
+
+
+def test_get_strategies_using_filters_by_dataset_ref(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    user_id = _seed_user(db_session)
+    strat_a = _seed_strategy(
+        db_session,
+        strategy_id="01HSTRAT00000000000000000A",
+        name="Strategy A",
+        created_by=user_id,
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN00000000000000000001",
+        strategy_id=strat_a,
+        dataset_ref="match-ref",
+        completed_at=datetime(2026, 4, 25, 12, 0, 0),
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN00000000000000000002",
+        strategy_id=strat_a,
+        dataset_ref="other-ref",
+        completed_at=datetime(2026, 4, 25, 12, 0, 0),
+    )
+    rows = repo.get_strategies_using("match-ref")
+    assert len(rows) == 1
+    assert rows[0].strategy_id == strat_a
+
+
+def test_get_strategies_using_caps_at_limit(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    user_id = _seed_user(db_session)
+    base_ts = datetime(2026, 4, 1, 0, 0, 0)
+    for n in range(15):
+        sid = f"01HSTRAT00000000000000{n:04d}"[:26]
+        _seed_strategy(
+            db_session,
+            strategy_id=sid,
+            name=f"Strategy {n}",
+            created_by=user_id,
+        )
+        _seed_run(
+            db_session,
+            run_id=f"01HRUN0000000000000000{n:04d}"[:26],
+            strategy_id=sid,
+            dataset_ref="match-ref",
+            completed_at=base_ts + timedelta(hours=n),
+        )
+
+    rows = repo.get_strategies_using("match-ref", limit=10)
+    assert len(rows) == 10
+
+
+# ---------------------------------------------------------------------------
+# get_recent_runs
+# ---------------------------------------------------------------------------
+
+
+def test_get_recent_runs_empty_ref_returns_empty(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.get_recent_runs("") == []
+
+
+def test_get_recent_runs_zero_limit_returns_empty(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.get_recent_runs("any-ref", limit=0) == []
+
+
+def test_get_recent_runs_returns_filtered_and_ordered(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    user_id = _seed_user(db_session)
+    strat_a = _seed_strategy(
+        db_session,
+        strategy_id="01HSTRAT00000000000000000A",
+        name="A",
+        created_by=user_id,
+    )
+
+    _seed_run(
+        db_session,
+        run_id="01HRUN000000000000000OLDER",
+        strategy_id=strat_a,
+        dataset_ref="match-ref",
+        completed_at=datetime(2026, 4, 20, 12, 0, 0),
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN000000000000000NEWER",
+        strategy_id=strat_a,
+        dataset_ref="match-ref",
+        completed_at=datetime(2026, 4, 25, 12, 0, 0),
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN000000000000000RUNNG",
+        strategy_id=strat_a,
+        dataset_ref="match-ref",
+        status="running",
+        completed_at=None,
+    )
+    # An "other-ref" run that must be filtered out.
+    _seed_run(
+        db_session,
+        run_id="01HRUN000000000000000OTHER",
+        strategy_id=strat_a,
+        dataset_ref="other-ref",
+        completed_at=datetime(2026, 4, 26, 12, 0, 0),
+    )
+
+    rows = repo.get_recent_runs("match-ref")
+    ids = [r.run_id for r in rows]
+    # Still-running (NULL completed_at) surfaces first; then most-recent
+    # completed; "other-ref" run is excluded.
+    assert ids == [
+        "01HRUN000000000000000RUNNG",
+        "01HRUN000000000000000NEWER",
+        "01HRUN000000000000000OLDER",
+    ]
+    assert rows[0].status == "running"
+    assert rows[0].completed_at is None
+
+
+def test_get_recent_runs_caps_at_limit(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    user_id = _seed_user(db_session)
+    strat_a = _seed_strategy(
+        db_session,
+        strategy_id="01HSTRAT00000000000000000A",
+        name="A",
+        created_by=user_id,
+    )
+    base = datetime(2026, 4, 1, 0, 0, 0)
+    for n in range(15):
+        _seed_run(
+            db_session,
+            run_id=f"01HRUN0000000000000000{n:04d}"[:26],
+            strategy_id=strat_a,
+            dataset_ref="match-ref",
+            completed_at=base + timedelta(hours=n),
+        )
+    rows = repo.get_recent_runs("match-ref", limit=10)
+    assert len(rows) == 10
+
+
+def test_get_recent_runs_skips_runs_without_data_selection(db_session: Session) -> None:
+    """Runs with a config_json missing data_selection must not match."""
+    repo = SqlDatasetRepository(db=db_session)
+    user_id = _seed_user(db_session)
+    strat_a = _seed_strategy(
+        db_session,
+        strategy_id="01HSTRAT00000000000000000A",
+        name="A",
+        created_by=user_id,
+    )
+    _seed_run(
+        db_session,
+        run_id="01HRUN000000000000000NODSL",
+        strategy_id=strat_a,
+        dataset_ref=None,  # No data_selection at all.
+        completed_at=datetime(2026, 4, 25, 12, 0, 0),
+    )
+    assert repo.get_recent_runs("match-ref") == []
+
+
+def test_get_recent_runs_wraps_driver_error(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    with patch.object(
+        db_session,
+        "execute",
+        side_effect=OperationalError("stmt", {}, Exception("db gone")),
+    ):
+        with pytest.raises(DatasetRepositoryError):
+            repo.get_recent_runs("any-ref")

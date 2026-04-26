@@ -40,8 +40,9 @@ Example:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 
 import structlog
 from sqlalchemy import func, select
@@ -49,11 +50,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from libs.contracts.interfaces.dataset_repository_interface import (
+    BarInventoryAggregate,
     DatasetRecord,
     DatasetRepositoryError,
     DatasetRepositoryInterface,
+    RecentRunRecord,
+    StrategyUsageRecord,
 )
-from libs.contracts.models import Dataset
+from libs.contracts.models import CandleRecord, Dataset, ResearchRun, Strategy
 
 logger = structlog.get_logger(__name__)
 
@@ -337,10 +341,322 @@ class SqlDatasetRepository(DatasetRepositoryInterface):
 
         return [_to_record(r) for r in rows], total
 
+    # ------------------------------------------------------------------
+    # Detail-page projections (M4.E3 follow-up)
+    # ------------------------------------------------------------------
+
+    def get_bar_inventory(
+        self,
+        *,
+        symbols: list[str],
+        timeframe: str,
+    ) -> list[BarInventoryAggregate]:
+        """
+        Aggregate :class:`CandleRecord` rows by symbol for the given
+        timeframe.
+
+        One ``GROUP BY symbol`` SELECT against the candle-records table
+        filtered to ``symbol IN :symbols AND interval = :timeframe``.
+        Symbols with no candle rows are returned with ``row_count=0``
+        and ``min_ts=max_ts=None`` so the detail UI can render a
+        per-symbol "no data ingested" badge consistently.
+        """
+        if not symbols:
+            return []
+
+        try:
+            stmt = (
+                select(
+                    CandleRecord.symbol,
+                    func.count(CandleRecord.id),
+                    func.min(CandleRecord.timestamp),
+                    func.max(CandleRecord.timestamp),
+                )
+                .where(CandleRecord.symbol.in_(list(symbols)))
+                .where(CandleRecord.interval == timeframe)
+                .group_by(CandleRecord.symbol)
+            )
+            rows = list(self._db.execute(stmt).all())
+        except SQLAlchemyError as exc:
+            logger.error(
+                "dataset_repository.get_bar_inventory.failed",
+                component="SqlDatasetRepository",
+                operation="get_bar_inventory",
+                timeframe=timeframe,
+                symbols_count=len(symbols),
+                error=str(exc),
+                exc_info=True,
+            )
+            raise DatasetRepositoryError(
+                f"Failed to aggregate bar inventory for timeframe={timeframe!r}"
+            ) from exc
+
+        # Index aggregates by symbol so we can fill zero rows for
+        # symbols that returned no group.
+        by_symbol: dict[str, tuple[int, datetime | None, datetime | None]] = {}
+        for row in rows:
+            symbol_value = str(row[0])
+            count_value = int(row[1] or 0)
+            min_value = cast(datetime | None, row[2])
+            max_value = cast(datetime | None, row[3])
+            by_symbol[symbol_value] = (count_value, min_value, max_value)
+
+        out: list[BarInventoryAggregate] = []
+        for symbol in sorted(symbols):
+            agg = by_symbol.get(symbol)
+            if agg is None:
+                out.append(
+                    BarInventoryAggregate(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        row_count=0,
+                        min_ts=None,
+                        max_ts=None,
+                    )
+                )
+            else:
+                count_value, min_value, max_value = agg
+                out.append(
+                    BarInventoryAggregate(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        row_count=count_value,
+                        min_ts=min_value,
+                        max_ts=max_value,
+                    )
+                )
+        return out
+
+    def get_strategies_using(
+        self,
+        dataset_ref: str,
+        *,
+        limit: int = 10,
+    ) -> list[StrategyUsageRecord]:
+        """
+        Project distinct ``strategy_id`` values from research runs whose
+        :attr:`ResearchRun.config_json` carries a matching
+        ``data_selection.dataset_ref``.
+
+        The ``config_json`` column is a JSON blob; portable JSON-path
+        filtering (Postgres ``->>`` vs SQLite ``json_extract``) would
+        fork the query. To keep the repository portable across the
+        SQLite test path and the Postgres production path, this method
+        SELECTs candidate runs ordered by ``completed_at DESC NULLS
+        LAST`` (the natural recency ordering) and filters in Python.
+
+        We bound the candidate fetch at ``max(limit * 50, 200)`` rows
+        so the worst case (a busy strategy with hundreds of runs not
+        matching this dataset) still terminates promptly. The bound is
+        intentionally generous because filtering is cheap (a dict
+        lookup on already-loaded JSON) and the alternative — exposing
+        a SQL JSON path through a portable shim — is more brittle.
+        """
+        if not dataset_ref or limit <= 0:
+            return []
+
+        candidate_limit = max(limit * 50, 200)
+        try:
+            run_stmt = (
+                select(
+                    ResearchRun.id,
+                    ResearchRun.strategy_id,
+                    ResearchRun.config_json,
+                    ResearchRun.completed_at,
+                )
+                .order_by(
+                    ResearchRun.completed_at.desc().nullslast(),
+                    ResearchRun.created_at.desc(),
+                )
+                .limit(candidate_limit)
+            )
+            run_rows = list(self._db.execute(run_stmt).all())
+        except SQLAlchemyError as exc:
+            logger.error(
+                "dataset_repository.get_strategies_using.failed",
+                component="SqlDatasetRepository",
+                operation="get_strategies_using",
+                dataset_ref=dataset_ref,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise DatasetRepositoryError(
+                f"Failed to query strategies for dataset_ref={dataset_ref!r}"
+            ) from exc
+
+        # Group: strategy_id -> most-recent completed_at across matching
+        # runs.
+        per_strategy: dict[str, datetime | None] = {}
+        for row in run_rows:
+            run_strategy_id = str(row[1])
+            run_config = _coerce_config(row[2])
+            if _config_dataset_ref(run_config) != dataset_ref:
+                continue
+            completed_at = cast(datetime | None, row[3])
+            existing = per_strategy.get(run_strategy_id, _MISSING)
+            if existing is _MISSING:
+                per_strategy[run_strategy_id] = completed_at
+                continue
+            if completed_at is None:
+                # Keep the existing value (may already be a real ts).
+                continue
+            existing_dt = cast(datetime | None, existing)
+            if existing_dt is None or completed_at > existing_dt:
+                per_strategy[run_strategy_id] = completed_at
+
+        if not per_strategy:
+            return []
+
+        # Resolve display names with a single IN-clause SELECT.
+        try:
+            name_stmt = select(Strategy.id, Strategy.name).where(
+                Strategy.id.in_(list(per_strategy.keys()))
+            )
+            names = {str(row[0]): str(row[1]) for row in self._db.execute(name_stmt).all()}
+        except SQLAlchemyError as exc:
+            logger.error(
+                "dataset_repository.get_strategies_using.name_lookup_failed",
+                component="SqlDatasetRepository",
+                operation="get_strategies_using",
+                dataset_ref=dataset_ref,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise DatasetRepositoryError(
+                f"Failed to resolve strategy names for dataset_ref={dataset_ref!r}"
+            ) from exc
+
+        # Sort: most-recent first, NULLs last, stable on strategy_id.
+        def _sort_key(item: tuple[str, datetime | None]) -> tuple[int, float, str]:
+            sid, last = item
+            if last is None:
+                return (1, 0.0, sid)
+            return (0, -last.timestamp(), sid)
+
+        ordered = sorted(per_strategy.items(), key=_sort_key)
+        return [
+            StrategyUsageRecord(
+                strategy_id=sid,
+                name=names.get(sid, ""),
+                last_used_at=last,
+            )
+            for sid, last in ordered[:limit]
+        ]
+
+    def get_recent_runs(
+        self,
+        dataset_ref: str,
+        *,
+        limit: int = 10,
+    ) -> list[RecentRunRecord]:
+        """
+        Return the most recent ``limit`` :class:`ResearchRun` rows whose
+        ``config_json.data_selection.dataset_ref`` matches.
+
+        Same Python-side JSON filter as :meth:`get_strategies_using`
+        (see that docstring for the rationale on why we do not push the
+        filter into SQL). Runs without a ``completed_at`` (still in
+        flight) sort first so operators see active work at the top of
+        the list.
+        """
+        if not dataset_ref or limit <= 0:
+            return []
+
+        candidate_limit = max(limit * 50, 200)
+        try:
+            stmt = (
+                select(
+                    ResearchRun.id,
+                    ResearchRun.strategy_id,
+                    ResearchRun.status,
+                    ResearchRun.completed_at,
+                    ResearchRun.config_json,
+                    ResearchRun.created_at,
+                )
+                .order_by(
+                    # NULLs first → still-running runs surface at the top
+                    # of the recent-runs panel; completed runs follow in
+                    # most-recent-first order.
+                    ResearchRun.completed_at.desc().nullsfirst(),
+                    ResearchRun.created_at.desc(),
+                )
+                .limit(candidate_limit)
+            )
+            rows = list(self._db.execute(stmt).all())
+        except SQLAlchemyError as exc:
+            logger.error(
+                "dataset_repository.get_recent_runs.failed",
+                component="SqlDatasetRepository",
+                operation="get_recent_runs",
+                dataset_ref=dataset_ref,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise DatasetRepositoryError(
+                f"Failed to query recent runs for dataset_ref={dataset_ref!r}"
+            ) from exc
+
+        out: list[RecentRunRecord] = []
+        for row in rows:
+            cfg = _coerce_config(row[4])
+            if _config_dataset_ref(cfg) != dataset_ref:
+                continue
+            out.append(
+                RecentRunRecord(
+                    run_id=str(row[0]),
+                    strategy_id=str(row[1]),
+                    status=str(row[2]),
+                    completed_at=cast(datetime | None, row[3]),
+                )
+            )
+            if len(out) >= limit:
+                break
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Translation helpers
 # ---------------------------------------------------------------------------
+
+
+# Sentinel distinct from ``None`` so :meth:`get_strategies_using` can
+# distinguish "key not seen yet" from "key seen, value is None".
+_MISSING: Any = object()
+
+
+def _coerce_config(raw: Any) -> dict[str, Any]:
+    """
+    Coerce the polymorphic ``config_json`` column into a dict.
+
+    The SQLAlchemy ``JSON`` column type returns the parsed Python value
+    when both Postgres and SQLite drivers are used, but defensive code
+    in production has been observed to write the column as a JSON string
+    on a few legacy paths. This helper handles both.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+    return {}
+
+
+def _config_dataset_ref(cfg: dict[str, Any]) -> str | None:
+    """
+    Extract ``data_selection.dataset_ref`` from a research-run config
+    blob, or return ``None`` if either key is missing.
+    """
+    selection = cfg.get("data_selection")
+    if not isinstance(selection, dict):
+        return None
+    ref = selection.get("dataset_ref")
+    if isinstance(ref, str):
+        return ref
+    return None
 
 
 def _to_record(row: Dataset) -> DatasetRecord:
