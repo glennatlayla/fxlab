@@ -389,3 +389,66 @@ class StrategyServiceInterface(ABC):
         Returns:
             Dict with is_valid, errors, indicators_used, variables_used.
         """
+
+    @abstractmethod
+    def validate_ir(self, ir_text: str) -> Any:
+        """
+        Run the IR import pipeline against ``ir_text`` WITHOUT persisting.
+
+        Same JSON parse + Pydantic schema validation + reference
+        resolution that :meth:`create_from_ir` runs before persistence.
+        Idempotent + side-effect-free: no repository writes, no audit
+        log entries beyond the request-scoped INFO line.
+
+        Behavioural contract:
+
+        - Always returns a :class:`StrategyValidationReport` — never
+          raises. Pydantic / parser / resolver exceptions are mapped
+          into typed :class:`ValidationIssue` rows on the report.
+        - Collects every detected error rather than failing fast on the
+          first. Capped at :data:`MAX_VALIDATION_ISSUES` so a deeply
+          broken IR cannot produce an unbounded response; the cap is
+          surfaced as a trailing ``code="truncated"`` issue.
+        - On success, ``parsed_ir`` carries the canonical parsed dict
+          (the exact JSON the caller submitted, key-order preserved
+          via ``json.loads``).
+
+        Args:
+            ir_text: Raw IR JSON text. Empty / whitespace-only input is
+                treated as an invalid-JSON failure (one issue at path
+                ``"/"`` with code ``"invalid_json"``).
+
+        Returns:
+            :class:`libs.contracts.strategy.StrategyValidationReport`.
+
+        Raises:
+            Nothing — this method NEVER lets an exception escape. All
+            failure modes are reported through the return value.
+        """
+
+    @abstractmethod
+    def get_strategy_ir_json(self, strategy_id: str) -> str:
+        """
+        Return the canonical IR JSON text for a stored strategy.
+
+        Looks up the strategy via the repository and returns the
+        ``code`` column verbatim — the original JSON the operator
+        imported (canonicalised at write time via
+        ``json.dumps(..., sort_keys=True)`` for ir_upload rows).
+
+        Fallback for legacy rows: if ``code`` is empty / null (which
+        should never happen for current schema, but can occur for
+        rows manually inserted in tests or pre-canonical migrations),
+        re-serialise from the parsed IR via
+        ``json.dumps(parsed_ir, indent=2, sort_keys=True)`` so the
+        download always yields a parseable JSON document.
+
+        Args:
+            strategy_id: ULID of the strategy whose IR JSON to fetch.
+
+        Returns:
+            JSON-encoded IR text suitable for browser download.
+
+        Raises:
+            NotFoundError: If the strategy does not exist.
+        """

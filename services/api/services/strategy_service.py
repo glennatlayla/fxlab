@@ -48,8 +48,18 @@ from libs.contracts.errors import (
 from libs.contracts.interfaces.strategy_repository_interface import (
     StrategyRepositoryInterface,
 )
-from libs.contracts.strategy import StrategyListItem, StrategyListPage
+from libs.contracts.strategy import (
+    MAX_VALIDATION_ISSUES,
+    StrategyListItem,
+    StrategyListPage,
+    StrategyValidationReport,
+    ValidationIssue,
+)
 from libs.contracts.strategy_ir import StrategyIR
+from libs.strategy_ir.reference_resolver import (
+    IRReferenceError,
+    ReferenceResolver,
+)
 from services.api.services.dsl_validator import (
     DslValidationResult,
     validate_dsl,
@@ -121,6 +131,201 @@ def _build_strategy_code(
         code_doc["parameters"] = parameters
 
     return json.dumps(code_doc, sort_keys=True)
+
+
+def _pydantic_loc_to_pointer(loc: tuple[Any, ...]) -> str:
+    """
+    Convert a Pydantic ``error['loc']`` tuple into an RFC 6901 JSON pointer.
+
+    Pydantic locates errors as a tuple of mixed strings (object keys)
+    and ints (list indices), e.g. ``("metadata", "strategy_name")`` or
+    ``("indicators", 3, "length")``. The validate-IR contract surfaces
+    paths as JSON pointers (``"/metadata/strategy_name"``,
+    ``"/indicators/3/length"``) so the frontend's error renderer can
+    use a single path-formatting routine across every call site.
+
+    Args:
+        loc: Pydantic error ``loc`` tuple.
+
+    Returns:
+        ``"/"`` for an empty tuple, otherwise a slash-joined pointer
+        with each segment escaped per RFC 6901 (``~`` → ``~0``,
+        ``/`` → ``~1``).
+
+    Example:
+        >>> _pydantic_loc_to_pointer(("metadata", "strategy_name"))
+        '/metadata/strategy_name'
+        >>> _pydantic_loc_to_pointer(("indicators", 3, "length"))
+        '/indicators/3/length'
+        >>> _pydantic_loc_to_pointer(())
+        '/'
+    """
+    if not loc:
+        return "/"
+    parts: list[str] = []
+    for segment in loc:
+        token = str(segment)
+        # RFC 6901 escape: ``~`` first, then ``/`` — ordering matters.
+        token = token.replace("~", "~0").replace("/", "~1")
+        parts.append(token)
+    return "/" + "/".join(parts)
+
+
+def _resolver_location_to_pointer(location: str) -> str:
+    """
+    Convert a :class:`ReferenceResolver` dotted location into a JSON pointer.
+
+    The resolver emits locations like
+    ``entry_logic.long.conditions[0].lhs`` and
+    ``indicators[3].mean_source``; the validate-IR contract pins paths
+    to JSON pointer form so the frontend's error renderer is uniform.
+    Bracket indices and dotted segments are both flattened into pointer
+    segments.
+
+    Args:
+        location: Resolver location hint.
+
+    Returns:
+        A leading-slash JSON pointer. ``"/"`` when the location is
+        blank.
+
+    Example:
+        >>> _resolver_location_to_pointer("entry_logic.long.conditions[0].lhs")
+        '/entry_logic/long/conditions/0/lhs'
+        >>> _resolver_location_to_pointer("indicators[3].mean_source")
+        '/indicators/3/mean_source'
+    """
+    if not location:
+        return "/"
+    # Replace [N] with .N, then split on '.', drop empties so consecutive
+    # separators don't yield blank segments.
+    normalised = location.replace("[", ".").replace("]", "")
+    parts = [seg for seg in normalised.split(".") if seg]
+    if not parts:
+        return "/"
+    escaped = [seg.replace("~", "~0").replace("/", "~1") for seg in parts]
+    return "/" + "/".join(escaped)
+
+
+def _parse_and_validate_ir(
+    ir_text_or_dict: str | dict[str, Any],
+) -> tuple[dict[str, Any] | None, StrategyIR | None, list[ValidationIssue]]:
+    """
+    Run the canonical IR pipeline: JSON parse → Pydantic → reference resolution.
+
+    Shared between :meth:`StrategyService.create_from_ir` (which raises
+    on the first failing stage so the import endpoint can return 400)
+    and :meth:`StrategyService.validate_ir` (which collects every issue
+    and returns a non-raising report).
+
+    The pipeline runs each stage in order; if a stage fails, downstream
+    stages are skipped because they would only produce derivative
+    errors:
+
+    1. JSON parse — failure produces a single
+       ``code="invalid_json"`` issue at path ``/`` and short-circuits.
+    2. Pydantic schema validation — failure produces one
+       ``code="schema_violation"`` issue per Pydantic error.
+    3. Reference resolution (`ReferenceResolver`) — failure produces
+       a single ``code="undefined_reference"`` issue (the resolver
+       raises on the first dangling reference; collecting all of
+       them would require a deeper rewrite of that library).
+
+    Args:
+        ir_text_or_dict: Raw IR text (validate path) or a pre-parsed
+            dict (import path that already parsed via UploadFile).
+
+    Returns:
+        ``(parsed_dict, strategy_ir, issues)``. On success
+        ``strategy_ir`` is the validated model and ``issues`` is empty.
+        On any failure ``strategy_ir`` is ``None`` and ``issues``
+        contains at least one row. ``parsed_dict`` is ``None`` only
+        when JSON parsing itself failed.
+
+    Raises:
+        Nothing — every failure is captured in the ``issues`` list.
+    """
+    issues: list[ValidationIssue] = []
+
+    # ---- Stage 1: JSON parse (only when input is text). ----
+    parsed_dict: dict[str, Any] | None
+    if isinstance(ir_text_or_dict, str):
+        if not ir_text_or_dict.strip():
+            issues.append(
+                ValidationIssue(
+                    path="/",
+                    code="invalid_json",
+                    message="IR text is empty.",
+                )
+            )
+            return None, None, issues
+        try:
+            parsed = json.loads(ir_text_or_dict)
+        except json.JSONDecodeError as exc:
+            issues.append(
+                ValidationIssue(
+                    path="/",
+                    code="invalid_json",
+                    message=f"IR is not valid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})",
+                )
+            )
+            return None, None, issues
+        if not isinstance(parsed, dict):
+            issues.append(
+                ValidationIssue(
+                    path="/",
+                    code="invalid_json",
+                    message=(f"IR root must be a JSON object, got {type(parsed).__name__}."),
+                )
+            )
+            return None, None, issues
+        parsed_dict = parsed
+    else:
+        parsed_dict = ir_text_or_dict
+
+    # ---- Stage 2: Pydantic schema validation. ----
+    try:
+        ir_model = StrategyIR.model_validate(parsed_dict)
+    except PydanticValidationError as exc:
+        for err in exc.errors():
+            issues.append(
+                ValidationIssue(
+                    path=_pydantic_loc_to_pointer(tuple(err.get("loc", ()))),
+                    code="schema_violation",
+                    message=str(err.get("msg", "validation failed")),
+                )
+            )
+        # Schema failures short-circuit reference resolution because the
+        # resolver assumes a well-typed StrategyIR — running it on a
+        # half-built dict would just produce confusing AttributeErrors.
+        return parsed_dict, None, issues
+
+    # ---- Stage 3: Reference resolution. ----
+    try:
+        ReferenceResolver(ir_model).resolve()
+    except IRReferenceError as exc:
+        # The resolver raises on the first dangling identifier. Its
+        # message format is
+        # ``"unresolved identifier 'X' at <location>; ..."`` — extract
+        # the location hint when present so the issue's path field is
+        # useful for the operator.
+        message = str(exc)
+        path = "/"
+        if " at " in message:
+            tail = message.split(" at ", 1)[1]
+            location_hint = tail.split(";", 1)[0].strip()
+            if location_hint:
+                path = _resolver_location_to_pointer(location_hint)
+        issues.append(
+            ValidationIssue(
+                path=path,
+                code="undefined_reference",
+                message=message,
+            )
+        )
+        return parsed_dict, None, issues
+
+    return parsed_dict, ir_model, issues
 
 
 def _format_validation_result(result: DslValidationResult) -> dict[str, Any]:
@@ -336,23 +541,21 @@ class StrategyService(StrategyServiceInterface):
             operation="create_from_ir",
         )
 
-        # Schema validation. Pydantic produces a structured error list
-        # with dotted paths into the document — we surface that path
-        # verbatim so M2.C1 acceptance "400 with the validation error
-        # path in the response body" is satisfied without bespoke
-        # reformatting at the controller layer.
-        try:
-            ir_model = StrategyIR.model_validate(ir_dict)
-        except PydanticValidationError as exc:
-            errors = exc.errors()
-            paths = [
-                "{path}: {msg}".format(
-                    path=".".join(str(p) for p in err.get("loc", ())) or "<root>",
-                    msg=err.get("msg", "validation failed"),
-                )
-                for err in errors
-            ]
-            raise ValidationError("; ".join(paths)) from exc
+        # Run the canonical IR pipeline (parse + Pydantic + reference
+        # resolution). Shared with ``validate_ir`` so the validate-IR
+        # endpoint and the import-IR endpoint apply byte-identical
+        # semantics — operators never see "valid in the validate panel
+        # but rejected by import" inconsistencies.
+        #
+        # M2.C1 acceptance is "400 with the validation error path in
+        # the response body". The helper produces JSON-pointer paths
+        # (e.g. ``/metadata/strategy_name``) so the controller surfaces
+        # them verbatim. Concatenating into a single ValidationError
+        # message preserves the existing 400 body shape that
+        # downstream tests pin against.
+        _parsed, ir_model, issues = _parse_and_validate_ir(ir_dict)
+        if ir_model is None:
+            raise ValidationError("; ".join(f"{issue.path}: {issue.message}" for issue in issues))
 
         # Canonicalise the IR body before persistence. Sorting keys
         # gives M2.C4's deep-equal round-trip a stable representation
@@ -1107,3 +1310,196 @@ class StrategyService(StrategyServiceInterface):
         """
         result = validate_dsl(expression)
         return _format_validation_result(result)
+
+    def validate_ir(self, ir_text: str) -> StrategyValidationReport:
+        """
+        Run the IR import pipeline against ``ir_text`` WITHOUT persisting.
+
+        See :meth:`StrategyServiceInterface.validate_ir` for the full
+        contract. This implementation:
+
+        - Delegates to :func:`_parse_and_validate_ir` so the validate
+          path and the import path apply byte-identical semantics.
+        - Catches every exception (including unexpected ones) and
+          maps them to typed :class:`ValidationIssue` rows so the
+          method NEVER raises. A leaked exception here would surface
+          as a 500 in the route layer, which the operator-facing
+          contract explicitly forbids (the request itself succeeded;
+          only the IR's validity is in question).
+        - Caps the issue list at :data:`MAX_VALIDATION_ISSUES` to
+          bound the response payload. When truncation fires, the
+          final :class:`ValidationIssue` carries
+          ``code="truncated"`` so the operator sees that more
+          errors exist beyond what was rendered.
+        - Persists nothing — the repository is never touched.
+
+        Args:
+            ir_text: Raw IR JSON text from the operator's textarea.
+
+        Returns:
+            :class:`StrategyValidationReport` with ``valid`` flag,
+            ``parsed_ir`` (on success), and ``errors`` / ``warnings``
+            lists.
+        """
+        logger.info(
+            "strategy.validate_ir.started",
+            text_len=len(ir_text or ""),
+            component="StrategyService",
+            operation="validate_ir",
+        )
+
+        try:
+            parsed_dict, ir_model, issues = _parse_and_validate_ir(ir_text)
+        except Exception as exc:  # pragma: no cover — defensive guard
+            # The helper is supposed to capture every failure mode in
+            # the issues list. If something slips through (e.g. a future
+            # refactor of the resolver leaks a non-IRReferenceError),
+            # surface it as an unexpected_error issue rather than a 500
+            # so the operator's UX is "validation failed, here is why"
+            # not "the server crashed".
+            logger.error(
+                "strategy.validate_ir.unexpected_error",
+                error=str(exc),
+                component="StrategyService",
+                operation="validate_ir",
+                exc_info=True,
+            )
+            return StrategyValidationReport(
+                valid=False,
+                parsed_ir=None,
+                errors=[
+                    ValidationIssue(
+                        path="/",
+                        code="unexpected_error",
+                        message=f"Validator raised {type(exc).__name__}: {exc}",
+                    )
+                ],
+                warnings=[],
+            )
+
+        # Cap the error list at MAX_VALIDATION_ISSUES. We keep the cap
+        # one short and append a synthetic "truncated" issue so the
+        # operator sees that more errors exist — surfacing only the
+        # head silently would mislead them about the IR's true state.
+        capped_errors: list[ValidationIssue]
+        if len(issues) > MAX_VALIDATION_ISSUES:
+            capped_errors = list(issues[: MAX_VALIDATION_ISSUES - 1])
+            extra = len(issues) - len(capped_errors)
+            capped_errors.append(
+                ValidationIssue(
+                    path="/",
+                    code="truncated",
+                    message=(
+                        f"Showing {len(capped_errors)} of {len(issues)} errors; "
+                        f"{extra} additional issue(s) were truncated."
+                    ),
+                )
+            )
+        else:
+            capped_errors = list(issues)
+
+        is_valid = ir_model is not None and not capped_errors
+
+        report = StrategyValidationReport(
+            valid=is_valid,
+            parsed_ir=parsed_dict if is_valid else None,
+            errors=capped_errors,
+            warnings=[],
+        )
+
+        logger.info(
+            "strategy.validate_ir.completed",
+            valid=is_valid,
+            error_count=len(capped_errors),
+            component="StrategyService",
+            operation="validate_ir",
+        )
+        return report
+
+    def get_strategy_ir_json(self, strategy_id: str) -> str:
+        """
+        Return the canonical IR JSON text for a stored strategy.
+
+        See :meth:`StrategyServiceInterface.get_strategy_ir_json` for
+        the full contract. Behaviour:
+
+        1. Resolve the strategy via the repository. Missing →
+           :class:`NotFoundError` (route maps to 404).
+        2. Return the persisted ``code`` text verbatim when present.
+           For ``source="ir_upload"`` rows this is the canonical IR
+           JSON written by ``create_from_ir`` (sort_keys=True).
+        3. Fallback for legacy / hand-inserted rows whose ``code`` is
+           missing or empty: re-serialise from the parsed payload via
+           ``json.dumps(..., indent=2, sort_keys=True)`` so the
+           download still yields a parseable JSON document.
+
+        Args:
+            strategy_id: ULID of the strategy.
+
+        Returns:
+            JSON-encoded IR text suitable for browser download.
+
+        Raises:
+            NotFoundError: If the strategy does not exist.
+        """
+        logger.info(
+            "strategy.get_strategy_ir_json.started",
+            strategy_id=strategy_id,
+            component="StrategyService",
+            operation="get_strategy_ir_json",
+        )
+
+        strategy = self._strategy_repo.get_by_id(strategy_id)
+        if strategy is None:
+            logger.warning(
+                "strategy.get_strategy_ir_json.not_found",
+                strategy_id=strategy_id,
+                component="StrategyService",
+                operation="get_strategy_ir_json",
+            )
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+
+        raw_code = strategy.get("code")
+        if isinstance(raw_code, str) and raw_code.strip():
+            logger.info(
+                "strategy.get_strategy_ir_json.completed",
+                strategy_id=strategy_id,
+                bytes=len(raw_code),
+                fallback=False,
+                component="StrategyService",
+                operation="get_strategy_ir_json",
+            )
+            return raw_code
+
+        # Fallback path — code missing/blank. Recover the IR by
+        # parsing whatever we have and pretty-printing it. This is
+        # the documented behaviour for legacy rows; we log it so an
+        # operator notices when the fallback fires.
+        logger.warning(
+            "strategy.get_strategy_ir_json.code_blank_using_fallback",
+            strategy_id=strategy_id,
+            component="StrategyService",
+            operation="get_strategy_ir_json",
+        )
+
+        # Try to recover via the parsed-IR view path for source=ir_upload
+        # rows. For draft_form rows there is no parsed_ir; we surface
+        # whatever the row's code field can be coerced into.
+        source = strategy.get("source") or "draft_form"
+        if source == "ir_upload":
+            try:
+                detail = self.get_with_parsed_ir(strategy_id)
+                parsed_ir = detail.get("parsed_ir")
+                if isinstance(parsed_ir, dict):
+                    return json.dumps(parsed_ir, indent=2, sort_keys=True)
+            except (NotFoundError, ValidationError):
+                # If the round-trip itself fails, surface an empty
+                # JSON object rather than raising — the download is
+                # informational, not a contract endpoint that
+                # callers depend on for state.
+                pass
+
+        # Absolute last resort: an empty JSON object so the download
+        # always produces a parseable file. Keeps the contract
+        # ("returns IR JSON text") truthful even on degraded inputs.
+        return "{}"

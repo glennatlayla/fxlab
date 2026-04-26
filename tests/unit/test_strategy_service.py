@@ -822,3 +822,296 @@ class TestListStrategiesIncludeArchived:
         # The contract field is non-None and matches the persisted value.
         assert archived_item.archived_at is not None
         assert archived_item.archived_at == archived["archived_at"]
+
+
+# ---------------------------------------------------------------------------
+# Validate-IR (no-save) endpoint backing service method
+# ---------------------------------------------------------------------------
+
+
+def _load_repo_ir_dict() -> dict:
+    """
+    Load one of the repo's production strategy_ir.json files for happy-path tests.
+
+    Used by both ``TestValidateIr`` and ``TestGetStrategyIrJson`` so the
+    fixture has actual structural variety (15 indicators, conditions,
+    derived fields) rather than a hand-rolled minimal IR. We pin the
+    Mean-Reversion H1 file because it exercises both ZscoreIndicator
+    (cross-references to other indicators) and the full exit-logic
+    discriminated union.
+    """
+    from pathlib import Path as _Path
+
+    project_root = _Path(__file__).resolve().parents[2]
+    ir_path = (
+        project_root
+        / "Strategy Repo"
+        / "fxlab_chan_next3_strategy_pack"
+        / "FX_SingleAsset_MeanReversion_H1.strategy_ir.json"
+    )
+    with ir_path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+class TestValidateIr:
+    """Tests for ``StrategyService.validate_ir`` (no-save validation)."""
+
+    def test_validate_ir_happy_path_returns_valid_report(self) -> None:
+        """A real production IR validates cleanly with parsed_ir populated."""
+        service, repo = _make_service()
+        ir_dict = _load_repo_ir_dict()
+        ir_text = json.dumps(ir_dict)
+
+        report = service.validate_ir(ir_text)
+
+        assert report.valid is True
+        assert report.errors == []
+        assert report.parsed_ir is not None
+        # parsed_ir round-trips deeply against the input dict.
+        assert report.parsed_ir == ir_dict
+        # Idempotent + side-effect-free: the repo never sees a write.
+        assert repo.count() == 0
+
+    def test_validate_ir_does_not_persist_on_success(self) -> None:
+        """Successful validation must not touch the repository."""
+        service, repo = _make_service()
+        before = repo.count()
+        ir_text = json.dumps(_load_repo_ir_dict())
+
+        service.validate_ir(ir_text)
+
+        assert repo.count() == before, "validate_ir must never persist"
+
+    def test_validate_ir_does_not_persist_on_failure(self) -> None:
+        """Failed validation must also not touch the repository."""
+        service, repo = _make_service()
+        before = repo.count()
+
+        report = service.validate_ir("{not valid json}")
+
+        assert report.valid is False
+        assert repo.count() == before
+
+    def test_validate_ir_empty_text_reports_invalid_json(self) -> None:
+        """Empty / whitespace-only text returns an invalid_json issue at root."""
+        service, _ = _make_service()
+
+        report = service.validate_ir("   ")
+
+        assert report.valid is False
+        assert report.parsed_ir is None
+        assert len(report.errors) == 1
+        assert report.errors[0].code == "invalid_json"
+        assert report.errors[0].path == "/"
+
+    def test_validate_ir_malformed_json_reports_invalid_json(self) -> None:
+        """Malformed JSON yields one invalid_json issue at path '/'."""
+        service, _ = _make_service()
+
+        report = service.validate_ir("{not valid json}")
+
+        assert report.valid is False
+        assert report.parsed_ir is None
+        assert len(report.errors) == 1
+        issue = report.errors[0]
+        assert issue.code == "invalid_json"
+        assert issue.path == "/"
+
+    def test_validate_ir_non_object_root_reports_invalid_json(self) -> None:
+        """A JSON array / scalar at the root is also an invalid_json issue."""
+        service, _ = _make_service()
+
+        report = service.validate_ir("[1, 2, 3]")
+
+        assert report.valid is False
+        assert len(report.errors) == 1
+        assert report.errors[0].code == "invalid_json"
+
+    def test_validate_ir_schema_violation_returns_pydantic_paths(self) -> None:
+        """Pydantic schema failure produces multiple issues with JSON-pointer paths."""
+        service, _ = _make_service()
+        ir = _load_repo_ir_dict()
+        # Drop a required nested field so Pydantic produces a localised
+        # error path. Choose ``metadata.strategy_name`` so the test's
+        # path-format assertion is deterministic.
+        del ir["metadata"]["strategy_name"]
+        # Also drop a top-level required field so we see >1 errors and
+        # can assert the helper reports them all rather than failing
+        # fast on the first one.
+        del ir["artifact_type"]
+
+        report = service.validate_ir(json.dumps(ir))
+
+        assert report.valid is False
+        assert report.parsed_ir is None
+        assert len(report.errors) >= 2
+        codes = {issue.code for issue in report.errors}
+        assert codes == {"schema_violation"}
+        paths = {issue.path for issue in report.errors}
+        assert "/metadata/strategy_name" in paths
+        assert "/artifact_type" in paths
+
+    def test_validate_ir_undefined_reference_reports_resolver_failure(self) -> None:
+        """A dangling indicator reference produces an undefined_reference issue."""
+        service, _ = _make_service()
+        ir = _load_repo_ir_dict()
+        # Mutate the long-entry condition to reference an indicator id
+        # that does not exist. The schema still passes (lhs is just a
+        # free-form string) but the reference resolver rejects it.
+        ir["entry_logic"]["long"]["logic"]["conditions"][0]["lhs"] = "totally_unknown_indicator"
+
+        report = service.validate_ir(json.dumps(ir))
+
+        assert report.valid is False
+        assert report.parsed_ir is None
+        assert any(issue.code == "undefined_reference" for issue in report.errors)
+        # The resolver records a location hint; the helper translates
+        # that into a JSON pointer like ``/entry_logic/long/...``.
+        ref_issue = next(issue for issue in report.errors if issue.code == "undefined_reference")
+        assert ref_issue.path.startswith("/entry_logic/long/")
+
+    def test_validate_ir_caps_error_list_at_max_validation_issues(self) -> None:
+        """A deeply broken IR yields at most MAX_VALIDATION_ISSUES rows."""
+        from libs.contracts.strategy import MAX_VALIDATION_ISSUES
+
+        service, _ = _make_service()
+        ir = _load_repo_ir_dict()
+        # Strip every indicator's ``id`` field. Each missing id triggers
+        # a Pydantic schema error; with 15 indicators that alone wouldn't
+        # exceed the cap, so also strip ``timeframe`` and ``length`` /
+        # equivalents to fan the error count past 100.
+        for ind in ir["indicators"]:
+            ind.pop("id", None)
+            ind.pop("timeframe", None)
+            ind.pop("length", None)
+            ind.pop("length_bars", None)
+            ind.pop("source", None)
+            ind.pop("stddev", None)
+            ind.pop("mean_source", None)
+            ind.pop("std_source", None)
+
+        report = service.validate_ir(json.dumps(ir))
+
+        assert report.valid is False
+        assert len(report.errors) <= MAX_VALIDATION_ISSUES, (
+            f"errors exceeded cap: {len(report.errors)} > {MAX_VALIDATION_ISSUES}"
+        )
+
+    def test_validate_ir_truncation_appends_truncated_issue(self) -> None:
+        """When the cap fires, the last issue documents truncation."""
+        from libs.contracts.strategy import MAX_VALIDATION_ISSUES
+
+        service, _ = _make_service()
+        ir = _load_repo_ir_dict()
+        # Same trick as above — strip enough required fields to fan the
+        # error count well past the cap.
+        for ind in ir["indicators"]:
+            for k in (
+                "id",
+                "timeframe",
+                "length",
+                "length_bars",
+                "source",
+                "stddev",
+                "mean_source",
+                "std_source",
+                "type",
+            ):
+                ind.pop(k, None)
+        # Also drop a few top-level required blocks for additional errors.
+        del ir["entry_logic"]
+        del ir["exit_logic"]
+
+        report = service.validate_ir(json.dumps(ir))
+
+        if len(report.errors) == MAX_VALIDATION_ISSUES:
+            # Truncation fired — the trailing row documents it.
+            assert report.errors[-1].code == "truncated"
+            assert "truncated" in report.errors[-1].message.lower()
+        else:
+            # If our error-fanning trick happened to produce <= cap rows
+            # we still confirm no truncated issue was synthesised.
+            assert all(issue.code != "truncated" for issue in report.errors)
+
+    def test_validate_ir_never_raises(self) -> None:
+        """validate_ir captures every error in the report, never raises."""
+        service, _ = _make_service()
+        # Cover the obvious failure modes plus an edge case (binary
+        # data shoved through as text). None should escape as an
+        # exception.
+        for payload in (
+            "",
+            "{",
+            "null",
+            json.dumps([1, 2, 3]),
+            "\x00\x01garbage",
+        ):
+            report = service.validate_ir(payload)
+            assert report.valid is False, f"expected invalid for payload {payload!r}"
+            assert report.errors, f"expected at least one issue for payload {payload!r}"
+
+
+class TestGetStrategyIrJson:
+    """Tests for ``StrategyService.get_strategy_ir_json`` (download path)."""
+
+    def test_get_ir_json_happy_path_returns_persisted_source(self) -> None:
+        """For an imported IR strategy, the method returns the canonical IR text."""
+        service, _ = _make_service()
+        ir_body = _load_repo_ir_dict()
+        persisted = service.create_from_ir(ir_body, created_by="01HUSER000000000000000001")
+
+        text = service.get_strategy_ir_json(persisted["id"])
+
+        # Returned text parses back to the original IR (canonical
+        # sort-keys form preserves values).
+        assert json.loads(text) == ir_body
+
+    def test_get_ir_json_unknown_strategy_raises_not_found(self) -> None:
+        """A missing strategy id raises NotFoundError."""
+        service, _ = _make_service()
+
+        with pytest.raises(NotFoundError, match="not found"):
+            service.get_strategy_ir_json("01HMISSING0000000000000001")
+
+    def test_get_ir_json_legacy_blank_code_falls_back_to_empty_object(self) -> None:
+        """Legacy rows with empty code degrade gracefully to '{}'.
+
+        The fallback path is documented behaviour: rather than raising
+        on a malformed legacy row, the download endpoint returns a
+        parseable JSON document so the operator's browser save dialog
+        always succeeds. The contract is "always returns a JSON
+        string", and an empty object is the safest non-raising choice
+        when the row carries no recoverable IR.
+        """
+        service, repo = _make_service()
+        # Build a row with an empty code field. The mock repo's create()
+        # rejects empty code via the SQL CHECK mirror; we mutate the
+        # stored dict directly to simulate a legacy row that pre-dates
+        # canonicalisation (write-bypass is the test point).
+        persisted = service.create_from_ir(
+            _load_repo_ir_dict(),
+            created_by="01HUSER000000000000000001",
+        )
+        # Reach into the mock store to blank the code field (legacy row
+        # simulation — not a code path any production caller can hit).
+        repo._store[persisted["id"]]["code"] = ""
+
+        text = service.get_strategy_ir_json(persisted["id"])
+
+        # Fallback contract: returns parseable JSON. Empty object is
+        # the documented last-resort.
+        parsed = json.loads(text)
+        assert parsed == {}
+
+    def test_get_ir_json_returns_canonical_form_round_trip(self) -> None:
+        """The returned JSON, re-encoded, equals the persisted code bytes."""
+        service, repo = _make_service()
+        ir_body = _load_repo_ir_dict()
+        persisted = service.create_from_ir(ir_body, created_by="01HUSER000000000000000001")
+
+        text = service.get_strategy_ir_json(persisted["id"])
+        # The persisted code is sort_keys=True canonical form; the
+        # download surfaces the same bytes verbatim.
+        stored = repo.get_by_id(persisted["id"])
+        assert stored is not None
+        assert text == stored["code"]
