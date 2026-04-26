@@ -43,7 +43,15 @@ from libs.contracts.models import (
 # Stable test-only ULIDs that show up as FK targets in many test bodies.
 # Seeding them via _seed_fk_parents() before any insert means a single
 # helper fixture covers every test in this file that needs a user or a run.
-_TEST_USER_ID = "01HTESTSUBMITTER0000000000"
+# These literals are referenced verbatim by various test bodies, so any
+# new test ULID added below must ALSO be added to _TEST_USER_IDS.
+_TEST_USER_IDS: tuple[str, ...] = (
+    "01HTESTSUBMITTER0000000000",  # SqlOverrideRepository.submitter_id
+    "01HTESTUSER000000000000000",  # SqlDraftAutosaveRepository.test_create
+    "01HTESTLATEST0000000000000",  # SqlDraftAutosaveRepository.test_get_latest
+    "01HTESTDELETE0000000000000",  # SqlDraftAutosaveRepository.test_delete
+)
+_TEST_USER_ID = _TEST_USER_IDS[0]  # backwards-compat alias used in most tests
 _TEST_RUN_ID = "01HTESTRUNSUBMITTER0000001"
 
 
@@ -61,16 +69,20 @@ def _seed_fk_parents(session: Any) -> None:
     these ULIDs; the FKs are NOT NULL in production and the integration
     job runs against a real Postgres that enforces them.
     """
-    if session.get(User, _TEST_USER_ID) is None:
-        session.add(
-            User(
-                id=_TEST_USER_ID,
-                email="test-submitter@fxlab.local",
-                hashed_password="not-a-real-hash-test-only",
-                role="admin",
-                is_active=True,
+    for uid in _TEST_USER_IDS:
+        if session.get(User, uid) is None:
+            session.add(
+                User(
+                    # Email uses the FULL ULID for uniqueness; the last 8
+                    # chars of every test ULID we use happen to be all
+                    # zeroes, so a suffix-only email collides.
+                    id=uid,
+                    email=f"test-{uid.lower()}@fxlab.local",
+                    hashed_password="not-a-real-hash-test-only",
+                    role="admin",
+                    is_active=True,
+                )
             )
-        )
     if session.get(ResearchRun, _TEST_RUN_ID) is None:
         session.add(
             ResearchRun(
