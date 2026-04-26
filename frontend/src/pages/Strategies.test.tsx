@@ -658,6 +658,94 @@ describe("Strategies browse page", () => {
     });
   });
 
+  // -------------------------------------------------------------------
+  // Compare-selected affordance (navigates to /strategies/diff?a=&b=)
+  // -------------------------------------------------------------------
+
+  it("renders a select checkbox per row and a Compare button disabled with tooltip when 0 rows selected", async () => {
+    mockedListStrategies.mockResolvedValueOnce(
+      makePage({
+        strategies: [
+          makeRow({ id: "01CMP1ROW000000000000000A", name: "Alpha" }),
+          makeRow({ id: "01CMP2ROW000000000000000B", name: "Bravo" }),
+        ],
+        total_count: 2,
+      }),
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-table")).toBeInTheDocument();
+    });
+
+    // Per-row checkboxes exist.
+    expect(screen.getByTestId("strategy-row-select-01CMP1ROW000000000000000A")).toBeInTheDocument();
+    expect(screen.getByTestId("strategy-row-select-01CMP2ROW000000000000000B")).toBeInTheDocument();
+
+    // Compare button is disabled with the "exactly two" tooltip.
+    const btn = screen.getByTestId("strategies-compare-button") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toMatch(/select exactly two/i);
+
+    // The selection-count summary shows the empty state.
+    expect(screen.getByTestId("strategies-compare-selection-count")).toHaveTextContent(
+      /no strategies selected/i,
+    );
+  });
+
+  it("Compare button is enabled only when exactly two rows are selected; clicking navigates to /strategies/diff", async () => {
+    mockedListStrategies.mockResolvedValueOnce(
+      makePage({
+        strategies: [
+          makeRow({ id: "01CMPSEL000000000000000A1", name: "Alpha" }),
+          makeRow({ id: "01CMPSEL000000000000000B1", name: "Bravo" }),
+          makeRow({ id: "01CMPSEL000000000000000C1", name: "Charlie" }),
+        ],
+        total_count: 3,
+      }),
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-table")).toBeInTheDocument();
+    });
+
+    const btn = screen.getByTestId("strategies-compare-button") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+
+    // Pick one — still disabled.
+    fireEvent.click(screen.getByTestId("strategy-row-select-01CMPSEL000000000000000A1"));
+    expect(btn.disabled).toBe(true);
+    expect(screen.getByTestId("strategies-compare-selection-count")).toHaveTextContent(
+      /1 selected/i,
+    );
+
+    // Pick second — enabled.
+    fireEvent.click(screen.getByTestId("strategy-row-select-01CMPSEL000000000000000B1"));
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toMatch(/compare the two selected/i);
+
+    // Pick a third — disabled again, tooltip back to the "exactly two"
+    // hint.
+    fireEvent.click(screen.getByTestId("strategy-row-select-01CMPSEL000000000000000C1"));
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toMatch(/select exactly two/i);
+
+    // Deselect the third — back to two, enabled.
+    fireEvent.click(screen.getByTestId("strategy-row-select-01CMPSEL000000000000000C1"));
+    expect(btn.disabled).toBe(false);
+
+    // Clicking Compare navigates to /strategies/diff?a=...&b=...
+    fireEvent.click(btn);
+    expect(navigateMock).toHaveBeenCalledTimes(1);
+    const target = navigateMock.mock.calls[0][0] as string;
+    expect(target).toMatch(
+      /^\/strategies\/diff\?a=01CMPSEL000000000000000A1&b=01CMPSEL000000000000000B1$/,
+    );
+  });
+
   it("Cancel on the archive dialog dismisses without firing the API", async () => {
     const activeRow = makeRow({
       id: "01ROWCANCELARCH000000000C",

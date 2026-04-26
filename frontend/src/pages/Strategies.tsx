@@ -373,6 +373,14 @@ export default function Strategies() {
   // refreshes and the new row becomes visible without a manual refresh.
   const [refreshTick, setRefreshTick] = useState(0);
 
+  // Compare-selection state. Holds the IDs the operator has checked in
+  // the leading column. Stored as a Set so toggle is O(1) and the
+  // 0-/1-/2-/3+-row branching is just ``selected.size``. Selecting more
+  // than two is allowed in the UI but disables the "Compare selected"
+  // button with a tooltip — the alternative (auto-deselecting one) is
+  // surprising to the operator.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
   // Memoised api opts so the effect dependency is referentially stable.
   const apiOpts = useMemo(
     () => ({
@@ -471,6 +479,45 @@ export default function Strategies() {
     },
     [navigate],
   );
+
+  /**
+   * Toggle a row's selection for the Compare action.
+   *
+   * Builds a fresh Set so React's referential-equality check fires and
+   * the dependent useMemo / button-disabled state re-evaluates.
+   */
+  const handleToggleSelected = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  /**
+   * Navigate to /strategies/diff with the two selected ids ordered as
+   * the operator picked them. We sort by insertion order via
+   * Array.from() over the Set so the result is stable per click — Sets
+   * preserve insertion order in modern JS engines.
+   */
+  const handleCompareSelected = useCallback(() => {
+    if (selectedIds.size !== 2) return;
+    const [a, b] = Array.from(selectedIds);
+    navigate(`/strategies/diff?a=${a}&b=${b}`);
+  }, [navigate, selectedIds]);
+
+  // Tooltip / disabled rationale for the Compare button. Computed once
+  // per render so the assertion in the tests can read the exact text
+  // the operator sees, and the tooltip stays in sync with the
+  // disabled flag without duplicate string literals.
+  const compareDisabled = selectedIds.size !== 2;
+  const compareTooltip = compareDisabled
+    ? "Select exactly two strategies to compare"
+    : "Compare the two selected strategies";
 
   const handlePrev = useCallback(() => {
     setPage((p) => Math.max(1, p - 1));
@@ -622,6 +669,13 @@ export default function Strategies() {
           <table className="min-w-full divide-y divide-surface-200" data-testid="strategies-table">
             <thead className="bg-surface-50">
               <tr>
+                {/* Compare-selection column. The header is decorative —
+                    we deliberately do NOT offer a "select all" checkbox
+                    here because the Compare action requires exactly two
+                    rows; an all-selected state would be misleading. */}
+                <th scope="col" className="w-8 px-2 py-2 text-left">
+                  <span className="sr-only">Select for compare</span>
+                </th>
                 <th
                   scope="col"
                   className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-surface-500"
@@ -660,6 +714,16 @@ export default function Strategies() {
             <tbody className="divide-y divide-surface-100">
               {pageData.strategies.map((row) => (
                 <tr key={row.id} data-testid={`strategy-row-${row.id}`}>
+                  <td className="w-8 px-2 py-3 align-top">
+                    <input
+                      type="checkbox"
+                      data-testid={`strategy-row-select-${row.id}`}
+                      checked={selectedIds.has(row.id)}
+                      onChange={() => handleToggleSelected(row.id)}
+                      aria-label={`Select ${row.name} for compare`}
+                      className="h-4 w-4 rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+                    />
+                  </td>
                   <td className="px-4 py-3 align-top">
                     <div className="font-medium text-surface-900">{row.name}</div>
                     <div className="mt-0.5 font-mono text-xs text-surface-500">{row.id}</div>
@@ -748,6 +812,32 @@ export default function Strategies() {
               ))}
             </tbody>
           </table>
+          {/* Compare-selected action bar.
+              Mounted at the foot of the table so the operator's
+              selection state stays visible alongside the rows being
+              selected. The button is disabled unless exactly two rows
+              are checked; the tooltip explains the rule on hover. */}
+          <div
+            className="flex items-center justify-between border-t border-surface-100 bg-surface-50 px-4 py-2 text-sm"
+            data-testid="strategies-compare-bar"
+          >
+            <span className="text-surface-600" data-testid="strategies-compare-selection-count">
+              {selectedIds.size === 0
+                ? "No strategies selected for compare."
+                : `${selectedIds.size} selected for compare.`}
+            </span>
+            <button
+              type="button"
+              data-testid="strategies-compare-button"
+              onClick={handleCompareSelected}
+              disabled={compareDisabled}
+              title={compareTooltip}
+              aria-label="Compare selected strategies"
+              className="inline-flex items-center rounded-md border border-brand-300 bg-white px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Compare selected
+            </button>
+          </div>
         </div>
       )}
 
