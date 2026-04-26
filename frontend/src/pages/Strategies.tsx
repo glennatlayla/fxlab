@@ -42,9 +42,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import toast from "react-hot-toast";
 import { useAuth } from "@/auth/useAuth";
 import { LoadingState } from "@/components/ui/LoadingState";
 import {
+  cloneStrategy,
+  CloneStrategyError,
   listStrategies,
   ListStrategiesError,
   type StrategyListItem,
@@ -57,6 +60,14 @@ import {
 
 /** Default page size for the catalogue grid. Mirrors the backend default. */
 const DEFAULT_PAGE_SIZE = 20;
+
+/**
+ * Hard cap on the clone modal's ``new_name`` field. Mirrors the
+ * backend ``Strategy.name`` SQL column limit (255) and the Pydantic
+ * ``CloneStrategyRequest`` ``max_length=255`` so the client-side
+ * validator returns the same verdict the server would.
+ */
+const CLONE_NAME_MAX_LEN = 255;
 
 /** Source filter literals — keep in sync with the backend regex. */
 type SourceFilter = "all" | "ir_upload" | "draft_form";
@@ -109,6 +120,200 @@ function SourcePill({ source }: { source: StrategyListItem["source"] }) {
 }
 
 // ---------------------------------------------------------------------------
+// Clone modal
+// ---------------------------------------------------------------------------
+
+/** Props for :func:`CloneStrategyModal`. */
+interface CloneStrategyModalProps {
+  /** Source strategy this modal will clone. ``null`` means "modal hidden". */
+  source: StrategyListItem | null;
+  /** Called when the user clicks Cancel, presses Escape, or clones successfully. */
+  onClose: () => void;
+  /**
+   * Called after a successful POST /strategies/{id}/clone. Receives the
+   * new clone id so the page can refresh the list and (today) navigate
+   * to the clone's detail view via the parent's navigate hook.
+   */
+  onCloned: (newId: string) => void;
+}
+
+/**
+ * Small modal asking the operator for the clone's ``new_name``.
+ *
+ * Behaviour:
+ * - Pre-fills the input with ``"{source.name} (copy)"``.
+ * - Client-side validates: non-empty after trim, at most
+ *   :data:`CLONE_NAME_MAX_LEN` characters. Inline error renders below
+ *   the input. Submit is blocked while a request is in flight.
+ * - On success: calls ``onCloned(clone.id)`` and ``onClose()``.
+ * - On 409: shows "A strategy with that name already exists." inline
+ *   and keeps the modal open so the operator can retry without
+ *   re-clicking Clone.
+ * - On any other error: fires ``toast.error`` with the backend
+ *   message (or a generic fallback) and keeps the modal open.
+ *
+ * Uses ``role="dialog"`` + ``aria-modal`` for accessibility. Escape
+ * dismisses unless a request is in flight (prevents accidental
+ * cancellation of an in-progress write).
+ */
+function CloneStrategyModal({
+  source,
+  onClose,
+  onCloned,
+}: CloneStrategyModalProps): React.ReactElement | null {
+  // Controlled name state. Re-seeds when the source changes so
+  // re-opening the modal for a different row resets the input.
+  const [name, setName] = useState<string>("");
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [inlineError, setInlineError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (source) {
+      setName(`${source.name} (copy)`);
+      setInlineError(null);
+      setSubmitting(false);
+    }
+  }, [source]);
+
+  // Escape-to-close, but never while a request is in flight (the
+  // server might still create the clone — leaving the modal open lets
+  // the operator see the result).
+  useEffect(() => {
+    if (!source) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !submitting) {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [source, submitting, onClose]);
+
+  const handleSubmit = useCallback(
+    async (e?: React.FormEvent) => {
+      e?.preventDefault();
+      if (!source || submitting) return;
+
+      const trimmed = name.trim();
+      if (!trimmed) {
+        setInlineError("Name is required.");
+        return;
+      }
+      if (trimmed.length > CLONE_NAME_MAX_LEN) {
+        setInlineError(`Name must be ${CLONE_NAME_MAX_LEN} characters or fewer.`);
+        return;
+      }
+
+      setSubmitting(true);
+      setInlineError(null);
+      try {
+        const clone = await cloneStrategy(source.id, trimmed);
+        toast.success(`Cloned as "${clone.name}".`);
+        onCloned(clone.id);
+        onClose();
+      } catch (err) {
+        if (err instanceof CloneStrategyError && err.statusCode === 409) {
+          // Inline 409 — the operator can edit the name and retry.
+          setInlineError("A strategy with that name already exists.");
+        } else if (err instanceof CloneStrategyError) {
+          // 404 / 422 / 5xx — show the backend detail in a toast and
+          // leave the modal open so the operator can decide what to do.
+          toast.error(err.detail ?? err.message);
+        } else if (err instanceof Error) {
+          toast.error(err.message);
+        } else {
+          toast.error("Failed to clone strategy.");
+        }
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [name, source, submitting, onCloned, onClose],
+  );
+
+  if (!source) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="strategies-clone-modal-title"
+      data-testid="strategies-clone-modal"
+    >
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
+        data-testid="strategies-clone-form"
+      >
+        <h2
+          id="strategies-clone-modal-title"
+          className="text-lg font-semibold text-surface-900"
+        >
+          Clone {source.name}
+        </h2>
+        <p className="mt-1 text-sm text-surface-500">
+          A copy of this strategy's source code will be saved under a new name.
+          Run history, deployments, and approvals are not copied.
+        </p>
+
+        <div className="mt-4">
+          <label
+            htmlFor="strategies-clone-name-input"
+            className="block text-xs font-medium uppercase tracking-wider text-surface-500"
+          >
+            New name
+          </label>
+          <input
+            id="strategies-clone-name-input"
+            data-testid="strategies-clone-name-input"
+            type="text"
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              if (inlineError) setInlineError(null);
+            }}
+            maxLength={CLONE_NAME_MAX_LEN}
+            disabled={submitting}
+            autoFocus
+            className="mt-1 w-full rounded-md border border-surface-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:bg-surface-50 disabled:text-surface-500"
+          />
+          {inlineError && (
+            <p
+              className="mt-1 text-xs text-red-700"
+              role="alert"
+              data-testid="strategies-clone-name-error"
+            >
+              {inlineError}
+            </p>
+          )}
+        </div>
+
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            type="button"
+            data-testid="strategies-clone-cancel"
+            onClick={onClose}
+            disabled={submitting}
+            className="rounded-md border border-surface-300 bg-white px-4 py-2 text-sm font-medium text-surface-700 hover:bg-surface-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            data-testid="strategies-clone-submit"
+            disabled={submitting}
+            className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {submitting ? "Cloning…" : "Clone"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 
@@ -138,6 +343,17 @@ export default function Strategies() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
+
+  // Clone modal state. ``cloneSource`` carries the row the operator
+  // clicked Clone on; ``null`` means the modal is closed. We store the
+  // full :class:`StrategyListItem` (rather than just the id) so the
+  // modal can render the source name in its title without a separate
+  // lookup against ``pageData``.
+  const [cloneSource, setCloneSource] = useState<StrategyListItem | null>(null);
+
+  // Reload counter — bumped after a successful clone so the list
+  // refreshes and the new row becomes visible without a manual refresh.
+  const [refreshTick, setRefreshTick] = useState(0);
 
   // Memoised api opts so the effect dependency is referentially stable.
   const apiOpts = useMemo(
@@ -175,7 +391,7 @@ export default function Strategies() {
     return () => {
       cancelled = true;
     };
-  }, [page, pageSize, apiOpts]);
+  }, [page, pageSize, apiOpts, refreshTick]);
 
   // Reset to page 1 when the filters change so the user does not land
   // on an out-of-range page (e.g. switching from "all" to a 1-row source
@@ -385,14 +601,37 @@ export default function Strategies() {
                     {row.created_by}
                   </td>
                   <td className="px-4 py-3 text-right align-top">
-                    <button
-                      type="button"
-                      data-testid={`strategy-row-detail-${row.id}`}
-                      onClick={() => handleViewDetail(row.id)}
-                      className="inline-flex items-center rounded-md border border-brand-300 bg-white px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-50"
-                    >
-                      View detail
-                    </button>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        data-testid={`strategy-row-clone-${row.id}`}
+                        onClick={() => setCloneSource(row)}
+                        className="inline-flex items-center rounded-md border border-surface-300 bg-white px-3 py-1.5 text-xs font-medium text-surface-700 hover:bg-surface-50"
+                        aria-label={`Clone ${row.name}`}
+                      >
+                        {/* Inline SVG copy icon — keeps the page free of
+                            new icon-library imports for a single button. */}
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                          aria-hidden="true"
+                          className="mr-1 h-3.5 w-3.5"
+                        >
+                          <path d="M6 3a2 2 0 00-2 2v9a2 2 0 002 2h6a2 2 0 002-2V5a2 2 0 00-2-2H6z" />
+                          <path d="M14 5h-1a2 2 0 012 2v8a2 2 0 01-2 2H8a2 2 0 002 2h4a2 2 0 002-2V7a2 2 0 00-2-2z" />
+                        </svg>
+                        Clone
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`strategy-row-detail-${row.id}`}
+                        onClick={() => handleViewDetail(row.id)}
+                        className="inline-flex items-center rounded-md border border-brand-300 bg-white px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-50"
+                      >
+                        View detail
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -434,6 +673,19 @@ export default function Strategies() {
           </div>
         </div>
       )}
+
+      {/* Clone modal — mounted only while a source row is selected. */}
+      <CloneStrategyModal
+        source={cloneSource}
+        onClose={() => setCloneSource(null)}
+        onCloned={(newId) => {
+          // Bump the refresh tick so the list re-fetches and the new
+          // row appears, then navigate the operator to the clone's
+          // detail page (matches the import-IR success flow).
+          setRefreshTick((n) => n + 1);
+          navigate(`/strategy-studio/${newId}`);
+        }}
+      />
     </div>
   );
 }

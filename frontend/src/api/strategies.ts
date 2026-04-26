@@ -407,6 +407,135 @@ export async function listStrategies(
 }
 
 // ---------------------------------------------------------------------------
+// POST /strategies/{strategy_id}/clone — duplicate a strategy under a new name
+// ---------------------------------------------------------------------------
+
+/**
+ * Strategy record returned by ``POST /strategies/{id}/clone``.
+ *
+ * Mirrors the persistence columns the backend serialises (see
+ * ``services/api/routes/strategies.py::clone_strategy_route``). Identical
+ * shape to :class:`ImportedStrategy` plus ``row_version`` and
+ * ``is_active`` so the caller can pass the body straight into the
+ * strategy detail page without an extra GET.
+ */
+export interface ClonedStrategy {
+  /** ULID of the persisted clone (distinct from the source id). */
+  id: string;
+  /** Display name supplied as ``new_name`` in the request. */
+  name: string;
+  /** Stored ``code`` body — JSON-encoded IR or DSL payload. */
+  code: string;
+  /** Inherited from the source row. */
+  version: string;
+  /** Inherited from the source row (``"ir_upload"`` or ``"draft_form"``). */
+  source: StrategySource;
+  /** ULID of the operator who clicked Clone. */
+  created_by: string;
+  /** Soft-delete flag; clones are always active on creation. */
+  is_active: boolean;
+  /** Always ``1`` for a freshly persisted clone. */
+  row_version: number;
+  /** ISO-8601 timestamp of clone creation. */
+  created_at: string;
+  /** ISO-8601 timestamp of clone last update (== created_at on a fresh row). */
+  updated_at: string;
+}
+
+/** Envelope returned by ``POST /strategies/{id}/clone``. */
+export interface CloneStrategyResponse {
+  strategy: ClonedStrategy;
+}
+
+/**
+ * Typed error for ``POST /strategies/{id}/clone`` failures.
+ *
+ * Carries the HTTP status and the backend ``detail`` string so the UI
+ * can branch on 404 (source missing), 409 (name collision), and 422
+ * (Pydantic validation) without parsing free-form messages.
+ */
+export class CloneStrategyError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "CloneStrategyError";
+  }
+}
+
+/**
+ * Clone an existing strategy under ``newName``.
+ *
+ * POSTs to ``/strategies/{sourceId}/clone`` with the body
+ * ``{"new_name": newName}``. The backend returns 201 with the cloned
+ * Strategy on success, or one of:
+ *   - 404 — the source strategy does not exist.
+ *   - 409 — a strategy with ``newName`` already exists (case-insensitive).
+ *   - 422 — ``new_name`` is empty or longer than 255 characters.
+ *
+ * The shared ``apiClient`` interceptor injects Authorization and
+ * X-Correlation-Id headers, so callers do not need to pass them
+ * explicitly.
+ *
+ * Args:
+ *   sourceId: ULID of the strategy to clone.
+ *   newName: Display name for the clone. Caller is responsible for
+ *     pre-validating non-empty + length; the backend re-validates.
+ *
+ * Returns:
+ *   The :class:`ClonedStrategy` record (already envelope-unwrapped).
+ *
+ * Raises:
+ *   CloneStrategyError — typed wrapper around any non-2xx HTTP
+ *     response. ``statusCode`` carries the HTTP status, ``detail``
+ *     carries the backend ``detail`` string when present.
+ *   AxiosError — on network failure or non-AxiosError errors.
+ *
+ * Example:
+ *   try {
+ *     const clone = await cloneStrategy(sourceId, "RSI Reversal (copy)");
+ *     navigate(`/strategy-studio/${clone.id}`);
+ *   } catch (err) {
+ *     if (err instanceof CloneStrategyError && err.statusCode === 409) {
+ *       setInlineError("A strategy with that name already exists.");
+ *     }
+ *   }
+ */
+export async function cloneStrategy(
+  sourceId: string,
+  newName: string,
+): Promise<ClonedStrategy> {
+  try {
+    const resp = await apiClient.post<CloneStrategyResponse>(
+      `/strategies/${sourceId}/clone`,
+      { new_name: newName },
+    );
+    return resp.data.strategy;
+  } catch (err) {
+    if (err instanceof AxiosError && err.response) {
+      const status = err.response.status;
+      const detailRaw = err.response.data?.detail;
+      const detail =
+        typeof detailRaw === "string"
+          ? detailRaw
+          : status === 404
+            ? `Strategy ${sourceId} not found`
+            : status === 409
+              ? `A strategy named "${newName}" already exists`
+              : `Failed to clone strategy (status ${status})`;
+      throw new CloneStrategyError(
+        detail,
+        status,
+        typeof detailRaw === "string" ? detailRaw : undefined,
+      );
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // GET /strategies/{strategy_id}/runs — recent runs section on StrategyDetail
 // ---------------------------------------------------------------------------
 
