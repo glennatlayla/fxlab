@@ -483,15 +483,37 @@ class Trial(TimestampMixin, Base):
 
 class Artifact(TimestampMixin, Base):
     """
-    A file artifact produced by a run or build.
+    A file artifact produced by a run, build, or research workflow.
+
+    Two parallel field naming conventions live on this row:
+
+    * The *legacy* triplet ``run_id`` / ``uri`` / ``checksum`` was the
+      original M2 schema. The integration test ``test_m2_db_schema``
+      and the stub-replacement test still write rows using these names,
+      and the ``runs`` FK on ``run_id`` is preserved so older code paths
+      keep working.
+
+    * The *registry* triplet ``subject_id`` / ``storage_path`` /
+      ``created_by`` was added by migration 0028 to match the M5
+      artifact-registry contract in ``libs/contracts/artifact.py``.
+      ``services/api/routes/artifacts.py`` and the
+      ``SqlArtifactRepository`` read/write through these fields.
+
+    All three new columns are nullable so existing rows (and tests
+    using only the legacy fields) continue to validate. The Pydantic
+    contract enforces non-null for the registry fields at the
+    application boundary.
 
     Attributes:
         id: ULID primary key.
-        run_id: FK to Run (nullable — some artifacts come from builds).
+        run_id: FK to Run (legacy, nullable — some artifacts come from builds).
         artifact_type: Type classifier (model, report, chart, etc.).
-        uri: Storage URI.
+        uri: Legacy storage URI (nullable — superseded by storage_path).
         size_bytes: File size in bytes.
-        checksum: SHA-256 checksum.
+        checksum: Legacy SHA-256 checksum (nullable).
+        subject_id: Registry-style subject ULID (run_id, candidate_id, etc.).
+        storage_path: Registry-style storage path (e.g. ``"<bucket>/<key>"``).
+        created_by: User ULID who created the artifact.
     """
 
     __tablename__ = "artifacts"
@@ -501,9 +523,20 @@ class Artifact(TimestampMixin, Base):
         String(26), ForeignKey("runs.id", ondelete="CASCADE"), nullable=True, index=True
     )
     artifact_type: Any = Column(String(100), nullable=False)
-    uri: Any = Column(String(512), nullable=False)
+    # Legacy column — kept nullable so registry-style inserts (which use
+    # storage_path instead) do not have to populate it.
+    uri: Any = Column(String(512), nullable=True)
     size_bytes: Any = Column(Integer, nullable=True)
     checksum: Any = Column(String(64), nullable=True)
+    # Registry-style columns added by migration 0028. Nullable for
+    # backwards compatibility with rows written through the legacy
+    # (run_id/uri) shape; the Pydantic contract enforces non-null at
+    # the application boundary for new inserts.
+    subject_id: Any = Column(String(26), nullable=True, index=True)
+    storage_path: Any = Column(String(512), nullable=True)
+    created_by: Any = Column(
+        String(26), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
 
 class AuditEvent(Base):

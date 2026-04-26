@@ -446,43 +446,44 @@ class TestSqlAuditExplorerRepository:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "ORM/repository field divergence: services/api/repositories/"
-        "sql_artifact_repository.py reads orm_artifact.subject_id / "
-        "storage_path / created_by, but libs/contracts/models.py:Artifact "
-        "has run_id / uri / (no created_by). Surfaced by the new "
-        "integration job. Fixing requires either an Alembic migration to "
-        "add the missing columns or a repo rewrite to map run_id->subject_id "
-        "and uri->storage_path. Tracked as a follow-up tranche; xfailing "
-        "the whole class until then so the integration job can stay green "
-        "on the rest of the repository tests."
-    ),
-    strict=False,
-)
 class TestSqlArtifactRepository:
-    """Integration tests for SqlArtifactRepository save/find_by_id/list."""
+    """Integration tests for SqlArtifactRepository save/find_by_id/list.
+
+    Migration 0028 added ``subject_id`` / ``storage_path`` /
+    ``created_by`` columns to the ``artifacts`` table so the schema
+    matches the registry contract the repository reads/writes against.
+    Inserts here use the registry-style fields directly; the legacy
+    ``run_id`` / ``uri`` columns remain present (for backwards
+    compatibility with other tests) but are not exercised by the
+    repository itself.
+    """
 
     @pytest.fixture(autouse=True)
     def _seed(self, integration_db_session):
-        """Seed the ResearchRun row that run_id FKs to before each test."""
+        """Seed User and ResearchRun rows used as FK targets."""
         _seed_fk_parents(integration_db_session)
 
     def _make_artifact_orm(self, session: Any) -> Any:
-        """Insert an artifact row via ORM and flush. Returns an Artifact (ArtifactORM) instance."""
+        """Insert an artifact row via ORM and flush.
+
+        Populates the registry-shape fields (``subject_id``,
+        ``storage_path``, ``created_by``) the SqlArtifactRepository
+        actually queries against. ``run_id`` is left NULL — the repo
+        ignores it.
+
+        Returns an ArtifactORM instance.
+        """
         from libs.contracts.models import Artifact as ArtifactORM
 
         aid = str(_ulid_mod.ULID())
         row = ArtifactORM(
             id=aid,
-            # Reference the FK parent seeded by _seed() rather than inventing
-            # a fresh ULID — Postgres rejects a fresh-ULID run_id at FK
-            # validation time even though SQLite + create_all() let it slide.
-            run_id=_TEST_RUN_ID,
             artifact_type="backtest_result",
-            uri=f"s3://artifacts/{aid}.parquet",
+            # Registry-style fields — what the repository reads.
+            subject_id=_TEST_RUN_ID,
+            storage_path=f"fxlab-artifacts/runs/{aid}.parquet",
             size_bytes=1024,
-            checksum="abc123",
+            created_by=_TEST_USER_ID,
         )
         session.add(row)
         session.flush()
@@ -498,6 +499,9 @@ class TestSqlArtifactRepository:
         result = repo.find_by_id(artifact_id=inserted.id)
         assert result is not None
         assert result.id == inserted.id
+        assert result.subject_id == _TEST_RUN_ID
+        assert result.storage_path == inserted.storage_path
+        assert result.created_by == _TEST_USER_ID
 
     def test_find_by_id_raises_not_found(self, integration_db_session):
         """find_by_id() raises NotFoundError for non-existent artifact."""
@@ -507,6 +511,52 @@ class TestSqlArtifactRepository:
         repo = SqlArtifactRepository(db=integration_db_session)
         with pytest.raises(NotFoundError):
             repo.find_by_id(artifact_id="01HNOTEXIST0000000000000000")
+
+    def test_save_persists_artifact(self, integration_db_session):
+        """save() persists an Artifact and find_by_id() round-trips it."""
+        from datetime import datetime, timezone
+
+        from libs.contracts.artifact import Artifact, ArtifactType
+        from services.api.repositories.sql_artifact_repository import SqlArtifactRepository
+
+        repo = SqlArtifactRepository(db=integration_db_session)
+        aid = str(_ulid_mod.ULID())
+        contract = Artifact(
+            id=aid,
+            artifact_type=ArtifactType.BACKTEST_RESULT,
+            subject_id=_TEST_RUN_ID,
+            storage_path=f"fxlab-artifacts/runs/{aid}.json",
+            size_bytes=512,
+            created_at=datetime.now(timezone.utc),
+            created_by=_TEST_USER_ID,
+            metadata={},
+        )
+
+        saved = repo.save(contract)
+        assert saved.id == aid
+
+        fetched = repo.find_by_id(artifact_id=aid)
+        assert fetched.id == aid
+        assert fetched.subject_id == _TEST_RUN_ID
+        assert fetched.storage_path == contract.storage_path
+        assert fetched.size_bytes == 512
+        assert fetched.created_by == _TEST_USER_ID
+
+    def test_list_returns_paginated_artifacts(self, integration_db_session):
+        """list() honours limit/offset and reports total_count."""
+        from libs.contracts.artifact import ArtifactQuery
+        from services.api.repositories.sql_artifact_repository import SqlArtifactRepository
+
+        # Seed three rows directly through the ORM helper.
+        for _ in range(3):
+            self._make_artifact_orm(integration_db_session)
+
+        repo = SqlArtifactRepository(db=integration_db_session)
+        resp = repo.list(ArtifactQuery(limit=2, offset=0))
+        assert resp.total_count >= 3
+        assert len(resp.artifacts) == 2
+        assert resp.limit == 2
+        assert resp.offset == 0
 
 
 # ---------------------------------------------------------------------------
