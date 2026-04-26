@@ -205,6 +205,198 @@ def _startup_phase(name: str, **fields: Any) -> Iterator[None]:
         )
 
 
+#: M4.E3 first-boot seed for the dataset catalog.
+#:
+#: Mirrors the symbol coverage that the M2.C2 ``seed_default_datasets``
+#: helper baked into the InMemoryDatasetResolver, plus the timeframe /
+#: source / version metadata the catalog now requires. Each entry is the
+#: dataset_ref experiment plans actually carry under
+#: ``data_selection.dataset_ref`` in the committed production plans.
+#:
+#: Used only by ``_seed_dataset_catalog_if_empty`` — never on a non-empty
+#: catalog, so re-deploys do not overwrite operator-registered metadata.
+_DATASET_CATALOG_BOOTSTRAP_SEED: list[dict[str, Any]] = [
+    # Canonical example (M2.C2 sample plan).
+    {
+        "dataset_ref": "fx-eurusd-15m-certified-v3",
+        "symbols": ["EURUSD"],
+        "timeframe": "15m",
+        "source": "synthetic",
+        "version": "v3",
+    },
+    # Chan pack — H1 + D1 majors.
+    {
+        "dataset_ref": "fx-majors-h1-certified-v1",
+        "symbols": [
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "USDCHF",
+            "AUDUSD",
+            "USDCAD",
+            "NZDUSD",
+        ],
+        "timeframe": "1h",
+        "source": "synthetic",
+        "version": "v1",
+    },
+    {
+        "dataset_ref": "fx-majors-d1-certified-v1",
+        "symbols": [
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "USDCHF",
+            "AUDUSD",
+            "USDCAD",
+            "NZDUSD",
+        ],
+        "timeframe": "1d",
+        "source": "synthetic",
+        "version": "v1",
+    },
+    # Lien pack — H1 + 4H subset.
+    {
+        "dataset_ref": "fx-majors-1h-certified-v3",
+        "symbols": ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD"],
+        "timeframe": "1h",
+        "source": "synthetic",
+        "version": "v3",
+    },
+    {
+        "dataset_ref": "fx-majors-4h-certified-v3",
+        "symbols": ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD"],
+        "timeframe": "4h",
+        "source": "synthetic",
+        "version": "v3",
+    },
+    # Spread companions referenced by every plan's spread_dataset_ref.
+    {
+        "dataset_ref": "fx-majors-spread-certified-v1",
+        "symbols": [
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "USDCHF",
+            "AUDUSD",
+            "USDCAD",
+            "NZDUSD",
+        ],
+        "timeframe": "1d",
+        "source": "synthetic",
+        "version": "v1",
+    },
+    {
+        "dataset_ref": "fx-majors-spread-h1-certified-v1",
+        "symbols": [
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "USDCHF",
+            "AUDUSD",
+            "USDCAD",
+            "NZDUSD",
+        ],
+        "timeframe": "1h",
+        "source": "synthetic",
+        "version": "v1",
+    },
+]
+
+
+def _seed_dataset_catalog_if_empty(
+    dataset_service: Any,
+    db_session: Any,
+) -> None:
+    """
+    Seed the dataset catalog on first boot, idempotently.
+
+    Behaviour:
+    - If the catalog already has any rows, this is a no-op (logs
+      ``startup.dataset_catalog.already_seeded`` and returns).
+    - Otherwise registers every entry in
+      :data:`_DATASET_CATALOG_BOOTSTRAP_SEED` via
+      :meth:`DatasetService.register_dataset`. Each entry maps to one
+      INSERT in the ``datasets`` table.
+    - Commits the seed inserts so subsequent requests see the rows
+      (the dedicated dataset session is held for the process lifetime).
+
+    Args:
+        dataset_service: A :class:`DatasetServiceInterface` (typically
+            :class:`DatasetService`).
+        db_session: The SQLAlchemy session backing the service. The
+            seed loop calls ``register_dataset``; we commit at the
+            end so the rows survive the request loop's lifecycle.
+
+    Returns:
+        ``None``. Failures are logged at ERROR but do not raise — the
+        catalog remains usable for ops to seed manually if the
+        bootstrap seed fails.
+    """
+    try:
+        existing = dataset_service.list_known_refs()
+    except Exception as exc:  # noqa: BLE001 — defensive boot path
+        logger.error(
+            "startup.dataset_catalog.list_failed",
+            component="startup",
+            error=str(exc),
+            exc_info=True,
+            detail="Could not check dataset catalog state at boot. Skipping "
+            "seed; catalog must be populated manually.",
+        )
+        return
+
+    if existing:
+        logger.info(
+            "startup.dataset_catalog.already_seeded",
+            component="startup",
+            count=len(existing),
+            detail="Dataset catalog has rows; skipping bootstrap seed.",
+        )
+        return
+
+    seeded = 0
+    for entry in _DATASET_CATALOG_BOOTSTRAP_SEED:
+        try:
+            dataset_service.register_dataset(
+                entry["dataset_ref"],
+                symbols=list(entry["symbols"]),
+                timeframe=entry["timeframe"],
+                source=entry["source"],
+                version=entry["version"],
+            )
+            seeded += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "startup.dataset_catalog.seed_failed",
+                component="startup",
+                dataset_ref=entry["dataset_ref"],
+                error=str(exc),
+                exc_info=True,
+            )
+
+    try:
+        db_session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "startup.dataset_catalog.commit_failed",
+            component="startup",
+            seeded=seeded,
+            error=str(exc),
+            exc_info=True,
+        )
+        db_session.rollback()
+        return
+
+    logger.info(
+        "startup.dataset_catalog.seeded",
+        component="startup",
+        seeded=seeded,
+        total=len(_DATASET_CATALOG_BOOTSTRAP_SEED),
+        detail="Dataset catalog seeded on first boot.",
+    )
+
+
 def _log_runtime_versions() -> None:
     """
     Emit a single structured log line with the runtime versions of
@@ -1192,24 +1384,29 @@ async def lifespan(app: FastAPI):
             # surface a clear RuntimeError on the first request to that endpoint.
 
         # ---------------------------------------------------------------------
-        # Wire ResearchRunService + DatasetResolver for /runs/* endpoints (M2.C2)
+        # Wire ResearchRunService + DatasetResolver for /runs/* endpoints
+        # (M2.C2 → M4.E3 swap)
         # ---------------------------------------------------------------------
         # The /runs/from-ir endpoint depends on both:
         #   - a ResearchRunService registered via set_research_run_service()
         #   - a DatasetResolverInterface registered via set_dataset_resolver()
-        # M2.C2 wires the InMemoryDatasetResolver seeded with default datasets;
-        # M4.E3 will swap in the catalog-backed DatasetService without touching
-        # main.py — only the resolver instance changes here.
+        #
+        # M4.E3 swap (this file): the resolver is now CatalogBackedResolver
+        # wrapping the Postgres-backed DatasetService (instead of the M2.C2
+        # InMemoryDatasetResolver). The route layer's narrow contract is
+        # unchanged. On first boot — when the datasets table is empty — the
+        # default seed (the four production refs the M2.C2 seeder used) is
+        # written to the catalog so the route resolves out of the box.
         #
         # Like the strategy wiring above, both setters reassign module-level
         # globals so repeated startup invocations overwrite cleanly.
         try:
             with _startup_phase("research_run_service_wiring"):
-                from libs.strategy_ir.dataset_resolver import (
-                    InMemoryDatasetResolver,
-                    seed_default_datasets,
-                )
+                from libs.strategy_ir.dataset_resolver import CatalogBackedResolver
                 from services.api.db import SessionLocal
+                from services.api.repositories.sql_dataset_repository import (
+                    SqlDatasetRepository,
+                )
                 from services.api.repositories.sql_research_run_repository import (
                     SqlResearchRunRepository,
                 )
@@ -1217,6 +1414,7 @@ async def lifespan(app: FastAPI):
                     set_dataset_resolver,
                     set_research_run_service,
                 )
+                from services.api.services.dataset_service import DatasetService
                 from services.api.services.research_run_service import (
                     ResearchRunService,
                 )
@@ -1264,21 +1462,32 @@ async def lifespan(app: FastAPI):
                 )
                 set_research_run_service(research_run_service)
 
-                # Seed the in-memory dataset resolver. Rebuilt from the default
-                # set on every boot — there is no persisted state to migrate.
-                dataset_resolver = InMemoryDatasetResolver()
-                seed_default_datasets(dataset_resolver)
+                # M4.E3: catalog-backed dataset resolver. Open a dedicated
+                # session for the dataset catalog so it has its own lifetime
+                # independent of the research-run session.
+                db_session_dataset = SessionLocal()
+                dataset_repo = SqlDatasetRepository(db=db_session_dataset)
+                dataset_service = DatasetService(repo=dataset_repo)
+
+                # First-boot seed: only registers the production refs when the
+                # catalog is empty. Idempotent on subsequent boots.
+                _seed_dataset_catalog_if_empty(dataset_service, db_session_dataset)
+
+                dataset_resolver = CatalogBackedResolver(dataset_service)
                 set_dataset_resolver(dataset_resolver)
 
                 app.state.research_run_db_session = db_session_research
                 app.state.research_run_service = research_run_service
+                app.state.dataset_db_session = db_session_dataset
+                app.state.dataset_service = dataset_service
                 app.state.dataset_resolver = dataset_resolver
 
                 logger.info(
                     "startup.research_run_service_wired",
                     component="startup",
-                    detail="ResearchRunService and InMemoryDatasetResolver wired "
-                    "and registered with /runs routes.",
+                    detail="ResearchRunService and CatalogBackedResolver "
+                    "(DatasetService + SqlDatasetRepository) wired and "
+                    "registered with /runs routes.",
                 )
         except Exception as exc:
             logger.critical(

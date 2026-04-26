@@ -2405,6 +2405,83 @@ class ResearchRun(Base):
 # ---------------------------------------------------------------------------
 
 
+class Dataset(TimestampMixin, Base):
+    """
+    Catalog entry for a market-data dataset (M4.E3).
+
+    Responsibilities:
+    - Persist the metadata required to translate an experiment plan's
+      ``dataset_ref`` string (e.g. ``"fx-eurusd-15m-certified-v3"``) into
+      the concrete dataset descriptor (symbols, timeframe, source,
+      version) the engine layer needs.
+    - Carry the certification flag so the certification gate can refuse
+      to run an experiment against an uncertified dataset without an
+      extra round-trip.
+
+    Does NOT:
+    - Hold candle data — that lives in CandleRecord.
+    - Drive ingestion — that is the data-pipeline's responsibility.
+
+    Attributes:
+        id: ULID primary key (26-char string). Stable surrogate so the
+            external-facing ``dataset_ref`` can be renamed without
+            invalidating downstream references.
+        dataset_ref: Human-readable catalog reference string. UNIQUE.
+            This is the string experiment plans carry in
+            ``data_selection.dataset_ref``.
+        symbols: JSON-encoded list of symbol strings (e.g.
+            ``["EURUSD"]`` or ``["EURUSD", "GBPUSD", ...]``).
+        timeframe: Bar resolution string (``"15m"``, ``"1h"``,
+            ``"4h"``, ``"1d"``).
+        source: Provider tag indicating provenance — ``"oanda"``,
+            ``"alpaca"``, ``"synthetic"``, ``"manual-import"``, ...
+        version: Catalog version string for this dataset entry
+            (e.g. ``"v1"``, ``"v3"``); used by the certification gate.
+        is_certified: True once the dataset has cleared the
+            certification gate. Defaults to False so freshly-registered
+            datasets do not accidentally satisfy the gate.
+        created_by: ULID of the user who registered the dataset (for
+            manual registrations). NULL for bootstrap-seeded entries.
+
+    Indexes:
+        - UNIQUE(dataset_ref) — lookups are by ref.
+        - INDEX(source, version) — admin/operator filtering.
+
+    Example:
+        record = Dataset(
+            id="01HDATASET00000000000000001",
+            dataset_ref="fx-eurusd-15m-certified-v3",
+            symbols=["EURUSD"],
+            timeframe="15m",
+            source="oanda",
+            version="v3",
+            is_certified=True,
+        )
+    """
+
+    __tablename__ = "datasets"
+    __table_args__ = (UniqueConstraint("dataset_ref", name="uq_datasets_dataset_ref"),)
+
+    id: Any = Column(String(26), primary_key=True, nullable=False)
+    dataset_ref: Any = Column(String(128), nullable=False, unique=True, index=True)
+    symbols: Any = Column(JSON, nullable=False, default=list)
+    timeframe: Any = Column(String(16), nullable=False)
+    source: Any = Column(String(64), nullable=False, index=True)
+    version: Any = Column(String(32), nullable=False)
+    is_certified: Any = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
+    created_by: Any = Column(
+        String(26),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+
 class AlertNotificationRecord(Base):
     """
     Persisted notification received from the Prometheus Alertmanager
@@ -2497,6 +2574,7 @@ __all__ = [
     "ChartCacheEntry",
     "DataAnomalyRecord",
     "DataGapRecord",
+    "Dataset",
     "Deployment",
     "DeploymentTransition",
     "DraftAutosave",

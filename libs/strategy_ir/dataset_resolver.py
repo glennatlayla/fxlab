@@ -1,55 +1,51 @@
 """
-In-memory dataset resolver (M2.C2 stand-in for the M4.E3 DatasetService).
+Dataset resolver implementations (M2.C2 in-memory + M4.E3 catalog adapter).
 
 Purpose:
-    Provide a typed, thread-safe :class:`DatasetResolverInterface`
-    implementation backed by an in-process map so the
-    ``POST /runs/from-ir`` endpoint (M2.C2) is fully functional
-    end-to-end without waiting on Track E.
+    Provide concrete :class:`DatasetResolverInterface` implementations
+    so the ``POST /runs/from-ir`` endpoint can translate a textual
+    ``dataset_ref`` into a :class:`ResolvedDataset`.
 
 ==============================================================================
-M4.E3 SWAP POINT -- READ THIS BEFORE EXTENDING
+M4.E3 STATUS -- TWO IMPLEMENTATIONS LIVE HERE
 ==============================================================================
 
-This adapter is **explicitly transitional**. When Track E milestone
-M4.E3 lands (the real :class:`DatasetService` backed by the dataset
-catalog tables), the swap is intentionally surgical:
+As of M4.E3 there are TWO implementations in this module:
 
-    1.  Implement ``DatasetService`` in
-        ``services/api/services/dataset_service.py`` so that it
-        satisfies :class:`DatasetResolverInterface`.
-    2.  Change the wiring in :mod:`services.api.main` from::
+    1. :class:`InMemoryDatasetResolver` (test-only, unchanged from M2.C2)
+       -- A thread-safe in-memory map used by unit tests where a
+       Postgres connection is not available. Production no longer
+       wires this path.
 
-            from libs.strategy_ir.dataset_resolver import (
-                InMemoryDatasetResolver,
-                seed_default_datasets,
-            )
-            resolver = InMemoryDatasetResolver()
-            seed_default_datasets(resolver)
-            set_dataset_resolver(resolver)
+    2. :class:`CatalogBackedResolver` (production, M4.E3)
+       -- A thin adapter that wraps a :class:`DatasetServiceInterface`
+       (the catalog-backed :class:`DatasetService`) and delegates
+       :meth:`resolve` to its :meth:`lookup`. The route layer's
+       narrow contract (:class:`DatasetResolverInterface`) keeps
+       working but reads from the persisted catalog.
 
-        to::
+The split exists because the route layer only needs the narrow
+"resolve(ref) -> ResolvedDataset" surface, while the catalog backend
+exposes a richer "lookup / list / register / is_certified" surface
+to admin tooling. Wrapping the rich service in the narrow adapter
+means the route's tests stay untouched even after M4.E3 lands.
 
-            from services.api.services.dataset_service import DatasetService
-            set_dataset_resolver(DatasetService(catalog_repo=catalog_repo))
+Production wiring in :mod:`services.api.main`::
 
-    3.  Delete this module and its sibling
-        ``tests/unit/libs/strategy_ir/test_dataset_resolver.py``.
-        No other code needs to change -- the interface, the route,
-        and all consumer tests stay identical.
+    from libs.strategy_ir.dataset_resolver import CatalogBackedResolver
+    from services.api.repositories.sql_dataset_repository import (
+        SqlDatasetRepository,
+    )
+    from services.api.services.dataset_service import DatasetService
+    from services.api.routes.runs import set_dataset_resolver
 
-Until M4.E3 ships, this resolver is the single source of truth for
-dataset references inside the API process. It is acceptable in the
-M2.C2 tranche because:
+    repo = SqlDatasetRepository(db=SessionLocal())
+    service = DatasetService(repo=repo)
+    set_dataset_resolver(CatalogBackedResolver(service))
 
-    *   It satisfies the same interface the real service will
-        satisfy. No call site needs to know which implementation is
-        active.
-    *   It is seeded from the dataset names that already appear in
-        the five production experiment plans, so every committed
-        plan resolves cleanly.
-    *   It is thread-safe via an internal lock, so concurrent route
-        handlers cannot corrupt the registry during a request.
+The :class:`InMemoryDatasetResolver` and :func:`seed_default_datasets`
+are retained for unit tests only -- their docstrings and the test
+files explicitly mark them as test-only.
 
 ==============================================================================
 
@@ -89,6 +85,9 @@ from libs.strategy_ir.interfaces.dataset_resolver_interface import (
     DatasetNotFoundError,
     DatasetResolverInterface,
     ResolvedDataset,
+)
+from libs.strategy_ir.interfaces.dataset_service_interface import (
+    DatasetServiceInterface,
 )
 
 # ---------------------------------------------------------------------------
@@ -166,8 +165,12 @@ class InMemoryDatasetResolver(DatasetResolverInterface):
     Thread-safe in-memory implementation of
     :class:`DatasetResolverInterface`.
 
-    Suitable only for the M2.C2 tranche. See the module-level
-    "M4.E3 SWAP POINT" banner for the deletion plan.
+    **TEST-ONLY** as of M4.E3. Production wiring uses
+    :class:`CatalogBackedResolver` wrapping
+    :class:`services.api.services.dataset_service.DatasetService`
+    -- the Postgres-backed catalog service. This in-memory variant
+    is retained for unit tests where a database connection is not
+    available.
 
     Attributes:
         _store: Internal name -> :class:`ResolvedDataset` map.
@@ -276,7 +279,89 @@ def seed_default_datasets(resolver: InMemoryDatasetResolver) -> None:
         resolver.register(dataset_ref, symbols)
 
 
+# ---------------------------------------------------------------------------
+# M4.E3 swap target: the production resolver wraps the catalog service.
+# ---------------------------------------------------------------------------
+
+
+class CatalogBackedResolver(DatasetResolverInterface):
+    """
+    Production :class:`DatasetResolverInterface` adapter that wraps a
+    :class:`DatasetServiceInterface` (the M4.E3 catalog service).
+
+    Why this exists:
+        The route layer's narrow contract is "resolve(ref) ->
+        ResolvedDataset" — single method, returns a value object.
+        The M4.E3 catalog service exposes a richer surface
+        (lookup / list / register / is_certified) intended for admin
+        tooling and the certification gate. This adapter keeps the
+        narrow contract intact so the route's tests and consumers
+        do not need to grow imports against the service surface.
+
+    Wiring:
+        ``set_dataset_resolver(CatalogBackedResolver(DatasetService(...)))``
+
+    Responsibilities:
+    - Delegate :meth:`resolve` to the wrapped service's :meth:`lookup`.
+    - Re-raise :class:`DatasetNotFoundError` unchanged so route handlers
+      can map it to HTTP 404 with a known exception type.
+
+    Does NOT:
+    - Cache lookups — callers using a request-scoped session must not
+      see stale catalog state across requests.
+    - Hold any state of its own beyond the wrapped service reference.
+
+    Dependencies:
+    - A :class:`DatasetServiceInterface` instance, injected via the
+      constructor.
+
+    Example::
+
+        from services.api.services.dataset_service import DatasetService
+        from services.api.repositories.sql_dataset_repository import (
+            SqlDatasetRepository,
+        )
+        from libs.strategy_ir.dataset_resolver import CatalogBackedResolver
+
+        repo = SqlDatasetRepository(db=SessionLocal())
+        service = DatasetService(repo=repo)
+        resolver = CatalogBackedResolver(service)
+        resolved = resolver.resolve("fx-eurusd-15m-certified-v3")
+    """
+
+    def __init__(self, service: DatasetServiceInterface) -> None:
+        """
+        Args:
+            service: A :class:`DatasetServiceInterface` implementation
+                (production: :class:`DatasetService`; tests can pass
+                any structural match).
+        """
+        self._service = service
+
+    def resolve(self, dataset_ref: str) -> ResolvedDataset:
+        """
+        Translate ``dataset_ref`` into a :class:`ResolvedDataset` by
+        delegating to the wrapped service's :meth:`lookup`.
+
+        Args:
+            dataset_ref: Opaque catalog reference string from
+                :class:`ExperimentPlan.data_selection.dataset_ref`.
+
+        Returns:
+            Populated :class:`ResolvedDataset`.
+
+        Raises:
+            DatasetNotFoundError: Re-raised from the wrapped service
+                when the reference is not registered.
+        """
+        # The narrow port already declares DatasetNotFoundError as the
+        # only documented exception; the service raises the same type
+        # so no translation is required.
+        return self._service.lookup(dataset_ref)
+
+
 __all__ = [
+    "CatalogBackedResolver",
     "InMemoryDatasetResolver",
     "seed_default_datasets",
 ]
