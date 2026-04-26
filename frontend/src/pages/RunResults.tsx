@@ -34,7 +34,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   Area,
   AreaChart,
@@ -483,6 +483,133 @@ function TradeBlotterTable({
 }
 
 // ---------------------------------------------------------------------------
+// Compare-with modal
+// ---------------------------------------------------------------------------
+
+/**
+ * 26-character Crockford Base32 ULID. Mirrors the backend regex in
+ * :data:`services.api.routes.runs.ULID_PATTERN` so we reject obviously
+ * bogus inputs client-side before a 422 round-trip on the compare page.
+ */
+const COMPARE_ULID_REGEX = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
+
+/**
+ * Lightweight modal that prompts the operator for a second run ULID
+ * and navigates to ``/runs/compare?a={currentRunId}&b={inputId}`` on
+ * submit. Cancel closes the modal and leaves the page state intact.
+ *
+ * Validation:
+ *   - Trimmed input must be non-empty.
+ *   - Trimmed input must match the ULID character set + length.
+ *   Failing either check renders an inline error and disables submit.
+ */
+function CompareWithModal({
+  currentRunId,
+  isOpen,
+  onClose,
+  onSubmit,
+}: {
+  currentRunId: string;
+  isOpen: boolean;
+  onClose: () => void;
+  onSubmit: (otherRunId: string) => void;
+}) {
+  const [value, setValue] = useState<string>("");
+  const [submitted, setSubmitted] = useState<boolean>(false);
+
+  // Reset internal state every time the modal is reopened so a stale
+  // value from a previous interaction does not leak into the next one.
+  useEffect(() => {
+    if (isOpen) {
+      setValue("");
+      setSubmitted(false);
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const trimmed = value.trim();
+  const isEmpty = trimmed.length === 0;
+  const isUlidShape = COMPARE_ULID_REGEX.test(trimmed);
+  const isSelf = trimmed === currentRunId;
+  const validationError = submitted
+    ? isEmpty
+      ? "Run ID is required."
+      : !isUlidShape
+        ? "Run ID must be a 26-character ULID."
+        : isSelf
+          ? "Choose a different run to compare against."
+          : null
+    : null;
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmitted(true);
+    if (isEmpty || !isUlidShape || isSelf) return;
+    onSubmit(trimmed);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-surface-900/40 p-4"
+      data-testid="compare-with-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="compare-with-modal-title"
+    >
+      <div className="w-full max-w-md rounded-lg border border-surface-200 bg-white p-5 shadow-lg">
+        <h2 id="compare-with-modal-title" className="text-lg font-semibold text-surface-900">
+          Compare with another run
+        </h2>
+        <p className="mt-1 text-sm text-surface-500">
+          Enter the ULID of the run to compare against. You will be sent to a side-by-side
+          comparison page.
+        </p>
+
+        <form className="mt-4 space-y-3" onSubmit={handleSubmit} noValidate>
+          <label className="block text-sm font-medium text-surface-700" htmlFor="compare-other-id">
+            Run ID to compare against
+          </label>
+          <input
+            id="compare-other-id"
+            type="text"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="01H..."
+            className="w-full rounded-md border border-surface-300 px-3 py-2 font-mono text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            data-testid="compare-with-modal-input"
+            autoFocus
+          />
+          {validationError ? (
+            <p className="text-sm text-red-600" role="alert" data-testid="compare-with-modal-error">
+              {validationError}
+            </p>
+          ) : null}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-surface-300 px-3 py-1.5 text-sm font-medium text-surface-700 hover:bg-surface-50"
+              data-testid="compare-with-modal-cancel"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+              data-testid="compare-with-modal-submit"
+            >
+              Compare
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
@@ -513,6 +640,7 @@ function getErrorMessage(err: unknown, runId: string): string {
 
 export default function RunResults() {
   const { runId } = useParams<{ runId: string }>();
+  const navigate = useNavigate();
   // useAuth assertion: the AuthGuard wrapper has already verified the
   // session and the exports:read scope; calling useAuth here keeps the
   // hook semantics consistent with sibling pages and ensures the page
@@ -527,6 +655,7 @@ export default function RunResults() {
   const [isLoadingInitial, setIsLoadingInitial] = useState<boolean>(true);
   const [isFetchingBlotter, setIsFetchingBlotter] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [isCompareModalOpen, setIsCompareModalOpen] = useState<boolean>(false);
 
   // Initial fetch — metrics + equity curve + page 1 of blotter in parallel.
   useEffect(() => {
@@ -596,19 +725,39 @@ export default function RunResults() {
 
   return (
     <div className="space-y-6 p-6" data-testid="run-results-page">
-      <header>
-        <h1 className="text-2xl font-bold text-surface-900" data-testid="run-results-title">
-          Run Results
-        </h1>
-        <p className="mt-1 text-sm text-surface-500">
-          Run: <span className="font-mono">{runId}</span>
-          {metrics?.completed_at ? (
-            <span className="ml-2 text-surface-400">
-              · completed {formatTimestamp(metrics.completed_at)}
-            </span>
-          ) : null}
-        </p>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-surface-900" data-testid="run-results-title">
+            Run Results
+          </h1>
+          <p className="mt-1 text-sm text-surface-500">
+            Run: <span className="font-mono">{runId}</span>
+            <button
+              type="button"
+              onClick={() => setIsCompareModalOpen(true)}
+              className="ml-3 rounded-md border border-surface-300 bg-white px-2 py-0.5 text-xs font-medium text-surface-700 hover:bg-surface-50"
+              data-testid="compare-with-button"
+            >
+              Compare with…
+            </button>
+            {metrics?.completed_at ? (
+              <span className="ml-2 text-surface-400">
+                · completed {formatTimestamp(metrics.completed_at)}
+              </span>
+            ) : null}
+          </p>
+        </div>
       </header>
+
+      <CompareWithModal
+        currentRunId={runId}
+        isOpen={isCompareModalOpen}
+        onClose={() => setIsCompareModalOpen(false)}
+        onSubmit={(otherRunId) => {
+          setIsCompareModalOpen(false);
+          navigate(`/runs/compare?a=${runId}&b=${otherRunId}`);
+        }}
+      />
 
       {isLoadingInitial && (
         <div className="flex h-64 items-center justify-center" data-testid="run-results-loading">
