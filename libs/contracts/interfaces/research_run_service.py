@@ -37,6 +37,7 @@ from libs.contracts.research_run import (
 )
 from libs.contracts.run_results import (
     EquityCurveResponse,
+    RunCancelResult,
     RunMetrics,
     StrategyRunsPage,
     TradeBlotterPage,
@@ -251,4 +252,44 @@ class ResearchRunServiceInterface(ABC):
         Raises:
             NotFoundError: If no record exists for ``run_id``.
             RunNotCompletedError: If the run is not COMPLETED.
+        """
+
+    @abstractmethod
+    async def cancel_run_with_abort(
+        self,
+        run_id: str,
+        *,
+        requested_by: str,
+        correlation_id: str | None = None,
+    ) -> RunCancelResult:
+        """
+        Cancel a research run, aborting any in-flight executor task.
+
+        Powers ``POST /runs/{run_id}/cancel``. Distinct from the legacy
+        sync :meth:`cancel_run` (which only allows PENDING / QUEUED to
+        terminate without touching the executor pool) because this
+        method also tears down the in-flight asyncio task before writing
+        the terminal CANCELLED row, so a RUNNING run can be aborted
+        cleanly.
+
+        Behaviour:
+            * RUNNING — call :meth:`RunExecutorPool.cancel_run` to abort
+              the in-flight task, then transition the row to CANCELLED.
+            * PENDING / QUEUED — transition the row to CANCELLED
+              directly; the pool reports no in-flight task and the
+              service logs a debug entry (no abort needed).
+            * COMPLETED / FAILED / CANCELLED — no-op; return
+              ``cancelled=False`` with ``reason="terminal_state"``.
+
+        Args:
+            run_id: ULID of the research run to cancel.
+            requested_by: ULID (or other identifier) of the operator
+                requesting the cancel; surfaced in audit logs.
+            correlation_id: Optional request correlation ID for tracing.
+
+        Returns:
+            :class:`RunCancelResult` describing the outcome.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
         """

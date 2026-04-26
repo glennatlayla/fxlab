@@ -44,6 +44,7 @@ from libs.contracts.research_run import (
 from libs.contracts.risk import PreTradeRiskLimits, RiskCheckResult, RiskEvent
 from libs.contracts.run_results import (
     EquityCurveResponse,
+    RunCancelResult,
     RunMetrics,
     StrategyRunsPage,
     TradeBlotterPage,
@@ -181,6 +182,27 @@ class MockResearchRunService(ResearchRunServiceInterface):
             page_size=page_size,
             total_count=0,
             total_pages=0,
+        )
+
+    async def cancel_run_with_abort(
+        self,
+        run_id: str,
+        *,
+        requested_by: str,
+        correlation_id: str | None = None,
+    ) -> RunCancelResult:
+        """
+        Return a deterministic terminal-state no-op for the rate-limit
+        suite, which only needs the abstract method to be satisfied so
+        the service can be instantiated; cancel logic is exercised by
+        the dedicated unit and route tests.
+        """
+        return RunCancelResult(
+            run_id=run_id,
+            previous_status="cancelled",
+            current_status="cancelled",
+            cancelled=False,
+            reason="terminal_state",
         )
 
 

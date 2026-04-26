@@ -58,6 +58,7 @@ from libs.contracts.interfaces.research_run_service import (
     ResearchRunServiceInterface,
 )
 from libs.contracts.research_run import (
+    InvalidStatusTransitionError,
     ResearchRunConfig,
     ResearchRunRecord,
     ResearchRunResult,
@@ -67,6 +68,7 @@ from libs.contracts.research_run import (
 from libs.contracts.run_results import (
     EquityCurvePoint,
     EquityCurveResponse,
+    RunCancelResult,
     RunMetrics,
     RunSummaryItem,
     RunSummaryMetrics,
@@ -743,10 +745,17 @@ class ResearchRunService(ResearchRunServiceInterface):
         correlation_id: str | None = None,
     ) -> ResearchRunRecord:
         """
-        Cancel a research run that has not yet completed.
+        Cancel a PENDING or QUEUED research run (legacy sync path).
 
-        Only PENDING and QUEUED runs can be cancelled. RUNNING and
-        terminal states will raise InvalidStatusTransitionError.
+        This is the synchronous DB-only cancel used by the legacy
+        ``DELETE /research/runs/{id}`` route. It transitions the row to
+        CANCELLED but does NOT touch the executor pool, so a RUNNING run
+        cannot be cancelled via this path even though the persistence
+        layer now permits the RUNNING -> CANCELLED transition (the pool
+        integration is required to abort the in-flight asyncio task
+        cleanly). RUNNING runs raise :class:`InvalidStatusTransitionError`
+        here so legacy callers see consistent behaviour; new callers
+        should use :meth:`cancel_run_with_abort` instead.
 
         Args:
             run_id: ULID of the research run to cancel.
@@ -757,7 +766,8 @@ class ResearchRunService(ResearchRunServiceInterface):
 
         Raises:
             NotFoundError: If the run_id does not exist.
-            InvalidStatusTransitionError: If the run is not cancellable.
+            InvalidStatusTransitionError: If the run is RUNNING or in a
+                terminal state.
 
         Example:
             cancelled = service.cancel_run("01HRUN...")
@@ -776,8 +786,17 @@ class ResearchRunService(ResearchRunServiceInterface):
             component="research_run_service",
         )
 
-        # update_status validates the transition; raises
-        # InvalidStatusTransitionError if illegal.
+        # The legacy path does not own an executor pool; refuse to cancel
+        # a RUNNING run here so we never persist CANCELLED on a row whose
+        # in-flight task is still mutating it. The new
+        # cancel_run_with_abort method takes the safe path for RUNNING.
+        if existing.status == ResearchRunStatus.RUNNING:
+            raise InvalidStatusTransitionError(
+                ResearchRunStatus.RUNNING, ResearchRunStatus.CANCELLED
+            )
+
+        # update_status validates the remaining transitions; raises
+        # InvalidStatusTransitionError when the row is already terminal.
         cancelled = self._repo.update_status(run_id, ResearchRunStatus.CANCELLED)
 
         logger.info(
@@ -788,6 +807,159 @@ class ResearchRunService(ResearchRunServiceInterface):
         )
 
         return cancelled
+
+    # ------------------------------------------------------------------
+    # cancel_run_with_abort — POST /runs/{id}/cancel entry point
+    # ------------------------------------------------------------------
+
+    async def cancel_run_with_abort(
+        self,
+        run_id: str,
+        *,
+        requested_by: str,
+        correlation_id: str | None = None,
+    ) -> RunCancelResult:
+        """
+        Cancel a research run, aborting any in-flight executor task.
+
+        Behaviour matrix:
+            * ``status == RUNNING``:
+                1. Call :meth:`RunExecutorPool.cancel_run` to abort the
+                   in-flight asyncio task. The pool releases the
+                   semaphore as part of the unwind.
+                2. Transition the row to CANCELLED with
+                   ``error_message="user_requested"`` and
+                   ``completed_at=now`` (the repo's update_status
+                   stamps the timestamp).
+                3. Return ``cancelled=True``.
+                If the pool reports ``False`` (no in-flight task — the
+                worker finished between the row read and the pool
+                lookup), still mark the row CANCELLED and log a
+                ``cancel_pool_race`` warning so operators can see the
+                race happened.
+            * ``status in {PENDING, QUEUED}``:
+                Transition the row to CANCELLED directly. The pool is
+                not consulted because no in-flight task can exist.
+            * ``status in {COMPLETED, FAILED, CANCELLED}``:
+                No-op; return ``cancelled=False`` with
+                ``reason="terminal_state"``. The row is unchanged.
+
+        Args:
+            run_id: ULID of the research run to cancel.
+            requested_by: ULID (or other identifier) of the operator
+                triggering the cancel; surfaced in the
+                ``run_cancelled`` audit log.
+            correlation_id: Optional request correlation ID for tracing.
+
+        Returns:
+            :class:`RunCancelResult` describing the outcome.
+
+        Raises:
+            NotFoundError: If no record exists for ``run_id``.
+        """
+        existing = self._repo.get_by_id(run_id)
+        if existing is None:
+            raise NotFoundError(f"Research run {run_id} not found")
+
+        previous_status = existing.status
+
+        logger.info(
+            "research_run.cancel_with_abort.requested",
+            run_id=run_id,
+            previous_status=previous_status.value,
+            requested_by=requested_by,
+            correlation_id=correlation_id,
+            component="research_run_service",
+        )
+
+        # Terminal states are no-ops -- we never mutate a row that has
+        # already settled. The route maps cancelled=False to HTTP 409 so
+        # the caller can surface a "this run is already finished" toast.
+        if previous_status in (
+            ResearchRunStatus.COMPLETED,
+            ResearchRunStatus.FAILED,
+            ResearchRunStatus.CANCELLED,
+        ):
+            logger.info(
+                "research_run.cancel_with_abort.terminal_no_op",
+                run_id=run_id,
+                previous_status=previous_status.value,
+                requested_by=requested_by,
+                correlation_id=correlation_id,
+                component="research_run_service",
+            )
+            return RunCancelResult(
+                run_id=run_id,
+                previous_status=previous_status.value,
+                current_status=previous_status.value,
+                cancelled=False,
+                reason="terminal_state",
+            )
+
+        # Actionable cancel. For RUNNING, we MUST abort the in-flight
+        # task before persisting CANCELLED so the worker cannot race the
+        # status write.
+        pool_aborted: bool | None = None
+        if previous_status == ResearchRunStatus.RUNNING and self._executor_pool is not None:
+            pool_aborted = await self._executor_pool.cancel_run(run_id)
+            if not pool_aborted:
+                # Race: the worker finished between our read above and
+                # the pool lookup. The row may already have a terminal
+                # status; re-read so we honour it.
+                logger.warning(
+                    "research_run.cancel_with_abort.pool_race",
+                    run_id=run_id,
+                    requested_by=requested_by,
+                    correlation_id=correlation_id,
+                    component="research_run_service",
+                    detail=(
+                        "RUNNING row had no in-flight task in the pool; "
+                        "worker likely finished concurrently. Re-reading "
+                        "row to honour the new terminal status if any."
+                    ),
+                )
+                refreshed = self._repo.get_by_id(run_id)
+                if refreshed is None:
+                    # Race within a race -- the row vanished. Treat as
+                    # not-found rather than fabricating a result.
+                    raise NotFoundError(f"Research run {run_id} not found")
+                if refreshed.status in (
+                    ResearchRunStatus.COMPLETED,
+                    ResearchRunStatus.FAILED,
+                    ResearchRunStatus.CANCELLED,
+                ):
+                    return RunCancelResult(
+                        run_id=run_id,
+                        previous_status=previous_status.value,
+                        current_status=refreshed.status.value,
+                        cancelled=False,
+                        reason="task_already_finished",
+                    )
+
+        cancelled_record = self._repo.update_status(
+            run_id,
+            ResearchRunStatus.CANCELLED,
+            error_message="user_requested",
+        )
+
+        logger.info(
+            "run_cancelled",
+            run_id=run_id,
+            previous_status=previous_status.value,
+            current_status=cancelled_record.status.value,
+            requested_by=requested_by,
+            correlation_id=correlation_id,
+            pool_aborted=pool_aborted,
+            component="research_run_service",
+        )
+
+        return RunCancelResult(
+            run_id=run_id,
+            previous_status=previous_status.value,
+            current_status=cancelled_record.status.value,
+            cancelled=True,
+            reason="user_requested",
+        )
 
     # ------------------------------------------------------------------
     # list_runs

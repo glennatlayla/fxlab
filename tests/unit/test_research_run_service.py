@@ -359,3 +359,263 @@ class TestGetRunResult:
         service: ResearchRunService,
     ) -> None:
         assert service.get_run_result("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# cancel_run_with_abort (POST /runs/{id}/cancel entry point)
+# ---------------------------------------------------------------------------
+
+
+class _FakeExecutorPool:
+    """
+    Test double for :class:`RunExecutorPool` exposing only the
+    ``cancel_run`` coroutine the service actually awaits.
+
+    Records every call so the tests can assert (a) the pool was
+    consulted at all on a RUNNING cancel, and (b) was NOT consulted on
+    a PENDING / QUEUED cancel (those skip the pool). Tunable via
+    ``return_value`` so the race-condition branch can drive the
+    pool-returned-False path.
+    """
+
+    def __init__(self, *, return_value: bool = True) -> None:
+        self._return_value = return_value
+        self.cancel_calls: list[str] = []
+
+    async def cancel_run(self, run_id: str) -> bool:
+        self.cancel_calls.append(run_id)
+        return self._return_value
+
+
+@pytest.fixture()
+def fake_pool() -> _FakeExecutorPool:
+    return _FakeExecutorPool()
+
+
+@pytest.fixture()
+def service_with_pool(
+    repo: MockResearchRunRepository,
+    fake_pool: _FakeExecutorPool,
+) -> ResearchRunService:
+    """Service wired with a fake executor pool for cancel-with-abort tests."""
+    return ResearchRunService(repo=repo, executor_pool=fake_pool)  # type: ignore[arg-type]
+
+
+class TestCancelRunWithAbort:
+    """Tests for the new POST /runs/{id}/cancel entry point."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_running_run_aborts_pool_and_marks_cancelled(
+        self,
+        service_with_pool: ResearchRunService,
+        repo: MockResearchRunRepository,
+        fake_pool: _FakeExecutorPool,
+    ) -> None:
+        """
+        RUNNING -> CANCELLED: must call pool.cancel_run AND persist the
+        terminal CANCELLED row with error_message='user_requested'.
+        """
+        record = ResearchRunRecord(
+            id="01HRUNCANCELRUNNING000001",
+            config=_make_config(),
+            status=ResearchRunStatus.PENDING,
+            created_by=_USER_ID,
+        )
+        repo.create(record)
+        repo.update_status(record.id, ResearchRunStatus.QUEUED)
+        repo.update_status(record.id, ResearchRunStatus.RUNNING)
+
+        result = await service_with_pool.cancel_run_with_abort(record.id, requested_by=_USER_ID)
+
+        assert result.cancelled is True
+        assert result.previous_status == "running"
+        assert result.current_status == "cancelled"
+        assert result.reason == "user_requested"
+        # Pool was actually consulted.
+        assert fake_pool.cancel_calls == [record.id]
+        # DB row landed terminal with the cancellation reason.
+        persisted = repo.get_by_id(record.id)
+        assert persisted is not None
+        assert persisted.status == ResearchRunStatus.CANCELLED
+        assert persisted.error_message == "user_requested"
+        assert persisted.completed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_run_skips_pool_and_marks_cancelled(
+        self,
+        service_with_pool: ResearchRunService,
+        repo: MockResearchRunRepository,
+        fake_pool: _FakeExecutorPool,
+    ) -> None:
+        """
+        PENDING runs never hit the pool because there is no in-flight
+        task; the row goes straight to CANCELLED.
+        """
+        record = ResearchRunRecord(
+            id="01HRUNCANCELPENDING000002",
+            config=_make_config(),
+            status=ResearchRunStatus.PENDING,
+            created_by=_USER_ID,
+        )
+        repo.create(record)
+
+        result = await service_with_pool.cancel_run_with_abort(record.id, requested_by=_USER_ID)
+        assert result.cancelled is True
+        assert result.previous_status == "pending"
+        assert result.current_status == "cancelled"
+        assert fake_pool.cancel_calls == []  # pool not consulted
+        persisted = repo.get_by_id(record.id)
+        assert persisted is not None
+        assert persisted.status == ResearchRunStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_cancel_queued_run_skips_pool_and_marks_cancelled(
+        self,
+        service_with_pool: ResearchRunService,
+        repo: MockResearchRunRepository,
+        fake_pool: _FakeExecutorPool,
+    ) -> None:
+        """QUEUED runs follow the same path as PENDING."""
+        record = ResearchRunRecord(
+            id="01HRUNCANCELQUEUED0000003",
+            config=_make_config(),
+            status=ResearchRunStatus.PENDING,
+            created_by=_USER_ID,
+        )
+        repo.create(record)
+        repo.update_status(record.id, ResearchRunStatus.QUEUED)
+
+        result = await service_with_pool.cancel_run_with_abort(record.id, requested_by=_USER_ID)
+        assert result.cancelled is True
+        assert result.previous_status == "queued"
+        assert result.current_status == "cancelled"
+        assert fake_pool.cancel_calls == []
+        persisted = repo.get_by_id(record.id)
+        assert persisted is not None
+        assert persisted.status == ResearchRunStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_cancel_completed_run_is_no_op(
+        self,
+        service_with_pool: ResearchRunService,
+        repo: MockResearchRunRepository,
+        fake_pool: _FakeExecutorPool,
+    ) -> None:
+        """COMPLETED runs return cancelled=False with reason=terminal_state."""
+        record = ResearchRunRecord(
+            id="01HRUNCANCELCOMPLETED0004",
+            config=_make_config(),
+            status=ResearchRunStatus.PENDING,
+            created_by=_USER_ID,
+        )
+        repo.create(record)
+        repo.update_status(record.id, ResearchRunStatus.QUEUED)
+        repo.update_status(record.id, ResearchRunStatus.RUNNING)
+        repo.update_status(record.id, ResearchRunStatus.COMPLETED)
+
+        result = await service_with_pool.cancel_run_with_abort(record.id, requested_by=_USER_ID)
+        assert result.cancelled is False
+        assert result.previous_status == "completed"
+        assert result.current_status == "completed"
+        assert result.reason == "terminal_state"
+        # Pool was not consulted because we skipped to the no-op branch.
+        assert fake_pool.cancel_calls == []
+        # Row was not mutated by the no-op path.
+        persisted = repo.get_by_id(record.id)
+        assert persisted is not None
+        assert persisted.status == ResearchRunStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_cancel_unknown_run_raises_not_found(
+        self,
+        service_with_pool: ResearchRunService,
+    ) -> None:
+        with pytest.raises(NotFoundError):
+            await service_with_pool.cancel_run_with_abort(
+                "01HRUNNEVERCREATED000005", requested_by=_USER_ID
+            )
+
+    @pytest.mark.asyncio
+    async def test_running_cancel_with_pool_race_marks_task_already_finished(
+        self,
+        repo: MockResearchRunRepository,
+    ) -> None:
+        """
+        Pool reports no in-flight task (race: worker finished between
+        the row read and the pool call). If the row is now terminal,
+        surface that with cancelled=False / reason=task_already_finished
+        and DO NOT mutate the row.
+
+        Interleaves the worker-completes side-effect inside the pool's
+        cancel_run call so the service's first read sees RUNNING but
+        the post-pool re-read sees COMPLETED -- exactly the race the
+        branch defends against.
+        """
+
+        class _RaceyPool:
+            def __init__(self, repo_ref: MockResearchRunRepository, run_id: str) -> None:
+                self._repo = repo_ref
+                self._run_id = run_id
+                self.cancel_calls: list[str] = []
+
+            async def cancel_run(self, run_id: str) -> bool:
+                self.cancel_calls.append(run_id)
+                # Worker finished mid-cancel: drop the row into COMPLETED
+                # before returning False so the service sees the race.
+                self._repo.update_status(run_id, ResearchRunStatus.COMPLETED)
+                return False
+
+        record = ResearchRunRecord(
+            id="01HRUNCANCELRACE00000006",
+            config=_make_config(),
+            status=ResearchRunStatus.PENDING,
+            created_by=_USER_ID,
+        )
+        repo.create(record)
+        repo.update_status(record.id, ResearchRunStatus.QUEUED)
+        repo.update_status(record.id, ResearchRunStatus.RUNNING)
+
+        pool = _RaceyPool(repo, record.id)
+        service = ResearchRunService(repo=repo, executor_pool=pool)  # type: ignore[arg-type]
+
+        result = await service.cancel_run_with_abort(record.id, requested_by=_USER_ID)
+        assert result.cancelled is False
+        assert result.reason == "task_already_finished"
+        assert result.current_status == "completed"
+        # Row reflects the racing worker's terminal write, not a cancel.
+        persisted = repo.get_by_id(record.id)
+        assert persisted is not None
+        assert persisted.status == ResearchRunStatus.COMPLETED
+        # Pool was consulted exactly once (the RUNNING branch).
+        assert pool.cancel_calls == [record.id]
+
+    @pytest.mark.asyncio
+    async def test_running_cancel_without_pool_still_marks_cancelled(
+        self,
+        repo: MockResearchRunRepository,
+    ) -> None:
+        """
+        When the pool is not wired (no executor_pool injected), a RUNNING
+        cancel still persists the terminal row -- the contract layer's
+        RUNNING -> CANCELLED transition makes this safe even though no
+        task gets aborted. Operators see ``cancelled=True`` because the
+        DB state matches the operator intent.
+        """
+        service = ResearchRunService(repo=repo)
+        record = ResearchRunRecord(
+            id="01HRUNCANCELNOPOOL0000007",
+            config=_make_config(),
+            status=ResearchRunStatus.PENDING,
+            created_by=_USER_ID,
+        )
+        repo.create(record)
+        repo.update_status(record.id, ResearchRunStatus.QUEUED)
+        repo.update_status(record.id, ResearchRunStatus.RUNNING)
+
+        result = await service.cancel_run_with_abort(record.id, requested_by=_USER_ID)
+        assert result.cancelled is True
+        assert result.previous_status == "running"
+        assert result.current_status == "cancelled"
+        persisted = repo.get_by_id(record.id)
+        assert persisted is not None
+        assert persisted.status == ResearchRunStatus.CANCELLED

@@ -404,3 +404,71 @@ class StrategyRunsPage(BaseModel):
     )
     total_count: int = Field(..., ge=0, description="Total matching runs.")
     total_pages: int = Field(..., ge=0, description="Total pages at this page_size.")
+
+
+# ---------------------------------------------------------------------------
+# Cancel result (POST /runs/{run_id}/cancel)
+# ---------------------------------------------------------------------------
+
+
+class RunCancelResult(BaseModel):
+    """
+    Response body for ``POST /runs/{run_id}/cancel``.
+
+    Communicates the outcome of an operator-driven cancellation request
+    in a way the frontend toast / Recent-runs refresh can consume without
+    re-reading the full :class:`ResearchRunRecord`. The shape is small on
+    purpose: the route layer also re-issues the recent-runs query so the
+    full record refresh is already covered.
+
+    Attributes:
+        run_id: ULID of the run the cancel was requested for.
+        previous_status: Status the row carried just before the cancel
+            attempt. ``"running"`` and ``"queued"``/``"pending"`` are
+            actionable; the terminal statuses (``"completed"``,
+            ``"failed"``, ``"cancelled"``) are reported with
+            ``cancelled=False`` and an explanatory ``reason``.
+        current_status: Status the row carries after the cancel attempt.
+            For an actionable cancel this is always ``"cancelled"``; for
+            a no-op (terminal state) this equals ``previous_status``.
+        cancelled: ``True`` when the row was actually transitioned to
+            CANCELLED. ``False`` when the run was already in a terminal
+            state and the request was a no-op.
+        reason: Free-form explanatory string. ``"user_requested"`` for
+            actionable cancels; ``"terminal_state"`` for the no-op
+            branch; ``"task_already_finished"`` when the executor pool
+            reported no in-flight task because the worker finished
+            between the lookup and the cancel.
+
+    Example:
+        result = RunCancelResult(
+            run_id="01HRUN00000000000000000001",
+            previous_status="running",
+            current_status="cancelled",
+            cancelled=True,
+            reason="user_requested",
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str = Field(..., min_length=1, description="Run ULID.")
+    previous_status: str = Field(
+        ...,
+        pattern=r"^(pending|queued|running|completed|failed|cancelled)$",
+        description="Status before the cancel attempt.",
+    )
+    current_status: str = Field(
+        ...,
+        pattern=r"^(pending|queued|running|completed|failed|cancelled)$",
+        description="Status after the cancel attempt.",
+    )
+    cancelled: bool = Field(
+        ...,
+        description="True when the row was actually transitioned to CANCELLED.",
+    )
+    reason: str = Field(
+        ...,
+        min_length=1,
+        description="Explanatory string for the outcome.",
+    )
