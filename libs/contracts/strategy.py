@@ -186,6 +186,110 @@ class StrategyListItem(BaseModel):
     )
 
 
+#: Hard cap on the number of :class:`ValidationIssue` entries surfaced by
+#: :class:`StrategyValidationReport`. Prevents a deeply-broken IR (every
+#: condition leaf failing, hundreds of dangling references) from producing
+#: an unbounded response that overwhelms the operator UI. The validate
+#: route truncates to this cap and the truncation is itself surfaced as a
+#: trailing :class:`ValidationIssue` so the operator sees that more
+#: errors exist beyond what was rendered.
+MAX_VALIDATION_ISSUES: int = 100
+
+
+class ValidationIssue(BaseModel):
+    """
+    A single issue surfaced by :meth:`StrategyService.validate_ir`.
+
+    Attributes:
+        path: JSON pointer (RFC 6901-style, ``/``-rooted) into the IR
+            document identifying the offending field, or ``"/"`` when
+            the issue is at the document root (e.g. malformed JSON,
+            cross-field reference failure with no specific field).
+        code: Stable, machine-readable error code so the UI can branch
+            on the failure kind without parsing free-form text. Known
+            values: ``"invalid_json"``, ``"schema_violation"``,
+            ``"undefined_reference"``, ``"dataset_not_found"``,
+            ``"truncated"``, ``"unexpected_error"``.
+        message: Human-readable explanation suitable for inline display.
+
+    Example:
+        ValidationIssue(
+            path="/metadata/strategy_name",
+            code="schema_violation",
+            message="field required",
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(..., min_length=1, description="JSON pointer or '/' for root.")
+    code: str = Field(..., min_length=1, description="Stable error code.")
+    message: str = Field(..., min_length=1, description="Human-readable explanation.")
+
+
+class StrategyValidationReport(BaseModel):
+    """
+    Response body for ``POST /strategies/validate-ir``.
+
+    The validate endpoint runs the same parse + Pydantic + reference-
+    resolution pipeline that :meth:`StrategyService.create_from_ir` uses
+    for ``POST /strategies/import-ir``, but never persists. The report
+    captures the outcome:
+
+    - ``valid=True`` → ``parsed_ir`` carries the canonical parsed IR
+      body (same shape :meth:`StrategyService.get_with_parsed_ir`
+      surfaces under the ``parsed_ir`` field). ``errors`` is empty.
+    - ``valid=False`` → ``errors`` lists every detected issue. The list
+      is capped at :data:`MAX_VALIDATION_ISSUES` to bound response size;
+      truncation appends a trailing :class:`ValidationIssue` with
+      ``code="truncated"`` so the operator knows more errors exist.
+
+    The endpoint returns HTTP 200 in both cases — the request itself
+    succeeded; the IR's validity is communicated by the report. Auth
+    failures (401/403) and malformed request bodies (422) remain the
+    only non-2xx responses.
+
+    Attributes:
+        valid: Whether the IR passed every pipeline stage.
+        parsed_ir: Canonical parsed IR dict on success, ``None`` on
+            failure. Round-trips deeply against the input on success.
+        errors: Fatal validation issues; empty when ``valid`` is True.
+        warnings: Non-fatal issues (e.g. dataset references the
+            resolver flagged but did not reject). Always present;
+            empty when there are no warnings.
+
+    Example:
+        StrategyValidationReport(
+            valid=False,
+            parsed_ir=None,
+            errors=[
+                ValidationIssue(
+                    path="/metadata/strategy_name",
+                    code="schema_violation",
+                    message="field required",
+                ),
+            ],
+            warnings=[],
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    valid: bool = Field(..., description="True when every pipeline stage passed.")
+    parsed_ir: dict[str, Any] | None = Field(
+        default=None,
+        description="Canonical parsed IR dict on success, None on failure.",
+    )
+    errors: list[ValidationIssue] = Field(
+        default_factory=list,
+        description="Fatal validation issues; empty when valid is True.",
+    )
+    warnings: list[ValidationIssue] = Field(
+        default_factory=list,
+        description="Non-fatal validation issues (e.g. uncertified dataset).",
+    )
+
+
 class StrategyListPage(BaseModel):
     """
     Response body for ``GET /strategies`` (M2.D5).
