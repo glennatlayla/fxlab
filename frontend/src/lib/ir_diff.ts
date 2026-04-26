@@ -145,48 +145,27 @@ function appendPath(parent: string, component: string): string {
 }
 
 /**
- * Compute structural equality for two values.
+ * Compare two primitive values for structural equality.
  *
- * Used by the leaf-comparison branch. Recursively checks deep equality
- * for objects and arrays; primitives use ``Object.is`` so ``NaN`` is
- * equal to itself (matches "stable structural equality" expectations
- * for IR comparisons that may carry NaN sentinels via JSON parse).
+ * Uses ``Object.is`` so ``NaN`` is equal to itself (matches "stable
+ * structural equality" expectations for IR comparisons that may carry
+ * NaN sentinels via JSON parse) and ``+0`` / ``-0`` are distinct
+ * (irrelevant for IR but consistent with JS spec).
+ *
+ * The :func:`walk` recursion ensures this is only called on
+ * leaf-level pairs; container comparisons are handled inline by the
+ * walker so we never traverse the same subtree twice.
  *
  * Args:
- *   a: Left-hand value.
- *   b: Right-hand value.
+ *   a: Left-hand primitive value (number / string / boolean / null /
+ *     undefined).
+ *   b: Right-hand primitive value.
  *
  * Returns:
- *   ``true`` iff the two values are structurally equivalent.
+ *   ``true`` iff ``a`` and ``b`` are the same primitive.
  */
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) return true;
-  const sa = shapeOf(a);
-  const sb = shapeOf(b);
-  if (sa !== sb) return false;
-  if (sa === "primitive") return Object.is(a, b);
-  if (sa === "array") {
-    const aa = a as unknown[];
-    const bb = b as unknown[];
-    if (aa.length !== bb.length) return false;
-    for (let i = 0; i < aa.length; i++) {
-      if (!deepEqual(aa[i], bb[i])) return false;
-    }
-    return true;
-  }
-  // Both are objects.
-  const ao = a as Record<string, unknown>;
-  const bo = b as Record<string, unknown>;
-  const ak = Object.keys(ao).sort();
-  const bk = Object.keys(bo).sort();
-  if (ak.length !== bk.length) return false;
-  for (let i = 0; i < ak.length; i++) {
-    if (ak[i] !== bk[i]) return false;
-  }
-  for (const k of ak) {
-    if (!deepEqual(ao[k], bo[k])) return false;
-  }
-  return true;
+function primitivesEqual(a: unknown, b: unknown): boolean {
+  return Object.is(a, b);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +197,7 @@ function walk(a: unknown, b: unknown, path: string, out: DiffNode[]): void {
 
   // Both primitives — leaf-level equality decides the verdict.
   if (sa === "primitive") {
-    if (deepEqual(a, b)) {
+    if (primitivesEqual(a, b)) {
       out.push({ kind: "unchanged", path, value: a });
     } else {
       out.push({ kind: "changed", path, before: a, after: b });
