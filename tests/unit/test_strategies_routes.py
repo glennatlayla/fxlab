@@ -532,3 +532,362 @@ class TestDeleteDraftAutosave:
         )
 
         assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Soft-archive lifecycle routes (POST /archive | POST /restore)
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveStrategyRoute:
+    """Tests for POST /strategies/{strategy_id}/archive."""
+
+    def test_archive_happy_path_returns_200_and_updated_strategy(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """Archive returns 200 with the updated record carrying archived_at."""
+        archived_dict = {
+            "id": "01HSRC0000000000000000001",
+            "name": "Bollinger",
+            "code": "{}",
+            "version": "0.1.0",
+            "source": "draft_form",
+            "created_by": "01HUSER000000000000000001",
+            "is_active": True,
+            "row_version": 2,
+            "archived_at": "2026-04-26T18:53:34+00:00",
+            "created_at": "2026-04-25T12:00:00+00:00",
+            "updated_at": "2026-04-26T18:53:34+00:00",
+        }
+        mock_service = MagicMock()
+        mock_service.archive_strategy.return_value = archived_dict
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.post(
+                "/strategies/01HSRC0000000000000000001/archive",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["strategy"]["id"] == "01HSRC0000000000000000001"
+            assert body["strategy"]["archived_at"] == "2026-04-26T18:53:34+00:00"
+            assert body["strategy"]["row_version"] == 2
+
+            # Service was called with the path id and the operator's user_id.
+            mock_service.archive_strategy.assert_called_once_with(
+                "01HSRC0000000000000000001",
+                requested_by=mock_authenticated_user.user_id,
+            )
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_archive_unknown_strategy_returns_404(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """NotFoundError from the service maps to HTTP 404."""
+        from libs.contracts.errors import NotFoundError
+
+        mock_service = MagicMock()
+        mock_service.archive_strategy.side_effect = NotFoundError(
+            "Strategy 01HMISSING0000000000000001 not found"
+        )
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.post(
+                "/strategies/01HMISSING0000000000000001/archive",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 404
+            assert "not found" in response.json()["detail"].lower()
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_archive_already_archived_returns_409(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """StrategyArchiveStateError maps to HTTP 409 with detail."""
+        from libs.contracts.errors import StrategyArchiveStateError
+
+        mock_service = MagicMock()
+        mock_service.archive_strategy.side_effect = StrategyArchiveStateError(
+            "Strategy 01HSRC0000000000000000001 is already archived",
+            strategy_id="01HSRC0000000000000000001",
+            current_state="archived",
+        )
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.post(
+                "/strategies/01HSRC0000000000000000001/archive",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 409
+            assert "already archived" in response.json()["detail"].lower()
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_archive_missing_auth_returns_401(self, client: TestClient) -> None:
+        """No Authorization header → 401."""
+        response = client.post("/strategies/01HSRC0000000000000000001/archive")
+        assert response.status_code == 401
+
+    def test_archive_insufficient_scope_returns_403(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+    ) -> None:
+        """User lacking strategies:write scope is rejected with 403."""
+        viewer = AuthenticatedUser(
+            user_id="01HVEWR00000000000000000A2",
+            role="viewer",
+            email="viewer@fxlab.test",
+            scopes=["audit:read"],
+        )
+        app.dependency_overrides[get_current_user] = lambda: viewer
+        try:
+            response = client.post(
+                "/strategies/01HSRC0000000000000000001/archive",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 403
+        finally:
+            app.dependency_overrides.clear()
+
+
+class TestRestoreStrategyRoute:
+    """Tests for POST /strategies/{strategy_id}/restore."""
+
+    def test_restore_happy_path_returns_200_with_cleared_archived_at(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """Restore returns 200 with archived_at == null."""
+        restored_dict = {
+            "id": "01HSRC0000000000000000001",
+            "name": "Bollinger",
+            "code": "{}",
+            "version": "0.1.0",
+            "source": "draft_form",
+            "created_by": "01HUSER000000000000000001",
+            "is_active": True,
+            "row_version": 3,
+            "archived_at": None,
+            "created_at": "2026-04-25T12:00:00+00:00",
+            "updated_at": "2026-04-26T19:00:00+00:00",
+        }
+        mock_service = MagicMock()
+        mock_service.restore_strategy.return_value = restored_dict
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.post(
+                "/strategies/01HSRC0000000000000000001/restore",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["strategy"]["archived_at"] is None
+            assert body["strategy"]["row_version"] == 3
+
+            mock_service.restore_strategy.assert_called_once_with(
+                "01HSRC0000000000000000001",
+                requested_by=mock_authenticated_user.user_id,
+            )
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_restore_unknown_strategy_returns_404(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """NotFoundError → 404."""
+        from libs.contracts.errors import NotFoundError
+
+        mock_service = MagicMock()
+        mock_service.restore_strategy.side_effect = NotFoundError(
+            "Strategy 01HMISSING0000000000000001 not found"
+        )
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.post(
+                "/strategies/01HMISSING0000000000000001/restore",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 404
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_restore_when_not_archived_returns_409(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """Restore on an active row → 409."""
+        from libs.contracts.errors import StrategyArchiveStateError
+
+        mock_service = MagicMock()
+        mock_service.restore_strategy.side_effect = StrategyArchiveStateError(
+            "Strategy 01HSRC0000000000000000001 is not archived",
+            strategy_id="01HSRC0000000000000000001",
+            current_state="active",
+        )
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.post(
+                "/strategies/01HSRC0000000000000000001/restore",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 409
+            assert "not archived" in response.json()["detail"].lower()
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_restore_missing_auth_returns_401(self, client: TestClient) -> None:
+        """No Authorization header → 401."""
+        response = client.post("/strategies/01HSRC0000000000000000001/restore")
+        assert response.status_code == 401
+
+    def test_restore_insufficient_scope_returns_403(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+    ) -> None:
+        """User lacking strategies:write scope → 403."""
+        viewer = AuthenticatedUser(
+            user_id="01HVEWR00000000000000000A2",
+            role="viewer",
+            email="viewer@fxlab.test",
+            scopes=["audit:read"],
+        )
+        app.dependency_overrides[get_current_user] = lambda: viewer
+        try:
+            response = client.post(
+                "/strategies/01HSRC0000000000000000001/restore",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 403
+        finally:
+            app.dependency_overrides.clear()
+
+
+class TestListStrategiesIncludeArchivedQuery:
+    """Verify the ``include_archived`` query parameter plumbs to the service."""
+
+    def test_list_default_passes_include_archived_false_to_service(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """No query param → service called with include_archived=False."""
+        mock_service = MagicMock()
+        mock_service.list_strategies.return_value = {
+            "strategies": [],
+            "limit": 50,
+            "offset": 0,
+            "count": 0,
+        }
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.get("/strategies/", headers=auth_headers_strategies)
+            assert response.status_code == 200
+            kwargs = mock_service.list_strategies.call_args.kwargs
+            assert kwargs["include_archived"] is False
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_list_with_include_archived_true_passes_through(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """?include_archived=true plumbs through to the service kwarg."""
+        mock_service = MagicMock()
+        mock_service.list_strategies.return_value = {
+            "strategies": [],
+            "limit": 50,
+            "offset": 0,
+            "count": 0,
+        }
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.get(
+                "/strategies/?include_archived=true",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 200
+            kwargs = mock_service.list_strategies.call_args.kwargs
+            assert kwargs["include_archived"] is True
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)
+
+    def test_list_paged_passes_include_archived_to_service(
+        self,
+        client: TestClient,
+        auth_headers_strategies: dict[str, str],
+        mock_authenticated_user: AuthenticatedUser,
+    ) -> None:
+        """The M2.D5 paginated envelope honours include_archived too."""
+        # Build a minimal StrategyListPage stand-in via MagicMock since the
+        # route only calls model_dump on it.
+        page_obj = MagicMock()
+        page_obj.model_dump.return_value = {
+            "strategies": [],
+            "page": 1,
+            "page_size": 20,
+            "total_count": 0,
+            "total_pages": 0,
+        }
+        mock_service = MagicMock()
+        mock_service.list_strategies_page.return_value = page_obj
+        set_strategy_service(mock_service)
+        app.dependency_overrides[get_current_user] = lambda: mock_authenticated_user
+
+        try:
+            response = client.get(
+                "/strategies/?page=1&page_size=20&include_archived=true",
+                headers=auth_headers_strategies,
+            )
+            assert response.status_code == 200
+            kwargs = mock_service.list_strategies_page.call_args.kwargs
+            assert kwargs["include_archived"] is True
+        finally:
+            app.dependency_overrides.clear()
+            set_strategy_service(None)

@@ -50,6 +50,8 @@ from sqlalchemy.orm import Session
 
 from libs.contracts.errors import (
     NotFoundError,
+    RowVersionConflictError,
+    StrategyArchiveStateError,
     StrategyNameConflictError,
     ValidationError,
 )
@@ -502,6 +504,263 @@ async def clone_strategy_route(
     )
 
 
+# ---------------------------------------------------------------------------
+# Soft-archive lifecycle (POST /archive | POST /restore)
+# ---------------------------------------------------------------------------
+
+
+def _emit_archive_lifecycle_audit(
+    *,
+    event: str,
+    strategy_id: str,
+    user_id: str,
+    correlation_id: str,
+    archived_at: str | None,
+) -> None:
+    """
+    Emit the canonical archive/restore audit line per CLAUDE.md §8.
+
+    Centralised so the two route handlers share one structured-log
+    contract — the "event" name is bound to the first positional arg
+    by structlog, and the kwargs are the indexed fields downstream
+    log consumers filter on.
+
+    Args:
+        event: ``"strategy_archived"`` or ``"strategy_restored"``.
+        strategy_id: ULID of the strategy whose lifecycle changed.
+        user_id: ULID of the operator who clicked the button.
+        correlation_id: Request correlation id propagated from the
+            FastAPI middleware.
+        archived_at: New archived_at value after the write (None for
+            restore, ISO-8601 string for archive).
+    """
+    logger.info(
+        event,
+        strategy_id=strategy_id,
+        user_id=user_id,
+        archived_at=archived_at,
+        correlation_id=correlation_id,
+        component="strategies",
+        operation=event,
+    )
+
+
+@router.post(
+    "/{strategy_id}/archive",
+    summary="Soft-archive a strategy (hidden from default list, kept for audit)",
+)
+async def archive_strategy_route(
+    strategy_id: str = Path(..., description="ULID of the strategy to archive"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Soft-archive a strategy by setting ``archived_at`` to UTC now.
+
+    Delegates to :meth:`StrategyService.archive_strategy`. The archived
+    strategy disappears from the default catalogue browse view but its
+    history (runs, audit trail, deployments) stays intact. Restoration
+    is a single POST to the matching restore endpoint.
+
+    Auth scope: ``strategies:write`` (matches every other write route
+    in this module — the project does not split read/write scopes for
+    strategy administration).
+
+    Args:
+        strategy_id: ULID of the strategy to archive.
+        user: Authenticated user with ``strategies:write`` scope.
+
+    Returns:
+        200 ``JSONResponse`` with body ``{"strategy": <updated record>}``.
+        The updated record carries the new ``archived_at`` timestamp
+        (ISO-8601), the bumped ``row_version``, and unchanged identity
+        fields.
+
+    Raises:
+        HTTPException 404: Strategy does not exist.
+        HTTPException 409: Strategy is already archived.
+
+    Example:
+        POST /strategies/01HSRC.../archive
+        → 200 {"strategy": {"id": "01HSRC...",
+                            "archived_at": "2026-04-26T18:53:34+00:00",
+                            "row_version": 2, ...}}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    logger.info(
+        "strategies.archive.called",
+        strategy_id=strategy_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="archive_strategy",
+    )
+
+    try:
+        updated = service.archive_strategy(strategy_id, requested_by=user.user_id)
+    except NotFoundError as exc:
+        logger.warning(
+            "strategies.archive.not_found",
+            strategy_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="archive_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Strategy {strategy_id} not found",
+        ) from exc
+    except StrategyArchiveStateError as exc:
+        # 409 — the strategy is already archived. The detail body
+        # carries the service's message verbatim so the UI can render
+        # "already archived" inline without re-deriving copy.
+        logger.warning(
+            "strategies.archive.already_archived",
+            strategy_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="archive_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except RowVersionConflictError as exc:
+        # 409 — concurrent writer mutated the row between read + write.
+        # Per CLAUDE.md §9 we do not retry this — the operator's view
+        # is stale and they need to refresh before deciding what to do.
+        logger.warning(
+            "strategies.archive.row_version_conflict",
+            strategy_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            actual_row_version=exc.actual_row_version,
+            expected_row_version=exc.expected_row_version,
+            component="strategies",
+            operation="archive_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    _emit_archive_lifecycle_audit(
+        event="strategy_archived",
+        strategy_id=strategy_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        archived_at=updated.get("archived_at"),
+    )
+
+    return JSONResponse(content={"strategy": updated})
+
+
+@router.post(
+    "/{strategy_id}/restore",
+    summary="Restore a soft-archived strategy back to the active catalogue",
+)
+async def restore_strategy_route(
+    strategy_id: str = Path(..., description="ULID of the strategy to restore"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Restore a soft-archived strategy by clearing ``archived_at``.
+
+    Inverse of the archive endpoint. The strategy reappears in the
+    default catalogue immediately after a successful restore.
+
+    Auth scope: ``strategies:write`` (matches every other write route
+    in this module).
+
+    Args:
+        strategy_id: ULID of the strategy to restore.
+        user: Authenticated user with ``strategies:write`` scope.
+
+    Returns:
+        200 ``JSONResponse`` with body ``{"strategy": <updated record>}``.
+        The updated record carries ``archived_at: null`` and a bumped
+        ``row_version``.
+
+    Raises:
+        HTTPException 404: Strategy does not exist.
+        HTTPException 409: Strategy is not currently archived.
+
+    Example:
+        POST /strategies/01HSRC.../restore
+        → 200 {"strategy": {"id": "01HSRC...",
+                            "archived_at": null,
+                            "row_version": 3, ...}}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    logger.info(
+        "strategies.restore.called",
+        strategy_id=strategy_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="restore_strategy",
+    )
+
+    try:
+        updated = service.restore_strategy(strategy_id, requested_by=user.user_id)
+    except NotFoundError as exc:
+        logger.warning(
+            "strategies.restore.not_found",
+            strategy_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="restore_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Strategy {strategy_id} not found",
+        ) from exc
+    except StrategyArchiveStateError as exc:
+        logger.warning(
+            "strategies.restore.not_archived",
+            strategy_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="restore_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except RowVersionConflictError as exc:
+        logger.warning(
+            "strategies.restore.row_version_conflict",
+            strategy_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            actual_row_version=exc.actual_row_version,
+            expected_row_version=exc.expected_row_version,
+            component="strategies",
+            operation="restore_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    _emit_archive_lifecycle_audit(
+        event="strategy_restored",
+        strategy_id=strategy_id,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        archived_at=updated.get("archived_at"),
+    )
+
+    return JSONResponse(content={"strategy": updated})
+
+
 @router.get("/{strategy_id}", summary="Get strategy by ID")
 async def get_strategy(
     strategy_id: str = Path(..., description="Strategy ULID"),
@@ -622,6 +881,14 @@ async def list_strategies(
     ),
     created_by: str | None = Query(None, description="Filter by creator ULID"),
     is_active: bool | None = Query(None, description="Filter by active status"),
+    include_archived: bool = Query(
+        False,
+        description=(
+            "When true, include soft-archived strategies (archived_at IS NOT NULL) "
+            "in the response. Defaults to false so the operator's default browse "
+            "view stays focused on the active catalogue."
+        ),
+    ),
     limit: int = Query(
         50, ge=1, le=200, description="Legacy page size (used when ``page`` omitted)"
     ),
@@ -693,6 +960,7 @@ async def list_strategies(
             name_contains=name_contains,
             created_by=created_by,
             is_active=is_active,
+            include_archived=include_archived,
         )
         body = page_obj.model_dump(mode="json")
         body["count"] = len(body["strategies"])
@@ -707,6 +975,7 @@ async def list_strategies(
             page_size=page_size,
             source_filter=source,
             name_contains=name_contains,
+            include_archived=include_archived,
             returned=body["count"],
             total_count=body["total_count"],
             user_id=user.user_id,
@@ -724,6 +993,7 @@ async def list_strategies(
         is_active=is_active,
         limit=limit,
         offset=offset,
+        include_archived=include_archived,
     )
 
     logger.debug(
