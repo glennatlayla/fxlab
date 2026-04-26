@@ -48,7 +48,11 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from libs.contracts.errors import NotFoundError, ValidationError
+from libs.contracts.errors import (
+    NotFoundError,
+    StrategyNameConflictError,
+    ValidationError,
+)
 from libs.contracts.governance import DraftAutosavePayload
 from libs.contracts.run_results import (
     DEFAULT_STRATEGY_RUNS_PAGE_SIZE,
@@ -91,6 +95,26 @@ class ValidateDslRequest(BaseModel):
     """Request payload for POST /strategies/validate-dsl."""
 
     expression: str = Field(..., description="DSL expression to validate")
+
+
+class CloneStrategyRequest(BaseModel):
+    """
+    Request payload for ``POST /strategies/{strategy_id}/clone``.
+
+    The frontend pre-fills ``new_name`` with ``"{source.name} (copy)"``;
+    the backend re-validates the constraint here so a stale frontend
+    cannot bypass it. ``min_length=1`` rejects empty strings (FastAPI
+    surfaces a 422); ``max_length=255`` mirrors the ``Strategy.name``
+    SQL column limit so an overlong submission is also a 422 rather
+    than a SQLAlchemy ``DataError`` at write time.
+    """
+
+    new_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Display name for the clone. 1-255 chars, must be unique.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +370,134 @@ async def import_strategy_ir(
 
     return JSONResponse(
         content={"strategy": strategy},
+        status_code=status.HTTP_201_CREATED,
+    )
+
+
+@router.post(
+    "/{strategy_id}/clone",
+    status_code=status.HTTP_201_CREATED,
+    summary="Clone an existing strategy under a new name",
+)
+async def clone_strategy_route(
+    payload: CloneStrategyRequest,
+    strategy_id: str = Path(..., description="ULID of the source strategy to clone"),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Duplicate the source strategy under ``new_name`` and return the clone.
+
+    Delegates to :meth:`StrategyService.clone_strategy`. The clone:
+    - Inherits ``source`` (provenance) and ``version`` from the source.
+    - Holds an independent dict graph for ``code`` (re-parsed via
+      ``json.loads`` / ``json.dumps``); mutating the clone never
+      affects the source's persisted bytes.
+    - Is attributed to the requesting operator (``created_by`` =
+      ``user.user_id``) so audit history shows who clicked the button.
+    - Carries a fresh ULID, fresh timestamps, and ``row_version=1``.
+    - Does NOT copy run history, deployments, or approvals.
+
+    Auth scope: ``strategies:write`` (matches every other write route
+    in this module — the project does not split read/write scopes for
+    strategy administration).
+
+    Args:
+        payload: ``CloneStrategyRequest`` with the ``new_name`` field
+            (1-255 chars, validated by Pydantic before the handler runs).
+        strategy_id: ULID of the source strategy.
+        user: Authenticated user with ``strategies:write`` scope.
+
+    Returns:
+        201 ``JSONResponse`` with body ``{"strategy": <persisted clone>}``.
+
+    Raises:
+        HTTPException 404: If the source ``strategy_id`` does not exist.
+        HTTPException 409: If a strategy with ``new_name`` already exists
+            (case-insensitive collision).
+        HTTPException 422: If ``new_name`` fails the request schema
+            (empty / overlong) — surfaced by FastAPI before the handler
+            executes.
+
+    Example:
+        POST /strategies/01HSRC.../clone
+        {"new_name": "RSI Reversal (copy)"}
+        → 201 {"strategy": {"id": "01HCLN...", "name": "RSI Reversal (copy)",
+                            "source": "draft_form", "row_version": 1, ...}}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = get_strategy_service()
+
+    logger.info(
+        "strategies.clone.called",
+        source_id=strategy_id,
+        new_name=payload.new_name,
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="clone_strategy",
+    )
+
+    try:
+        clone = service.clone_strategy(
+            strategy_id,
+            new_name=payload.new_name,
+            requested_by=user.user_id,
+        )
+    except NotFoundError as exc:
+        logger.warning(
+            "strategies.clone.source_not_found",
+            source_id=strategy_id,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="clone_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Strategy {strategy_id} not found",
+        ) from exc
+    except StrategyNameConflictError as exc:
+        # 409 carries the colliding name in the detail body so the UI
+        # can show "A strategy named 'X' already exists." inline without
+        # re-deriving the message client-side.
+        logger.warning(
+            "strategies.clone.name_conflict",
+            source_id=strategy_id,
+            new_name=payload.new_name,
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="clone_strategy",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValidationError as exc:
+        # The request body schema already rejects empty / overlong
+        # names with 422. A ValidationError here would indicate a
+        # service-layer guard fired (e.g. trimming made the name empty
+        # — Pydantic min_length=1 doesn't trim). Surface as 422 so the
+        # UI's existing inline-error path renders identically to the
+        # body-validation case.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    logger.info(
+        "strategies.clone.completed",
+        source_id=strategy_id,
+        new_id=clone["id"],
+        new_name=clone["name"],
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="clone_strategy",
+    )
+
+    return JSONResponse(
+        content={"strategy": clone},
         status_code=status.HTTP_201_CREATED,
     )
 

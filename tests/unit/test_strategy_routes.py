@@ -62,6 +62,15 @@ class MockStrategyService:
         self.raise_validation: str | None = None
         self.raise_not_found: bool = False
         self._strategies: list[dict] = []
+        # Test hooks for the clone_strategy code path. ``raise_clone_*``
+        # toggle injection of the corresponding domain error so the
+        # route-level tests can drive each branch of the clone handler
+        # without standing up the real service. Default behaviour is to
+        # synthesise a clone the same way create_strategy synthesises a
+        # row, so the happy-path test does not need any toggles set.
+        self.raise_clone_not_found: bool = False
+        self.raise_clone_conflict: bool = False
+        self.raise_clone_validation: str | None = None
 
     def create_strategy(self, **kwargs) -> dict:
         from libs.contracts.errors import ValidationError
@@ -103,6 +112,61 @@ class MockStrategyService:
             "indicators_used": ["RSI"],
             "variables_used": ["price"],
         }
+
+    def clone_strategy(
+        self,
+        source_id: str,
+        *,
+        new_name: str,
+        requested_by: str,
+    ) -> dict:
+        """
+        Mock clone_strategy that mirrors the production contract.
+
+        Real semantics, not a stub:
+        - When ``raise_clone_not_found`` is set, raise NotFoundError
+          (route maps to 404).
+        - When ``raise_clone_conflict`` is set, raise
+          StrategyNameConflictError (route maps to 409).
+        - When ``raise_clone_validation`` is set, raise ValidationError
+          with the configured message (route maps to 422 — though in
+          practice the route's Pydantic body validation catches empty
+          names before this layer is reached).
+        - Otherwise synthesise a fresh persisted-row dict the same way
+          ``create_strategy`` does, append it to ``self._strategies`` so
+          the list endpoints reflect the new row, and return it.
+        """
+        from libs.contracts.errors import (
+            NotFoundError,
+            StrategyNameConflictError,
+            ValidationError,
+        )
+
+        if self.raise_clone_validation:
+            raise ValidationError(self.raise_clone_validation)
+        if self.raise_clone_not_found:
+            raise NotFoundError(f"Strategy {source_id} not found")
+        if self.raise_clone_conflict:
+            raise StrategyNameConflictError(
+                f"A strategy named {new_name!r} already exists",
+                name=new_name,
+            )
+
+        next_idx = len(self._strategies) + 1
+        clone = {
+            "id": f"01HCLONE{next_idx:018d}",
+            "name": new_name,
+            "code": "{}",
+            "version": "0.1.0",
+            "source": "draft_form",
+            "created_by": requested_by,
+            "is_active": True,
+            "row_version": 1,
+            "created_at": f"2026-04-12T15:00:{next_idx:02d}+00:00",
+            "updated_at": f"2026-04-12T15:00:{next_idx:02d}+00:00",
+        }
+        self._strategies.append(clone)
+        return clone
 
     def get_strategy(self, strategy_id: str) -> dict:
         from libs.contracts.errors import NotFoundError
@@ -1482,3 +1546,150 @@ class TestListStrategyRunsRoute:
             headers=_auth_headers(),
         )
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Tests: POST /strategies/{strategy_id}/clone
+# ---------------------------------------------------------------------------
+
+
+class TestCloneStrategyRoute:
+    """
+    Tests for POST /strategies/{strategy_id}/clone.
+
+    Acceptance per the brief:
+    - 201 happy path with the cloned Strategy contract.
+    - 404 source-not-found.
+    - 409 name-collision (StrategyNameConflictError → HTTP 409).
+    - 422 invalid body (empty new_name).
+    - 401/403 on missing/insufficient auth.
+    """
+
+    def test_clone_returns_201_with_cloned_strategy(self, strategy_test_env) -> None:
+        """Happy path: 201 with the cloned strategy in the response body."""
+        client, mock_service, _ = strategy_test_env
+        # Seed a source row so the clone has something to copy from. The
+        # mock service synthesises a row on create so we can grab its id.
+        seed = client.post(
+            "/strategies/",
+            json={
+                "name": "Source Strategy",
+                "entry_condition": "RSI(14) < 30",
+                "exit_condition": "RSI(14) > 70",
+            },
+            headers=_auth_headers(),
+        )
+        assert seed.status_code == 201
+        source_id = seed.json()["strategy"]["id"]
+
+        resp = client.post(
+            f"/strategies/{source_id}/clone",
+            json={"new_name": "Source Strategy (copy)"},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert "strategy" in body
+        clone = body["strategy"]
+        assert clone["name"] == "Source Strategy (copy)"
+        assert clone["id"] != source_id
+        assert clone["row_version"] == 1
+        assert clone["is_active"] is True
+        # The clone is attributed to the operator who clicked the button,
+        # mirrored as ``created_by`` in the response.
+        assert clone["created_by"] == _OPERATOR_USER.user_id
+
+    def test_clone_returns_404_when_source_missing(self, strategy_test_env) -> None:
+        """A NotFoundError from the service maps to HTTP 404."""
+        client, mock_service, _ = strategy_test_env
+        mock_service.raise_clone_not_found = True
+
+        resp = client.post(
+            "/strategies/01HMISSING0000000000000001/clone",
+            json={"new_name": "Whatever"},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
+
+    def test_clone_returns_409_on_name_collision(self, strategy_test_env) -> None:
+        """A StrategyNameConflictError from the service maps to HTTP 409."""
+        client, mock_service, _ = strategy_test_env
+        mock_service.raise_clone_conflict = True
+
+        resp = client.post(
+            "/strategies/01HSTRAT0000000000000001/clone",
+            json={"new_name": "Already Taken"},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 409, resp.text
+        # The detail body should mention the colliding name so the UI
+        # can render an inline error without re-deriving the message.
+        assert "already exists" in resp.json()["detail"].lower()
+
+    def test_clone_with_empty_new_name_returns_422(self, strategy_test_env) -> None:
+        """Pydantic body validation rejects an empty ``new_name``."""
+        client, _, _ = strategy_test_env
+
+        resp = client.post(
+            "/strategies/01HSTRAT0000000000000001/clone",
+            json={"new_name": ""},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 422
+
+    def test_clone_with_overlong_new_name_returns_422(self, strategy_test_env) -> None:
+        """A new_name above 255 chars is rejected by the request schema."""
+        client, _, _ = strategy_test_env
+
+        resp = client.post(
+            "/strategies/01HSTRAT0000000000000001/clone",
+            json={"new_name": "x" * 256},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 422
+
+    def test_clone_requires_auth(self, strategy_test_env) -> None:
+        """Request without auth is rejected before the service runs."""
+        client, _, _app = strategy_test_env
+        _app.dependency_overrides.clear()
+
+        resp = client.post(
+            "/strategies/01HSTRAT0000000000000001/clone",
+            json={"new_name": "Whatever"},
+        )
+
+        assert resp.status_code in (401, 403, 422)
+
+    def test_clone_rejects_user_without_strategies_write_scope(self, strategy_test_env) -> None:
+        """A user lacking ``strategies:write`` is rejected with 403."""
+        client, _, _app = strategy_test_env
+        # Override the auth dependency with a user that holds NO scopes —
+        # they are authenticated, but require_scope("strategies:write")
+        # raises 403.
+        from services.api.auth import get_current_user
+
+        viewer = AuthenticatedUser(
+            user_id="01HVEWERFAKE00000000000000",
+            email="viewer@fxlab.test",
+            role="viewer",
+            scopes=set(),
+        )
+
+        async def _viewer() -> AuthenticatedUser:
+            return viewer
+
+        _app.dependency_overrides[get_current_user] = _viewer
+
+        resp = client.post(
+            "/strategies/01HSTRAT0000000000000001/clone",
+            json={"new_name": "Whatever"},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 403
