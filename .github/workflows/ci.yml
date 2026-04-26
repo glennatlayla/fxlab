@@ -278,6 +278,97 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://fxlab_test:fxlab_test@localhost:5432/fxlab_test
 
+  integration:
+    # -------------------------------------------------------------------------
+    # Runs the integration test suite (tests/integration/) against a real
+    # Postgres + Redis stack brought up via docker-compose.test.yml.
+    #
+    # Why docker-compose.test.yml (not docker-compose.prod.yml):
+    #   docker-compose.test.yml is the CI-purpose file: Postgres 15 + Redis 7
+    #   on offset ports (5433/6380) with ephemeral tmpfs storage. It exists
+    #   precisely for this scenario — see its header comment. Bringing up
+    #   docker-compose.prod.yml here would require generating a real .env,
+    #   building the API/web/nginx images, binding host ports 80/443, and
+    #   spinning up the full Prometheus/Alertmanager/exporter stack. That
+    #   is what `make install-smoke` already does locally and what a future
+    #   smoke job could add. For exercising tests/integration/ on every PR
+    #   we want only the data-tier dependencies that the tests' conftest.py
+    #   reaches for via TEST_DATABASE_URL.
+    #
+    # Why this is needed:
+    #   The Tests job is scoped to tests/unit/ (M-prep #9 sha 000e4c7) so
+    #   that integration tests requiring real services never accidentally
+    #   tank the unit suite. Before this job, integration tests were only
+    #   exercised via `make install-smoke` on an operator's machine — never
+    #   on PRs. This job closes that gap.
+    # -------------------------------------------------------------------------
+    name: Integration tests (docker compose)
+    runs-on: ubuntu-latest
+    needs: quality
+    timeout-minutes: 30
+    env:
+      ENVIRONMENT: test
+      # tests/integration/conftest.py reads TEST_DATABASE_URL and falls back
+      # to in-memory SQLite when unset. Setting it points the suite at the
+      # postgres-test container brought up by docker-compose.test.yml below.
+      TEST_DATABASE_URL: postgresql://fxlab_test:fxlab_test@localhost:5433/fxlab_test
+      REDIS_URL: redis://localhost:6380/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python deps for the integration test runner
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Bring up the test compose stack (postgres + redis)
+        # --wait blocks until every service either passes its healthcheck
+        # or fails them all (job exits non-zero with a clear error).
+        # docker-compose.test.yml uses tmpfs for postgres data so the
+        # stack is fully ephemeral; teardown -v removes everything.
+        run: docker compose -f docker-compose.test.yml up -d --wait
+
+      - name: Run integration tests
+        # Run EVERY test under tests/integration/, not just those carrying
+        # the @pytest.mark.integration marker. The marker is registered
+        # but only applied to one file today (test_alembic_migration_runner_integration.py)
+        # — using -m integration would silently skip the docker-compose-
+        # dependent tests this job exists to exercise. The directory
+        # scope is the contract: anything under tests/integration/ runs
+        # in this job, full stop.
+        # --no-cov disables coverage collection for this job — the Tests
+        # job already enforces the 80% gate against tests/unit/, and
+        # mixing the two coverage runs would dilute the gate.
+        run: |
+          .venv/bin/python -m pytest tests/integration/ \
+            --tb=short -q \
+            --no-cov
+
+      - name: Capture compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.test.yml logs > compose-logs.txt
+
+      - name: Upload compose logs
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: compose-logs
+          path: compose-logs.txt
+
+      - name: Tear down compose stack
+        # Always run, even on failure — the GitHub Actions runner is
+        # ephemeral but leaving containers + volumes around can cause
+        # port-binding failures if a job is retried in the same runner
+        # context. -v removes the named volumes for a clean slate.
+        if: always()
+        run: docker compose -f docker-compose.test.yml down --volumes
+
   build:
     name: Docker Build Smoke Test
     runs-on: ubuntu-latest
