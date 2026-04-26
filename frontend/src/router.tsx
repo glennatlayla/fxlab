@@ -101,6 +101,12 @@ const RunResults = lazy(() => import("./pages/RunResults"));
 // scope as RunResults since the underlying data is the same.
 const RunCompare = lazy(() => import("./pages/RunCompare"));
 
+// Strategy Diff (sibling to Run Compare) — side-by-side structural IR
+// diff at /strategies/diff?a={idA}&b={idB}. Reuses GET /strategies/{id}
+// (which already returns parsed_ir) so no new backend endpoint is
+// required. Same scope as the rest of the strategies surface.
+const StrategyDiff = lazy(() => import("./pages/StrategyDiff"));
+
 export const router = createBrowserRouter(
   [
     {
@@ -141,6 +147,22 @@ export const router = createBrowserRouter(
               <FeatureErrorBoundary featureName="Strategies">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <Strategies />
+                </Suspense>
+              </FeatureErrorBoundary>
+            </AuthGuard>
+          ),
+        },
+        // Strategy Diff: side-by-side structural IR diff at
+        // /strategies/diff?a={idA}&b={idB}. Sibling to /runs/compare;
+        // shares the strategies:write scope since the underlying data
+        // is the same as the catalogue and detail surfaces.
+        {
+          path: "strategies/diff",
+          element: (
+            <AuthGuard requiredScope="strategies:write">
+              <FeatureErrorBoundary featureName="Strategy Diff">
+                <Suspense fallback={<PageLoadingFallback />}>
+                  <StrategyDiff />
                 </Suspense>
               </FeatureErrorBoundary>
             </AuthGuard>
