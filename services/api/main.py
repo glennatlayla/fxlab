@@ -1426,6 +1426,11 @@ async def lifespan(app: FastAPI):
                 # IR loader pulls the parsed IR dict off the strategy
                 # service's get_strategy() return; we use the StrategyService
                 # already wired above (app.state.strategy_service).
+                from services.api.services.run_executor_pool import (
+                    DEFAULT_MAX_CONCURRENT_RUNS,
+                    RunExecutionWorker,
+                    RunExecutorPool,
+                )
                 from services.api.services.synthetic_backtest_executor import (
                     SyntheticBacktestExecutor,
                 )
@@ -1456,12 +1461,40 @@ async def lifespan(app: FastAPI):
 
                 db_session_research = SessionLocal()
                 research_run_repo = SqlResearchRunRepository(db=db_session_research)
+
+                # Build the executor + (optional) ir_loader BEFORE the
+                # service so the pool can re-use them. The pool is
+                # in-process (asyncio + thread offload); see
+                # services/api/services/run_executor_pool.py for the
+                # swap path to Celery / RQ when run volume justifies it.
+                shared_executor = SyntheticBacktestExecutor()
+                shared_ir_loader = _ir_loader if strategy_service_for_ir is not None else None
+
+                executor_pool: RunExecutorPool | None = None
+                if shared_ir_loader is not None:
+                    pool_concurrency = int(
+                        os.environ.get(
+                            "RUN_EXECUTOR_POOL_CONCURRENCY",
+                            str(DEFAULT_MAX_CONCURRENT_RUNS),
+                        )
+                    )
+                    executor_pool = RunExecutorPool(
+                        worker=RunExecutionWorker(
+                            repo=research_run_repo,
+                            executor=shared_executor,
+                            ir_loader=shared_ir_loader,
+                        ),
+                        max_concurrent_runs=pool_concurrency,
+                    )
+
                 research_run_service = ResearchRunService(
                     repo=research_run_repo,
-                    executor=SyntheticBacktestExecutor(),
-                    ir_loader=_ir_loader if strategy_service_for_ir is not None else None,
+                    executor=shared_executor,
+                    ir_loader=shared_ir_loader,
+                    executor_pool=executor_pool,
                 )
                 set_research_run_service(research_run_service)
+                app.state.run_executor_pool = executor_pool
 
                 # M4.E3: catalog-backed dataset resolver. Open a dedicated
                 # session for the dataset catalog so it has its own lifetime

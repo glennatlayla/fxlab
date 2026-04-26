@@ -291,12 +291,21 @@ async def submit_run_from_ir(
         run_id=record.id,
         strategy_id=payload.strategy_id,
         status=record.status.value,
+        deferred=defer_execution == 1,
         correlation_id=corr_id,
         component="runs",
     )
 
     body: dict[str, Any] = record.model_dump(mode="json")
     body["run_id"] = record.id
+
+    # Deferred path: the run was queued AND submitted to the background
+    # pool (or queued-only if the pool isn't wired -- we still return 202
+    # because the caller asked us to defer execution; the persisted row
+    # tells them the actual state). HTTP 202 Accepted is the standard
+    # response for "received, processing asynchronously".
+    if defer_execution == 1:
+        return JSONResponse(content=body, status_code=status.HTTP_202_ACCEPTED)
     return JSONResponse(content=body, status_code=status.HTTP_201_CREATED)
 
 

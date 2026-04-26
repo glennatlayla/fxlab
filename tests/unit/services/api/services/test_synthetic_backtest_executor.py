@@ -439,3 +439,166 @@ def test_lien_plan_holdout_is_pickable(lien_plan: ExperimentPlan) -> None:
     assert isinstance(start, type(end))
     # Exercise unused imports so ruff does not flag them.
     _ = copy.deepcopy
+
+
+# ---------------------------------------------------------------------------
+# Deferred-execution path (defer_execution=1 / auto_execute=False + pool)
+# ---------------------------------------------------------------------------
+#
+# These tests verify the M2.D3 follow-up: when the route is called with
+# ``?defer_execution=1`` and the service has a ``RunExecutorPool`` wired,
+# ``submit_from_ir`` returns the QUEUED record AND submits to the pool;
+# once ``pool.wait_for_idle()`` resolves, the run row is COMPLETED with
+# the same blotter the synchronous path produces (determinism contract).
+
+
+@pytest.mark.asyncio
+async def test_submit_from_ir_defer_execution_runs_in_pool_and_matches_sync(
+    lien_ir_dict: dict[str, Any], lien_plan: ExperimentPlan
+) -> None:
+    """
+    Acceptance test for the deferred path.
+
+    Flow:
+        1. submit_from_ir(auto_execute=True) on a service WITHOUT a pool
+           runs synchronously and produces a baseline blotter + equity
+           curve.
+        2. submit_from_ir(auto_execute=False) on a service WITH a pool
+           returns immediately in QUEUED state, then transitions to
+           COMPLETED once we await pool.wait_for_idle().
+        3. The two runs produce byte-identical blotter + equity curve
+           bodies because they use the same IR + plan + dataset + seed.
+    """
+    from services.api.services.run_executor_pool import (
+        RunExecutionWorker,
+        RunExecutorPool,
+    )
+
+    # Tighten the holdout to a fast window for the synchronous baseline.
+    plan_dict = lien_plan.model_dump(mode="json")
+    plan_dict["splits"]["holdout"]["start"] = "2026-01-01"
+    plan_dict["splits"]["holdout"]["end"] = "2026-01-31"
+    tight_plan = ExperimentPlan.model_validate(plan_dict)
+
+    resolver = _resolve_lien_dataset()
+    resolved = resolver.resolve(tight_plan.data_selection.dataset_ref)
+    loader = lambda _sid: lien_ir_dict  # noqa: E731 -- test-local closure
+
+    # ---- Baseline: synchronous path ------------------------------------
+    sync_repo = MockResearchRunRepository()
+    sync_service = ResearchRunService(
+        repo=sync_repo,
+        executor=SyntheticBacktestExecutor(),
+        ir_loader=loader,
+    )
+    sync_record = sync_service.submit_from_ir(
+        strategy_id="01HSTRATDEFERSYNC0000000001",
+        experiment_plan=tight_plan,
+        resolved_dataset=resolved,
+        user_id="01HUSER0000000000000000001",
+        auto_execute=True,
+    )
+    assert sync_record.status == ResearchRunStatus.COMPLETED
+    sync_blotter = sync_service.get_blotter(sync_record.id, page=1, page_size=1000)
+    sync_curve = sync_service.get_equity_curve(sync_record.id)
+
+    # ---- Deferred path: pool wired, auto_execute=False -----------------
+    deferred_repo = MockResearchRunRepository()
+    pool = RunExecutorPool(
+        worker=RunExecutionWorker(
+            repo=deferred_repo,
+            executor=SyntheticBacktestExecutor(),
+            ir_loader=loader,
+        ),
+        max_concurrent_runs=2,
+    )
+    deferred_service = ResearchRunService(
+        repo=deferred_repo,
+        executor=SyntheticBacktestExecutor(),
+        ir_loader=loader,
+        executor_pool=pool,
+    )
+    queued_record = deferred_service.submit_from_ir(
+        strategy_id="01HSTRATDEFERPOOL0000000001",
+        experiment_plan=tight_plan,
+        resolved_dataset=resolved,
+        user_id="01HUSER0000000000000000001",
+        auto_execute=False,
+    )
+    # Returned immediately as QUEUED; result not yet attached.
+    assert queued_record.status == ResearchRunStatus.QUEUED
+    assert queued_record.result is None
+
+    # Drain the pool. Generous timeout because the executor is doing
+    # real synthetic backtest work on a worker thread.
+    await pool.wait_for_idle(timeout=120.0)
+
+    # Now the row is COMPLETED with a populated result.
+    completed = deferred_service.get_run(queued_record.id)
+    assert completed is not None
+    assert completed.status == ResearchRunStatus.COMPLETED, (
+        f"Expected COMPLETED after pool drain, got {completed.status} "
+        f"(error_message={completed.error_message!r})"
+    )
+    assert completed.result is not None
+    assert completed.result.backtest_result is not None
+    assert len(completed.result.backtest_result.equity_curve) > 0
+
+    deferred_blotter = deferred_service.get_blotter(queued_record.id, page=1, page_size=1000)
+    deferred_curve = deferred_service.get_equity_curve(queued_record.id)
+
+    # ---- Determinism: deferred output == synchronous output ------------
+    sync_trades = [
+        (t.timestamp, t.symbol, t.side, t.quantity, t.price) for t in sync_blotter.trades
+    ]
+    deferred_trades = [
+        (t.timestamp, t.symbol, t.side, t.quantity, t.price) for t in deferred_blotter.trades
+    ]
+    assert sync_trades == deferred_trades, (
+        "deferred-path blotter does not match synchronous-path blotter; "
+        "determinism contract violated."
+    )
+
+    sync_points = [(p.timestamp, p.equity) for p in sync_curve.points]
+    deferred_points = [(p.timestamp, p.equity) for p in deferred_curve.points]
+    assert sync_points == deferred_points, (
+        "deferred-path equity curve does not match synchronous-path; determinism contract violated."
+    )
+
+    # And the blotter is non-empty (proves we actually ran a real
+    # backtest, not just an empty-result fast-path).
+    assert deferred_blotter.total_count > 0
+
+
+@pytest.mark.asyncio
+async def test_submit_from_ir_defer_without_pool_stays_queued(
+    lien_ir_dict: dict[str, Any], lien_plan: ExperimentPlan
+) -> None:
+    """
+    auto_execute=False AND no pool wired -> queue only; the run row
+    stays in QUEUED indefinitely (legacy M2.C2 contract preserved for
+    callers that own their own dispatch).
+    """
+    repo = MockResearchRunRepository()
+    service = ResearchRunService(
+        repo=repo,
+        executor=SyntheticBacktestExecutor(),
+        ir_loader=lambda _sid: lien_ir_dict,
+        executor_pool=None,
+    )
+    resolver = _resolve_lien_dataset()
+    resolved = resolver.resolve(lien_plan.data_selection.dataset_ref)
+
+    record = service.submit_from_ir(
+        strategy_id="01HSTRATDEFERNOPL0000000001",
+        experiment_plan=lien_plan,
+        resolved_dataset=resolved,
+        user_id="01HUSER0000000000000000001",
+        auto_execute=False,
+    )
+    assert record.status == ResearchRunStatus.QUEUED
+    assert record.result is None
+    # Confirm nothing in the background did anything either.
+    persisted = repo.get_by_id(record.id)
+    assert persisted is not None
+    assert persisted.status == ResearchRunStatus.QUEUED
