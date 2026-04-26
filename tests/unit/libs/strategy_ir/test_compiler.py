@@ -657,3 +657,706 @@ def test_compiled_irstrategy_exposes_risk_model_bundle() -> None:
     used_risk = abs(1.10 - 1.095) * size
     budget = (0.5 / 100.0) * 100_000.0
     assert used_risk <= budget + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# M3.X1.x exit-evaluator firing tests
+#
+# These tests exercise the per-bar evaluators added by the M3.X1
+# compiler-gap fix. Each fixture IR defines exactly one of the four
+# stateful exit kinds (atr_multiple, risk_reward_multiple,
+# opposite_inner_band_touch, middle_band_close_violation) plus the
+# minimal entry logic needed so the test can drive the strategy from
+# flat -> open -> exit and verify the EXIT signal fires on the
+# expected bar.
+# ---------------------------------------------------------------------------
+
+
+def _make_candle_ohlc(
+    index: int,
+    *,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+) -> Candle:
+    """Build a synthetic bar with non-equal OHLC for stop-touch tests.
+
+    The flat-OHLC helper above is fine for crossover entries but
+    cannot exercise an ATR-multiple stop touch -- the stop fires when
+    ``low <= stop_price``, which requires ``low < open``.
+    """
+    return Candle(
+        symbol=_SYMBOL,
+        interval=CandleInterval.H1,
+        open=Decimal(str(open_)),
+        high=Decimal(str(high)),
+        low=Decimal(str(low)),
+        close=Decimal(str(close)),
+        volume=1000,
+        timestamp=_BASE_TIMESTAMP + timedelta(hours=index),
+    )
+
+
+def _build_atr_stop_ir() -> StrategyIR:
+    """IR with a single atr_multiple initial_stop.
+
+    Long entry condition: ``close > sma_fast`` (trivially true on
+    every bar where sma_fast is below price). The fixture's sma_fast
+    is computed off-bar so the entry trigger fires immediately and
+    the test focuses on the stop, not the entry timing.
+    """
+    body = {
+        "schema_version": "0.1-inferred",
+        "artifact_type": "strategy_ir",
+        "metadata": {
+            "strategy_name": "AtrStop_Fixture",
+            "strategy_version": "0.0.1-test",
+            "author": "M3.X1.x exit-firing test",
+            "created_utc": "2026-04-25T00:00:00Z",
+            "objective": "Single ATR-multiple stop fixture.",
+            "status": "test_fixture",
+        },
+        "universe": {
+            "asset_class": "spot_fx",
+            "symbols": [_SYMBOL],
+            "direction": "both",
+        },
+        "data_requirements": {
+            "primary_timeframe": "1h",
+            "required_fields": ["open", "high", "low", "close"],
+            "timezone": "UTC",
+            "session_rules": {"allowed_entry_days": [], "blocked_entry_windows": []},
+            "warmup_bars": 1,
+            "missing_bar_policy": "reject_run",
+        },
+        "indicators": [
+            {"id": "sma_fast", "type": "sma", "source": "close", "length": 1, "timeframe": "1h"},
+            {"id": "atr_fast", "type": "atr", "length": 1, "timeframe": "1h"},
+        ],
+        "entry_logic": {
+            "evaluation_timing": "on_bar_close",
+            "execution_timing": "next_bar_open",
+            "long": {
+                "logic": {
+                    "op": "and",
+                    "conditions": [{"lhs": "close", "operator": ">", "rhs": "sma_fast"}],
+                },
+                "order_type": "market",
+            },
+        },
+        "exit_logic": {
+            "initial_stop": {
+                "type": "atr_multiple",
+                "indicator": "atr_fast",
+                "multiple": 2.0,
+            },
+            "same_bar_priority": ["initial_stop"],
+        },
+        "risk_model": {
+            "position_sizing": {"method": "fixed_fractional_risk", "risk_pct_of_equity": 0.5},
+            "max_open_positions": 1,
+            "daily_loss_limit_pct": 2.0,
+            "max_drawdown_halt_pct": 10.0,
+            "pyramiding": False,
+        },
+        "execution_model": {
+            "fill_model": "next_bar_open",
+            "slippage_model_ref": "test_slippage_v1",
+            "spread_model_ref": "test_spread_v1",
+            "commission_model_ref": "test_commission_v1",
+            "swap_model_ref": "test_swap_v1",
+            "partial_fill_policy": "not_applicable_for_market_orders",
+            "reject_policy": "log_and_skip_signal",
+        },
+    }
+    return StrategyIR.model_validate(body)
+
+
+def test_atr_multiple_stop_fires_when_low_pierces_stop_price() -> None:
+    """LONG with entry_price=1.10, ATR=0.005, multiple=2.0
+    -> stop_distance=0.01 -> stop_price=1.09. A bar with low=1.085
+    must fire the exit; a bar with low=1.095 must not.
+    """
+    ir = _build_atr_stop_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    # Bar 0: position is open at 1.10 (above the stop), bar.low=1.095
+    # -> still above stop=1.09, no exit.
+    # Bar 1: bar.low=1.085 -> below stop=1.09, exit fires.
+    candles = [
+        _make_candle_ohlc(0, open_=1.10, high=1.105, low=1.095, close=1.10),
+        _make_candle_ohlc(1, open_=1.10, high=1.10, low=1.085, close=1.09),
+    ]
+    indicator_arrays = {
+        "sma_fast": [1.05, 1.06],  # below close so entry fires (position already open here)
+        "atr_fast": [0.005, 0.005],  # constant
+    }
+
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    position_map = {0: long_position, 1: long_position}
+    signals = _run_strategy(strategy, candles, indicator_arrays, position_after_index=position_map)
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 1, f"expected 1 exit, got {len(exits)}: {exits}"
+    # Exit fires on bar 1 where low (1.085) <= stop (1.09).
+    assert exits[0].bar_timestamp == candles[1].timestamp
+    assert exits[0].metadata.get("exit_reason") == "initial_stop"
+
+
+def _build_risk_reward_ir() -> StrategyIR:
+    """IR with atr_multiple stop AND risk_reward_multiple take_profit.
+
+    The R unit derives from the atr_multiple's stop_distance, so the
+    take_profit needs the entry-bar ATR snapshot just like the stop.
+    """
+    body = json.loads(
+        json.dumps(
+            {
+                "schema_version": "0.1-inferred",
+                "artifact_type": "strategy_ir",
+                "metadata": {
+                    "strategy_name": "RR_Fixture",
+                    "strategy_version": "0.0.1-test",
+                    "author": "test",
+                    "created_utc": "2026-04-25T00:00:00Z",
+                    "objective": "rr fixture",
+                    "status": "test_fixture",
+                },
+                "universe": {
+                    "asset_class": "spot_fx",
+                    "symbols": [_SYMBOL],
+                    "direction": "both",
+                },
+                "data_requirements": {
+                    "primary_timeframe": "1h",
+                    "required_fields": ["open", "high", "low", "close"],
+                    "timezone": "UTC",
+                    "session_rules": {
+                        "allowed_entry_days": [],
+                        "blocked_entry_windows": [],
+                    },
+                    "warmup_bars": 1,
+                    "missing_bar_policy": "reject_run",
+                },
+                "indicators": [
+                    {
+                        "id": "sma_fast",
+                        "type": "sma",
+                        "source": "close",
+                        "length": 1,
+                        "timeframe": "1h",
+                    },
+                    {
+                        "id": "atr_fast",
+                        "type": "atr",
+                        "length": 1,
+                        "timeframe": "1h",
+                    },
+                ],
+                "entry_logic": {
+                    "evaluation_timing": "on_bar_close",
+                    "execution_timing": "next_bar_open",
+                    "long": {
+                        "logic": {
+                            "op": "and",
+                            "conditions": [{"lhs": "close", "operator": ">", "rhs": "sma_fast"}],
+                        },
+                        "order_type": "market",
+                    },
+                },
+                "exit_logic": {
+                    "initial_stop": {
+                        "type": "atr_multiple",
+                        "indicator": "atr_fast",
+                        "multiple": 2.0,
+                    },
+                    "take_profit": {
+                        "type": "risk_reward_multiple",
+                        "multiple": 1.5,
+                    },
+                    "same_bar_priority": ["initial_stop", "take_profit"],
+                },
+                "risk_model": {
+                    "position_sizing": {
+                        "method": "fixed_fractional_risk",
+                        "risk_pct_of_equity": 0.5,
+                    },
+                    "max_open_positions": 1,
+                    "daily_loss_limit_pct": 2.0,
+                    "max_drawdown_halt_pct": 10.0,
+                    "pyramiding": False,
+                },
+                "execution_model": {
+                    "fill_model": "next_bar_open",
+                    "slippage_model_ref": "test_slippage_v1",
+                    "spread_model_ref": "test_spread_v1",
+                    "commission_model_ref": "test_commission_v1",
+                    "swap_model_ref": "test_swap_v1",
+                    "partial_fill_policy": "not_applicable_for_market_orders",
+                    "reject_policy": "log_and_skip_signal",
+                },
+            }
+        )
+    )
+    return StrategyIR.model_validate(body)
+
+
+def test_risk_reward_multiple_take_profit_fires_when_high_reaches_target() -> None:
+    """LONG with entry=1.10, ATR=0.005, stop_multiple=2.0, rr=1.5:
+    stop_distance = 0.01, tp_distance = 1.5*0.01 = 0.015,
+    tp_price = 1.10 + 0.015 = 1.115. A bar with high=1.116 must fire
+    take_profit; a bar with high=1.114 must not.
+    """
+    ir = _build_risk_reward_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    # Bar 0: entry-snapshot bar (high=1.114, no fire).
+    # Bar 1: high=1.116 -> tp fires.
+    candles = [
+        _make_candle_ohlc(0, open_=1.10, high=1.114, low=1.099, close=1.11),
+        _make_candle_ohlc(1, open_=1.11, high=1.116, low=1.105, close=1.115),
+    ]
+    indicator_arrays = {
+        "sma_fast": [1.05, 1.06],
+        "atr_fast": [0.005, 0.005],
+    }
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    position_map = {0: long_position, 1: long_position}
+    signals = _run_strategy(strategy, candles, indicator_arrays, position_after_index=position_map)
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 1
+    assert exits[0].bar_timestamp == candles[1].timestamp
+    assert exits[0].metadata.get("exit_reason") == "take_profit"
+
+
+def _build_opposite_inner_band_ir() -> StrategyIR:
+    """IR exercising opposite_inner_band_touch take_profit.
+
+    Declares Bollinger 1-stddev (inner) and 2-stddev (outer) so the
+    compiler picks the 1-stddev pair for the inner-band take-profit.
+    """
+    body = {
+        "schema_version": "0.1-inferred",
+        "artifact_type": "strategy_ir",
+        "metadata": {
+            "strategy_name": "OppositeBand_Fixture",
+            "strategy_version": "0.0.1-test",
+            "author": "test",
+            "created_utc": "2026-04-25T00:00:00Z",
+            "objective": "opposite-inner-band fixture",
+            "status": "test_fixture",
+        },
+        "universe": {"asset_class": "spot_fx", "symbols": [_SYMBOL], "direction": "both"},
+        "data_requirements": {
+            "primary_timeframe": "1h",
+            "required_fields": ["open", "high", "low", "close"],
+            "timezone": "UTC",
+            "session_rules": {"allowed_entry_days": [], "blocked_entry_windows": []},
+            "warmup_bars": 1,
+            "missing_bar_policy": "reject_run",
+        },
+        "indicators": [
+            {"id": "bb_mid", "type": "sma", "source": "close", "length": 5, "timeframe": "1h"},
+            {
+                "id": "bb_upper_1",
+                "type": "bollinger_upper",
+                "source": "close",
+                "length": 5,
+                "stddev": 1.0,
+                "timeframe": "1h",
+            },
+            {
+                "id": "bb_lower_1",
+                "type": "bollinger_lower",
+                "source": "close",
+                "length": 5,
+                "stddev": 1.0,
+                "timeframe": "1h",
+            },
+            {
+                "id": "bb_upper_2",
+                "type": "bollinger_upper",
+                "source": "close",
+                "length": 5,
+                "stddev": 2.0,
+                "timeframe": "1h",
+            },
+            {
+                "id": "bb_lower_2",
+                "type": "bollinger_lower",
+                "source": "close",
+                "length": 5,
+                "stddev": 2.0,
+                "timeframe": "1h",
+            },
+        ],
+        "entry_logic": {
+            "evaluation_timing": "on_bar_close",
+            "execution_timing": "next_bar_open",
+            "long": {
+                "logic": {
+                    "op": "and",
+                    "conditions": [{"lhs": "close", "operator": ">=", "rhs": "bb_upper_1"}],
+                },
+                "order_type": "market",
+            },
+        },
+        "exit_logic": {
+            "take_profit": {"type": "opposite_inner_band_touch"},
+            "same_bar_priority": ["take_profit"],
+        },
+        "risk_model": {
+            "position_sizing": {
+                "method": "fixed_fractional_risk",
+                "risk_pct_of_equity": 0.5,
+            },
+            "max_open_positions": 1,
+            "daily_loss_limit_pct": 2.0,
+            "max_drawdown_halt_pct": 10.0,
+            "pyramiding": False,
+        },
+        "execution_model": {
+            "fill_model": "next_bar_open",
+            "slippage_model_ref": "test_slippage_v1",
+            "spread_model_ref": "test_spread_v1",
+            "commission_model_ref": "test_commission_v1",
+            "swap_model_ref": "test_swap_v1",
+            "partial_fill_policy": "not_applicable_for_market_orders",
+            "reject_policy": "log_and_skip_signal",
+        },
+    }
+    return StrategyIR.model_validate(body)
+
+
+def test_opposite_inner_band_touch_fires_when_low_touches_lower_inner() -> None:
+    """LONG entered above bb_upper_1 takes profit when low touches bb_lower_1.
+
+    Inner band (smallest stddev) = bb_lower_1 with stddev=1.0.
+    Bar 0: bb_lower_1=1.05, bar low=1.06 -> no touch.
+    Bar 1: bb_lower_1=1.08, bar low=1.075 -> touch -> exit.
+    """
+    ir = _build_opposite_inner_band_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    candles = [
+        _make_candle_ohlc(0, open_=1.10, high=1.10, low=1.06, close=1.08),
+        _make_candle_ohlc(1, open_=1.08, high=1.085, low=1.075, close=1.08),
+    ]
+    indicator_arrays = {
+        "bb_mid": [1.07, 1.085],
+        "bb_upper_1": [1.10, 1.10],
+        "bb_lower_1": [1.05, 1.08],
+        "bb_upper_2": [1.13, 1.13],
+        "bb_lower_2": [1.02, 1.04],
+    }
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.08"),
+        market_value=Decimal("1080"),
+        unrealized_pnl=Decimal("-20"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    position_map = {0: long_position, 1: long_position}
+    signals = _run_strategy(strategy, candles, indicator_arrays, position_after_index=position_map)
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 1
+    assert exits[0].bar_timestamp == candles[1].timestamp
+    assert exits[0].metadata.get("exit_reason") == "take_profit"
+
+
+def _build_middle_band_close_ir() -> StrategyIR:
+    """IR exercising middle_band_close_violation as a populated
+    ``trailing_exit`` ExitStop (uses the canonical-stop path, not the
+    TrailingStopRule wrapper)."""
+    body = {
+        "schema_version": "0.1-inferred",
+        "artifact_type": "strategy_ir",
+        "metadata": {
+            "strategy_name": "MidBandClose_Fixture",
+            "strategy_version": "0.0.1-test",
+            "author": "test",
+            "created_utc": "2026-04-25T00:00:00Z",
+            "objective": "middle-band fixture",
+            "status": "test_fixture",
+        },
+        "universe": {"asset_class": "spot_fx", "symbols": [_SYMBOL], "direction": "both"},
+        "data_requirements": {
+            "primary_timeframe": "1h",
+            "required_fields": ["open", "high", "low", "close"],
+            "timezone": "UTC",
+            "session_rules": {"allowed_entry_days": [], "blocked_entry_windows": []},
+            "warmup_bars": 1,
+            "missing_bar_policy": "reject_run",
+        },
+        "indicators": [
+            {"id": "bb_mid", "type": "sma", "source": "close", "length": 5, "timeframe": "1h"},
+            {
+                "id": "bb_upper_1",
+                "type": "bollinger_upper",
+                "source": "close",
+                "length": 5,
+                "stddev": 1.0,
+                "timeframe": "1h",
+            },
+            {
+                "id": "bb_lower_1",
+                "type": "bollinger_lower",
+                "source": "close",
+                "length": 5,
+                "stddev": 1.0,
+                "timeframe": "1h",
+            },
+        ],
+        "entry_logic": {
+            "evaluation_timing": "on_bar_close",
+            "execution_timing": "next_bar_open",
+            "long": {
+                "logic": {
+                    "op": "and",
+                    "conditions": [{"lhs": "close", "operator": ">=", "rhs": "bb_upper_1"}],
+                },
+                "order_type": "market",
+            },
+        },
+        "exit_logic": {
+            "trailing_exit": {"type": "middle_band_close_violation"},
+            "same_bar_priority": ["trailing_exit"],
+        },
+        "risk_model": {
+            "position_sizing": {
+                "method": "fixed_fractional_risk",
+                "risk_pct_of_equity": 0.5,
+            },
+            "max_open_positions": 1,
+            "daily_loss_limit_pct": 2.0,
+            "max_drawdown_halt_pct": 10.0,
+            "pyramiding": False,
+        },
+        "execution_model": {
+            "fill_model": "next_bar_open",
+            "slippage_model_ref": "test_slippage_v1",
+            "spread_model_ref": "test_spread_v1",
+            "commission_model_ref": "test_commission_v1",
+            "swap_model_ref": "test_swap_v1",
+            "partial_fill_policy": "not_applicable_for_market_orders",
+            "reject_policy": "log_and_skip_signal",
+        },
+    }
+    return StrategyIR.model_validate(body)
+
+
+def test_middle_band_close_violation_fires_when_close_drops_below_mid() -> None:
+    """LONG: exit when close < bb_mid.
+
+    Bar 0: close=1.10, bb_mid=1.08 -> no fire.
+    Bar 1: close=1.07, bb_mid=1.08 -> fire.
+    """
+    ir = _build_middle_band_close_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    candles = [
+        _make_candle_ohlc(0, open_=1.10, high=1.10, low=1.099, close=1.10),
+        _make_candle_ohlc(1, open_=1.10, high=1.10, low=1.07, close=1.07),
+    ]
+    indicator_arrays = {
+        "bb_mid": [1.08, 1.08],
+        "bb_upper_1": [1.10, 1.10],
+        "bb_lower_1": [1.05, 1.05],
+    }
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    position_map = {0: long_position, 1: long_position}
+    signals = _run_strategy(strategy, candles, indicator_arrays, position_after_index=position_map)
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 1
+    assert exits[0].bar_timestamp == candles[1].timestamp
+    assert exits[0].metadata.get("exit_reason") == "trailing_exit"
+
+
+# ---------------------------------------------------------------------------
+# Spread price-field reference + pip conversion
+# ---------------------------------------------------------------------------
+
+
+def _make_candle_with_spread(index: int, close: float, spread: Decimal | None) -> Candle:
+    """Bar with a spread stamped in price units."""
+    price = Decimal(str(close))
+    return Candle(
+        symbol=_SYMBOL,
+        interval=CandleInterval.H1,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        volume=1000,
+        timestamp=_BASE_TIMESTAMP + timedelta(hours=index),
+        spread=spread,
+    )
+
+
+def _build_spread_filter_ir() -> StrategyIR:
+    """IR whose long entry requires ``spread <= 1.0 pips``."""
+    body = {
+        "schema_version": "0.1-inferred",
+        "artifact_type": "strategy_ir",
+        "metadata": {
+            "strategy_name": "Spread_Fixture",
+            "strategy_version": "0.0.1-test",
+            "author": "test",
+            "created_utc": "2026-04-25T00:00:00Z",
+            "objective": "spread-filter fixture",
+            "status": "test_fixture",
+        },
+        "universe": {"asset_class": "spot_fx", "symbols": [_SYMBOL], "direction": "both"},
+        "data_requirements": {
+            "primary_timeframe": "1h",
+            "required_fields": ["open", "high", "low", "close", "spread"],
+            "timezone": "UTC",
+            "session_rules": {"allowed_entry_days": [], "blocked_entry_windows": []},
+            "warmup_bars": 1,
+            "missing_bar_policy": "reject_run",
+        },
+        "indicators": [
+            {"id": "sma_fast", "type": "sma", "source": "close", "length": 1, "timeframe": "1h"},
+        ],
+        "entry_logic": {
+            "evaluation_timing": "on_bar_close",
+            "execution_timing": "next_bar_open",
+            "long": {
+                "logic": {
+                    "op": "and",
+                    "conditions": [
+                        {"lhs": "close", "operator": ">", "rhs": "sma_fast"},
+                        {"lhs": "spread", "operator": "<=", "rhs": 1.0, "units": "pips"},
+                    ],
+                },
+                "order_type": "market",
+            },
+        },
+        "exit_logic": {"same_bar_priority": []},
+        "risk_model": {
+            "position_sizing": {
+                "method": "fixed_fractional_risk",
+                "risk_pct_of_equity": 0.5,
+            },
+            "max_open_positions": 1,
+            "daily_loss_limit_pct": 2.0,
+            "max_drawdown_halt_pct": 10.0,
+            "pyramiding": False,
+        },
+        "execution_model": {
+            "fill_model": "next_bar_open",
+            "slippage_model_ref": "test_slippage_v1",
+            "spread_model_ref": "test_spread_v1",
+            "commission_model_ref": "test_commission_v1",
+            "swap_model_ref": "test_swap_v1",
+            "partial_fill_policy": "not_applicable_for_market_orders",
+            "reject_policy": "log_and_skip_signal",
+        },
+    }
+    return StrategyIR.model_validate(body)
+
+
+def test_spread_pip_filter_passes_when_spread_below_threshold() -> None:
+    """EURUSD spread of 0.5 pips (= 0.00005 price units) is below the
+    1.0-pip threshold -> long entry fires."""
+    ir = _build_spread_filter_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    candles = [_make_candle_with_spread(0, close=1.10, spread=Decimal("0.00005"))]
+    indicator_arrays = {"sma_fast": [1.09]}
+    signals = _run_strategy(strategy, candles, indicator_arrays)
+    entries = [s for s in signals if s.signal_type == SignalType.ENTRY]
+    assert len(entries) == 1, f"expected entry, got {entries}"
+
+
+def test_spread_pip_filter_blocks_when_spread_exceeds_threshold() -> None:
+    """EURUSD spread of 2.5 pips (0.00025) is above the 1.0-pip threshold
+    -> long entry suppressed."""
+    ir = _build_spread_filter_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    candles = [_make_candle_with_spread(0, close=1.10, spread=Decimal("0.00025"))]
+    indicator_arrays = {"sma_fast": [1.09]}
+    signals = _run_strategy(strategy, candles, indicator_arrays)
+    assert signals == [], (
+        f"spread filter must suppress entry when spread is above the pip threshold; got {signals}"
+    )
+
+
+def test_spread_pip_filter_treats_missing_spread_as_block() -> None:
+    """A candle with spread=None must NOT trigger the spread<=1pip leaf
+    (NaN propagates, leaf returns False, AND tree returns False)."""
+    ir = _build_spread_filter_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    candles = [_make_candle_with_spread(0, close=1.10, spread=None)]
+    indicator_arrays = {"sma_fast": [1.09]}
+    signals = _run_strategy(strategy, candles, indicator_arrays)
+    assert signals == [], "spread=None must suppress the entry conservatively"
+
+
+# ---------------------------------------------------------------------------
+# Priority alias: stop_loss -> initial_stop
+# ---------------------------------------------------------------------------
+
+
+def test_priority_list_alias_stop_loss_resolves_to_initial_stop() -> None:
+    """``same_bar_priority: ["stop_loss"]`` must resolve to the
+    configured ``initial_stop`` exit check; the strategy's
+    ``exit_check_order`` reports the canonical name (``initial_stop``)."""
+    body = _build_atr_stop_ir().model_dump()
+    body["exit_logic"]["same_bar_priority"] = ["stop_loss"]
+    ir = StrategyIR.model_validate(body)
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+    assert strategy.exit_check_order == ("initial_stop",)
+
+
+def test_priority_list_unknown_name_raises_after_alias_resolution() -> None:
+    """A priority entry that does not alias to a configured stop must
+    raise IRReferenceError so a typo is surfaced loudly rather than
+    silently disabling protection."""
+    body = _build_atr_stop_ir().model_dump()
+    body["exit_logic"]["same_bar_priority"] = ["nonsense_stop"]
+    ir = StrategyIR.model_validate(body)
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    with pytest.raises(IRReferenceError) as excinfo:
+        compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+    assert "nonsense_stop" in str(excinfo.value)

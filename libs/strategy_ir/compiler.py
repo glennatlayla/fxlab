@@ -101,6 +101,8 @@ from libs.contracts.signal import (
 )
 from libs.contracts.strategy_ir import (
     AtrMultipleStop,
+    BollingerLowerIndicator,
+    BollingerUpperIndicator,
     CalendarExitStop,
     ChannelExitStop,
     ConditionTree,
@@ -112,7 +114,10 @@ from libs.contracts.strategy_ir import (
     MiddleBandCloseViolationStop,
     OppositeInnerBandTouchStop,
     RiskRewardMultipleStop,
+    SmaIndicator,
     StrategyIR,
+    TimeExitRule,
+    TrailingStopRule,
     ZscoreStop,
 )
 from libs.strategy_ir.broker import Broker
@@ -173,12 +178,21 @@ class _EvalContext:
             :meth:`IRStrategy.evaluate` AFTER the bar's conditions
             have been evaluated, so the buffer holds prior-bar
             values when the next bar is evaluated.
+        open_trade: per-symbol entry snapshot for the currently-open
+            trade, or ``None`` when flat or when the bar evaluator
+            does not need entry-time data. Populated by
+            :meth:`IRStrategy._observe_position_state` on the entry
+            bar; consulted by stateful exit evaluators.
+        bar_counter: monotonic count of bars seen by this strategy
+            instance; consumed by the time_exit evaluator.
     """
 
     candle: Candle
     indicator_values: dict[str, float]
     position: PositionSnapshot | None
     lookback_buffers: dict[str, LookbackBuffer]
+    open_trade: _OpenTradeContext | None = None
+    bar_counter: int = 0
 
 
 @dataclass(frozen=True)
@@ -197,6 +211,95 @@ class _ExitCheck:
 
     name: str
     evaluator: ExitEvaluator
+
+
+@dataclass
+class _OpenTradeContext:
+    """
+    Per-symbol snapshot captured when a position transitions from flat
+    to open.
+
+    The compiled exit evaluators consult this snapshot to decide whether
+    the bar's price action triggers a stop loss, take profit, trailing
+    stop, or time/calendar exit. The snapshot is taken on the first
+    bar where the strategy's :meth:`IRStrategy.evaluate` observes a
+    non-zero ``current_position`` for the symbol; it is cleared when
+    the position returns to flat.
+
+    Attributes:
+        direction: ``+1`` for long, ``-1`` for short. Stored as int
+            (not :class:`SignalDirection`) so the evaluators can
+            multiply against price deltas without a string dispatch.
+        entry_price: average entry price as reported by the broker on
+            the entry bar. Floats throughout the evaluator pipeline.
+        entry_atr: ATR value at entry (for the ATR id named in
+            ``initial_stop.indicator``), or ``NaN`` when the strategy
+            has no ATR-multiple stop.
+        stop_distance: ``initial_stop.multiple * entry_atr`` -- cached
+            so risk_reward_multiple can derive the take-profit price
+            without re-reading the entry-bar ATR. ``NaN`` when no
+            ATR-multiple stop is configured.
+        entry_inner_band_upper: BB upper-1 (innermost upper band) at
+            entry, or ``NaN`` when none configured. Used by
+            opposite_inner_band_touch for SHORTS (a short take-profit
+            is "touch the opposite-side inner band", i.e. the upper-1
+            for a short trade).
+        entry_inner_band_lower: BB lower-1 at entry, or ``NaN``. Used
+            by opposite_inner_band_touch for LONGS (touch the lower-1).
+        entry_bar_index: monotonic count of bars seen by the strategy
+            when the position opened. Used by time_exit to decide when
+            ``max_bars_in_trade`` has elapsed.
+    """
+
+    direction: int
+    entry_price: float
+    entry_atr: float = float("nan")
+    stop_distance: float = float("nan")
+    entry_inner_band_upper: float = float("nan")
+    entry_inner_band_lower: float = float("nan")
+    entry_bar_index: int = 0
+
+
+@dataclass(frozen=True)
+class _ExitWiring:
+    """
+    Compile-time descriptor of the indicator ids each exit kind needs
+    to read at entry and at every bar.
+
+    Why a dataclass:
+        The four "stateful" exit kinds (atr_multiple,
+        risk_reward_multiple, opposite_inner_band_touch,
+        middle_band_close_violation) all consume named indicators from
+        the IR but have different parameter names. Centralising the
+        resolved indicator id per stop here keeps the per-bar
+        evaluators short and audit-friendly.
+
+    Attributes:
+        atr_indicator_id: id of the ATR indicator used by
+            ``initial_stop`` (or ``None`` when the strategy has no
+            ATR-multiple stop). Snapshotted at entry so the stop
+            distance is fixed for the life of the trade.
+        atr_multiple: the ``multiple`` value from ``initial_stop``,
+            or ``NaN`` when no ATR-multiple stop is configured.
+        rr_multiple: the ``multiple`` value from ``take_profit`` when
+            it is a risk_reward_multiple stop, or ``NaN``.
+        bb_upper_inner_id: id of the inner (smallest stddev)
+            BollingerUpperIndicator, or ``None``.
+        bb_lower_inner_id: id of the inner (smallest stddev)
+            BollingerLowerIndicator, or ``None``.
+        bb_mid_id: id of the SMA indicator that serves as the Bollinger
+            middle band (matched on length+source), or ``None``.
+        time_exit_max_bars: ``max_bars_in_trade`` from the TimeExitRule
+            wrapper, or ``None`` when no time_exit is configured.
+    """
+
+    atr_indicator_id: str | None = None
+    atr_multiple: float = float("nan")
+    rr_multiple: float = float("nan")
+    bb_upper_inner_id: str | None = None
+    bb_lower_inner_id: str | None = None
+    bb_mid_id: str | None = None
+    time_exit_max_bars: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -236,13 +339,66 @@ _MATH_FUNCTIONS: dict[str, Callable[..., float]] = {
 # Price field names recognised in LHS/RHS expressions
 # ---------------------------------------------------------------------------
 
+
+def _read_spread_in_price_units(c: Candle) -> float:
+    """Pull ``Candle.spread`` as a finite float, or NaN when absent.
+
+    The Strategy IR's spread filter (``"lhs": "spread", ...``) reads
+    this value. Candles emitted by equity providers leave ``spread``
+    as ``None`` -- in that case we propagate NaN so the leaf evaluator
+    short-circuits to ``False`` (the conservative "skip if spread
+    unknown" semantics, matching the IR author's intent: a bar with
+    unknown spread is treated as too-wide-to-trade).
+    """
+    if c.spread is None:
+        return math.nan
+    return float(c.spread)
+
+
 _PRICE_FIELD_GETTERS: dict[str, Callable[[Candle], float]] = {
     "open": lambda c: float(c.open),
     "high": lambda c: float(c.high),
     "low": lambda c: float(c.low),
     "close": lambda c: float(c.close),
     "volume": lambda c: float(c.volume),
+    "spread": _read_spread_in_price_units,
 }
+
+
+# ---------------------------------------------------------------------------
+# Pip-size table for FX symbols.
+#
+# The compiler converts ``spread`` leaves with ``units == "pips"`` into
+# pip-space comparisons at evaluation time. JPY-quoted majors use
+# ``0.01`` (one pip == one tick of the second decimal); every other
+# major and cross uses ``0.0001`` (one pip == one tick of the fourth
+# decimal). The compiler's per-symbol pip lookup falls back to this
+# table when the IR's universe symbols are FX majors; non-FX symbols
+# (equities, futures) raise at compile time if a ``units == "pips"``
+# leaf appears -- this is a hard contract: pips is meaningless without
+# a pip size.
+# ---------------------------------------------------------------------------
+
+_FX_JPY_PIP_SIZE: float = 0.01
+_FX_DEFAULT_PIP_SIZE: float = 0.0001
+
+
+def _pip_size_for_symbol(symbol: str) -> float:
+    """
+    Return the pip size for an FX symbol.
+
+    Args:
+        symbol: ticker (e.g., "EURUSD", "USDJPY"). The function only
+            distinguishes JPY-quoted vs everything else -- the broader
+            pip-size taxonomy (precious metals, indices) is out of
+            scope until those instruments enter the IR universe.
+
+    Returns:
+        Pip size as a plain float (0.01 for JPY-quoted; 0.0001 for the
+        rest). Returned as a float (not Decimal) because every caller
+        does float arithmetic.
+    """
+    return _FX_JPY_PIP_SIZE if symbol.endswith("JPY") else _FX_DEFAULT_PIP_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +469,7 @@ class IRStrategy(SignalStrategyInterface):
         indicator_ids: tuple[str, ...],
         lookback_buffers: dict[str, LookbackBuffer] | None = None,
         risk_model: CompiledRiskModel | None = None,
+        exit_wiring: _ExitWiring | None = None,
     ) -> None:
         """
         Construct the compiled strategy. Normally called by
@@ -368,6 +525,19 @@ class IRStrategy(SignalStrategyInterface):
             dict(lookback_buffers) if lookback_buffers else {}
         )
         self._risk_model = risk_model
+        # Compile-time wiring for stateful exit kinds (atr_multiple,
+        # risk_reward_multiple, opposite_inner_band_touch,
+        # middle_band_close_violation, time_exit). Frozen at compile.
+        self._exit_wiring: _ExitWiring = exit_wiring or _ExitWiring()
+        # Per-symbol open-trade snapshot. Populated by
+        # ``_observe_position_state`` on the bar where the position
+        # transitions from None/zero to non-zero; cleared on the bar
+        # the position returns to flat. Single-threaded by construction
+        # (the engine drives evaluate() one bar at a time).
+        self._open_trade_contexts: dict[str, _OpenTradeContext] = {}
+        # Monotonic per-strategy bar counter. Used to stamp
+        # entry_bar_index on freshly-opened positions for time_exit.
+        self._bar_counter: int = 0
 
     # ---------- SignalStrategyInterface metadata ----------
 
@@ -462,11 +632,24 @@ class IRStrategy(SignalStrategyInterface):
 
         # Pre-extract latest indicator scalar values into a float dict.
         indicator_values = self._extract_latest_indicator_values(indicators)
+
+        # Reconcile per-symbol open-trade state with the broker-supplied
+        # PositionSnapshot. New non-zero position -> snapshot the
+        # entry-bar ATR + inner bands. Position back to flat ->
+        # clear so a future entry starts a fresh snapshot.
+        open_trade = self._observe_position_state(
+            symbol=symbol,
+            current_position=current_position,
+            indicator_values=indicator_values,
+        )
+
         ctx = _EvalContext(
             candle=candle,
             indicator_values=indicator_values,
             position=current_position,
             lookback_buffers=self._lookback_buffers,
+            open_trade=open_trade,
+            bar_counter=self._bar_counter,
         )
 
         # ``_prev_N`` references must read PRIOR-bar values during this
@@ -525,6 +708,10 @@ class IRStrategy(SignalStrategyInterface):
             # finally block so an early return above still advances
             # the buffers in lock-step with the bar stream.
             self._push_lookback_values(candle, indicator_values)
+            # Bar counter advances unconditionally so time_exit's
+            # ``bars_in_trade`` arithmetic stays in lock-step with the
+            # bar stream regardless of whether a signal fires.
+            self._bar_counter += 1
 
     # ---------- internal helpers ----------
 
@@ -558,6 +745,88 @@ class IRStrategy(SignalStrategyInterface):
                 continue
             out[ir_id] = float(values[-1])
         return out
+
+    def _observe_position_state(
+        self,
+        *,
+        symbol: str,
+        current_position: PositionSnapshot | None,
+        indicator_values: dict[str, float],
+    ) -> _OpenTradeContext | None:
+        """
+        Reconcile broker-supplied position state with the per-symbol
+        entry snapshot.
+
+        Three transitions are possible on any bar:
+
+        - **Flat -> open**: the broker reports a non-zero position for
+          a symbol that previously had no snapshot. We capture the
+          entry price, ATR-at-entry, inner-band-at-entry, and entry
+          bar index. The snapshot lives until the position closes.
+        - **Open -> open** (continuation): the snapshot is reused
+          unchanged. We do NOT re-read indicators because the stop
+          distance and take-profit price are FROZEN at entry.
+        - **Open -> flat**: the snapshot is dropped so the next entry
+          starts a fresh capture.
+
+        Returns:
+            The current snapshot (or None when flat). Stateful exit
+            evaluators close over the strategy instance and read this
+            value via :class:`_EvalContext.open_trade`.
+
+        Why a single helper:
+            Centralising the transition logic here keeps the evaluators
+            short (they read the snapshot; they do not own its
+            lifecycle). It also makes the "snapshot is taken on the
+            first bar where position is non-zero" contract auditable.
+        """
+        if current_position is None or current_position.quantity == 0:
+            # Flat: drop any snapshot so a future entry triggers
+            # re-capture. ``pop`` is no-op when the symbol is not
+            # tracked, which is the common case.
+            self._open_trade_contexts.pop(symbol, None)
+            return None
+
+        existing = self._open_trade_contexts.get(symbol)
+        if existing is not None:
+            return existing
+
+        # Fresh entry: capture the snapshot.
+        direction = 1 if current_position.quantity > 0 else -1
+        entry_price = float(current_position.average_entry_price)
+        wiring = self._exit_wiring
+
+        entry_atr = math.nan
+        if wiring.atr_indicator_id is not None:
+            entry_atr = indicator_values.get(wiring.atr_indicator_id, math.nan)
+
+        stop_distance = math.nan
+        if (
+            wiring.atr_indicator_id is not None
+            and not math.isnan(entry_atr)
+            and not math.isnan(wiring.atr_multiple)
+        ):
+            stop_distance = wiring.atr_multiple * entry_atr
+
+        entry_inner_upper = math.nan
+        if wiring.bb_upper_inner_id is not None:
+            entry_inner_upper = indicator_values.get(wiring.bb_upper_inner_id, math.nan)
+
+        entry_inner_lower = math.nan
+        if wiring.bb_lower_inner_id is not None:
+            entry_inner_lower = indicator_values.get(wiring.bb_lower_inner_id, math.nan)
+
+        snapshot = _OpenTradeContext(
+            direction=direction,
+            entry_price=entry_price,
+            entry_atr=entry_atr,
+            stop_distance=stop_distance,
+            entry_inner_band_upper=entry_inner_upper,
+            entry_inner_band_lower=entry_inner_lower,
+            entry_bar_index=self._bar_counter,
+        )
+        self._open_trade_contexts[symbol] = snapshot
+        return snapshot
 
     def _push_lookback_values(self, candle: Candle, indicator_values: dict[str, float]) -> None:
         """
@@ -723,7 +992,14 @@ class StrategyIRCompiler:
         # 2. Build the indicator-id whitelist used by leaf compilers.
         indicator_ids: frozenset[str] = frozenset(ind.id for ind in ir.indicators)
 
-        # 3. Scan the IR for ``_prev_N`` references and allocate one
+        # 3. Resolve the per-stop indicator wiring BEFORE compiling
+        #    individual exit evaluators. The wiring tells each
+        #    evaluator which IR indicator id to read at entry (ATR)
+        #    and which inner Bollinger bands to snapshot. Centralised
+        #    so the per-bar evaluators stay short.
+        exit_wiring = self._resolve_exit_wiring(ir, indicator_ids)
+
+        # 4. Scan the IR for ``_prev_N`` references and allocate one
         #    ring buffer per base, sized to MAX(N) across all
         #    references to that base. Empty when the IR has no
         #    ``_prev_N`` references at all.
@@ -737,7 +1013,7 @@ class StrategyIRCompiler:
         # consecutive compile() calls cannot share state by accident.
         self._current_lookback_buffers = lookback_buffers
         try:
-            # 4. Compile entry-side evaluators.
+            # 5. Compile entry-side evaluators.
             long_eval = (
                 self._compile_directional_entry(ir.entry_logic.long, indicator_ids, "long")
                 if ir.entry_logic.long is not None
@@ -749,13 +1025,13 @@ class StrategyIRCompiler:
                 else None
             )
 
-            # 5. Compile exit checks and freeze in priority order.
-            compiled_exits = self._compile_exit_logic(ir.exit_logic, indicator_ids)
+            # 6. Compile exit checks and freeze in priority order.
+            compiled_exits = self._compile_exit_logic(ir.exit_logic, indicator_ids, exit_wiring)
             ordered_exits = self._freeze_exit_priority(compiled_exits, ir.exit_logic)
         finally:
             self._current_lookback_buffers = None
 
-        # 6. Translate the IR's risk_model into a compiled bundle
+        # 7. Translate the IR's risk_model into a compiled bundle
         #    (sizer + pre-trade gate + post-trade gate). M1.A5 only
         #    supports ``fixed_fractional_risk``; the translator raises
         #    UnsupportedRiskMethodError loudly for the deferred basket
@@ -763,7 +1039,7 @@ class StrategyIRCompiler:
         #    at first trade.
         compiled_risk_model = RiskModelTranslator(ir).translate()
 
-        # 7. Wrap and return.
+        # 8. Wrap and return.
         return IRStrategy(
             ir=ir,
             deployment_id=deployment_id,
@@ -775,6 +1051,7 @@ class StrategyIRCompiler:
             indicator_ids=tuple(ind.id for ind in ir.indicators),
             risk_model=compiled_risk_model,
             lookback_buffers=lookback_buffers,
+            exit_wiring=exit_wiring,
         )
 
     # ---------- lookback planning ----------
@@ -872,7 +1149,21 @@ class StrategyIRCompiler:
         indicator_ids: frozenset[str],
         location: str,
     ) -> LeafEvaluator:
-        """Compile a single leaf condition into a boolean evaluator."""
+        """Compile a single leaf condition into a boolean evaluator.
+
+        ``units`` semantics:
+            When ``leaf.units == "pips"`` AND the LHS resolves to the
+            ``spread`` price field, the LHS value is converted from
+            price units to pips at evaluation time using the per-symbol
+            pip size. The RHS is assumed to already be a pip count
+            (this matches every production IR's spread-filter shape:
+            ``"lhs": "spread", "operator": "<=", "rhs": 1.8,
+            "units": "pips"``). When the LHS is anything else, the
+            ``"pips"`` units tag is purely informational at this layer
+            -- a future enhancement can extend the conversion to
+            ATR-multiple pip thresholds, but no current IR uses that
+            shape.
+        """
         op_fn = _COMPARISON_OPERATORS.get(leaf.operator)
         if op_fn is None:
             raise ValueError(
@@ -888,6 +1179,37 @@ class StrategyIRCompiler:
 
             def rhs_fn(_ctx: _EvalContext, _const: float = const) -> float:
                 return _const
+
+        # Detect the "spread filter" shape and wrap lhs_fn in a pip
+        # converter when units == "pips" and LHS is the bare ``spread``
+        # price field. The converter divides by the per-symbol pip size
+        # so the comparison happens in pip space and matches the IR
+        # author's intent.
+        is_spread_pip_compare = (
+            isinstance(leaf.lhs, str)
+            and leaf.lhs.strip() == "spread"
+            and (leaf.units or "").lower() == "pips"
+        )
+        if is_spread_pip_compare:
+            inner_lhs = lhs_fn
+
+            def _spread_in_pips(
+                ctx: _EvalContext, _f: Callable[[_EvalContext], float] = inner_lhs
+            ) -> float:
+                price_units = _f(ctx)
+                if math.isnan(price_units):
+                    return math.nan
+                pip_size = _pip_size_for_symbol(ctx.candle.symbol)
+                if pip_size <= 0.0:
+                    # Defensive: an unknown / non-FX symbol would end up
+                    # here only if someone wires this leaf into a
+                    # non-FX strategy. Returning NaN propagates "we
+                    # cannot evaluate" through to the leaf which then
+                    # short-circuits to False.
+                    return math.nan
+                return price_units / pip_size
+
+            lhs_fn = _spread_in_pips
 
         def _leaf_eval(ctx: _EvalContext) -> bool:
             try:
@@ -1135,16 +1457,152 @@ class StrategyIRCompiler:
             f"not a price field and not a declared indicator id"
         )
 
+    # ---------- exit wiring resolution ----------
+
+    def _resolve_exit_wiring(
+        self,
+        ir: StrategyIR,
+        indicator_ids: frozenset[str],
+    ) -> _ExitWiring:
+        """
+        Walk the IR's exit blocks and indicator declarations and
+        capture the ids the stateful exit evaluators need to read.
+
+        Lookups performed:
+            - ``initial_stop``: when it is an ``atr_multiple`` stop,
+              record the named ATR indicator id and the multiple. The
+              indicator must already be declared (validated here so a
+              misconfigured IR fails at compile time).
+            - ``take_profit``: when it is a ``risk_reward_multiple``
+              stop, record the multiple. When it is an
+              ``opposite_inner_band_touch`` stop, locate the inner-most
+              BollingerUpper/Lower indicators by smallest stddev.
+            - ``trailing_exit`` or ``trailing_stop``: when the resolved
+              variant is a ``middle_band_close_violation`` stop, locate
+              the SMA indicator that matches the inner Bollinger
+              length+source (the conventional Bollinger basis).
+            - ``time_exit`` (TimeExitRule wrapper): record
+              ``max_bars_in_trade`` so the time_exit evaluator can fire
+              at the right bar count.
+
+        Returns:
+            An :class:`_ExitWiring` value object holding every
+            resolved id/multiple. Fields default to ``None`` / ``NaN``
+            when the corresponding stop is not configured.
+        """
+        exit_logic = ir.exit_logic
+
+        atr_indicator_id: str | None = None
+        atr_multiple = math.nan
+        if isinstance(exit_logic.initial_stop, AtrMultipleStop):
+            stop = exit_logic.initial_stop
+            if stop.indicator not in indicator_ids:
+                raise IRReferenceError(
+                    f"atr_multiple stop at exit_logic.initial_stop references "
+                    f"unknown indicator {stop.indicator!r}; declare it in the "
+                    "IR's indicators block"
+                )
+            atr_indicator_id = stop.indicator
+            atr_multiple = float(stop.multiple)
+
+        rr_multiple = math.nan
+        if isinstance(exit_logic.take_profit, RiskRewardMultipleStop):
+            rr_multiple = float(exit_logic.take_profit.multiple)
+
+        # Inner Bollinger bands: smallest stddev = "inner". Used by
+        # opposite_inner_band_touch.
+        bb_upper_inner_id, bb_lower_inner_id = self._resolve_inner_bollinger_ids(ir)
+
+        # Middle band: an SMA indicator whose length+source matches
+        # the inner Bollinger bands' length+source. Used by
+        # middle_band_close_violation.
+        bb_mid_id = self._resolve_middle_band_id(ir)
+
+        time_exit_max_bars: int | None = None
+        if isinstance(exit_logic.time_exit, TimeExitRule) and exit_logic.time_exit.enabled:
+            time_exit_max_bars = int(exit_logic.time_exit.max_bars_in_trade)
+
+        return _ExitWiring(
+            atr_indicator_id=atr_indicator_id,
+            atr_multiple=atr_multiple,
+            rr_multiple=rr_multiple,
+            bb_upper_inner_id=bb_upper_inner_id,
+            bb_lower_inner_id=bb_lower_inner_id,
+            bb_mid_id=bb_mid_id,
+            time_exit_max_bars=time_exit_max_bars,
+        )
+
+    def _resolve_inner_bollinger_ids(self, ir: StrategyIR) -> tuple[str | None, str | None]:
+        """
+        Locate the inner BollingerUpper / BollingerLower indicators.
+
+        "Inner" = the band declared with the smallest stddev among
+        same-length declarations. The Lien IR declares two pairs
+        (1.0 stddev = inner, 2.0 stddev = outer); we pick the
+        smallest. When no Bollinger indicators are declared, both
+        return values are ``None`` -- a strategy without Bollinger
+        bands cannot use opposite_inner_band_touch and the
+        compiler's pre-flight check rejects that combination.
+        """
+        upper_candidates: list[tuple[float, str]] = []
+        lower_candidates: list[tuple[float, str]] = []
+        for ind in ir.indicators:
+            if isinstance(ind, BollingerUpperIndicator):
+                upper_candidates.append((float(ind.stddev), ind.id))
+            elif isinstance(ind, BollingerLowerIndicator):
+                lower_candidates.append((float(ind.stddev), ind.id))
+
+        upper_id = min(upper_candidates)[1] if upper_candidates else None
+        lower_id = min(lower_candidates)[1] if lower_candidates else None
+        return upper_id, lower_id
+
+    def _resolve_middle_band_id(self, ir: StrategyIR) -> str | None:
+        """
+        Locate the SMA indicator that serves as the Bollinger middle
+        band.
+
+        Heuristic:
+            1. If the IR declares Bollinger bands, find an SMA whose
+               (length, source) match the inner Bollinger bands'
+               (length, source). This matches the canonical Bollinger
+               definition: the basis IS an SMA.
+            2. Otherwise, fall back to the first declared SmaIndicator.
+            3. If no SMA is declared, return ``None`` (strategies that
+               do not use middle_band_close_violation never read this).
+        """
+        sma_indicators = [ind for ind in ir.indicators if isinstance(ind, SmaIndicator)]
+        if not sma_indicators:
+            return None
+
+        # Try the length+source match first.
+        bollinger_upper = [ind for ind in ir.indicators if isinstance(ind, BollingerUpperIndicator)]
+        if bollinger_upper:
+            inner = min(bollinger_upper, key=lambda b: b.stddev)
+            for sma in sma_indicators:
+                if sma.length == inner.length and sma.source == inner.source:
+                    return sma.id
+
+        # Fall back to first SMA.
+        return sma_indicators[0].id
+
     # ---------- exit compilation ----------
 
     def _compile_exit_logic(
         self,
         exit_logic: ExitLogic,
         indicator_ids: frozenset[str],
+        wiring: _ExitWiring,
     ) -> dict[str, _ExitCheck]:
         """
         Compile every populated exit stop into a name -> _ExitCheck
         dict. Stops absent from the IR are not represented.
+
+        In addition to the six ExitStop fields, this method compiles
+        the ``trailing_stop`` (TrailingStopRule) and ``time_exit``
+        (TimeExitRule) wrapper rules into exit checks named
+        ``"trailing_stop"`` and ``"time_exit"`` respectively, so the
+        IR's ``same_bar_priority`` can reference them by their natural
+        names.
         """
         compiled: dict[str, _ExitCheck] = {}
         for attr_name in (
@@ -1158,17 +1616,58 @@ class StrategyIRCompiler:
             stop = getattr(exit_logic, attr_name)
             if stop is None:
                 continue
-            evaluator = self._compile_exit_stop(stop, indicator_ids, f"exit_logic.{attr_name}")
+            evaluator = self._compile_exit_stop(
+                stop, indicator_ids, wiring, f"exit_logic.{attr_name}"
+            )
             compiled[attr_name] = _ExitCheck(name=attr_name, evaluator=evaluator)
+
+        # TrailingStopRule wrapper: when enabled with type
+        # ``middle_band_close_violation``, register it under
+        # ``"trailing_stop"`` so same_bar_priority can pick it up.
+        if (
+            isinstance(exit_logic.trailing_stop, TrailingStopRule)
+            and exit_logic.trailing_stop.enabled
+        ):
+            evaluator = self._compile_trailing_stop_rule(
+                exit_logic.trailing_stop, wiring, "exit_logic.trailing_stop"
+            )
+            compiled["trailing_stop"] = _ExitCheck(name="trailing_stop", evaluator=evaluator)
+
+        # TimeExitRule wrapper: when enabled, register a "time_exit"
+        # check that fires when (bar_counter - entry_bar_index) >=
+        # max_bars_in_trade.
+        if (
+            isinstance(exit_logic.time_exit, TimeExitRule)
+            and exit_logic.time_exit.enabled
+            and wiring.time_exit_max_bars is not None
+        ):
+            max_bars = wiring.time_exit_max_bars
+
+            def _time_exit_eval(ctx: _EvalContext, _max_bars: int = max_bars) -> bool:
+                if ctx.open_trade is None:
+                    return False
+                bars_in_trade = ctx.bar_counter - ctx.open_trade.entry_bar_index
+                return bars_in_trade >= _max_bars
+
+            compiled["time_exit"] = _ExitCheck(name="time_exit", evaluator=_time_exit_eval)
+
         return compiled
 
     def _compile_exit_stop(
         self,
         stop: ExitStop,
         indicator_ids: frozenset[str],
+        wiring: _ExitWiring,
         location: str,
     ) -> ExitEvaluator:
-        """Translate an :data:`ExitStop` variant into an evaluator."""
+        """Translate an :data:`ExitStop` variant into an evaluator.
+
+        See module docstring for the per-kind semantics. Each branch
+        produces a closure that consults the per-bar
+        :class:`_EvalContext` (which carries the open-trade snapshot
+        for stateful kinds like atr_multiple and
+        opposite_inner_band_touch).
+        """
         if isinstance(stop, (MeanReversionToMidStop, ChannelExitStop)):
             long_eval = self._compile_leaf(
                 stop.long_condition, indicator_ids, f"{location}.long_condition"
@@ -1195,61 +1694,235 @@ class StrategyIRCompiler:
             return _single
 
         if isinstance(stop, AtrMultipleStop):
-            # ATR-multiple stops require the engine to track an
-            # initial stop price set at entry and then re-check on
-            # every bar. The compiled IRStrategy receives a current
-            # PositionSnapshot but does not yet have the entry-bar
-            # ATR snapshot. We model this as an evaluator that NEVER
-            # fires from inside the strategy -- the BacktestEngine's
-            # PaperBrokerAdapter is the place that compares low/high
-            # against the persisted stop. Returning False here is
-            # correct: the strategy emits no spurious exit; the
-            # engine's stop-loss machinery handles execution.
-            #
-            # NOTE: this is documented strategy-vs-engine division of
-            # responsibility, NOT a stub. The compiler still records
-            # the check name so same_bar_priority can reference it.
-            indicator_ref = stop.indicator
-            if indicator_ref not in indicator_ids:
-                raise IRReferenceError(
-                    f"atr_multiple stop at {location} references unknown indicator "
-                    f"{indicator_ref!r}; declare it in the IR's indicators block"
-                )
-
-            def _atr_stop(_ctx: _EvalContext) -> bool:
-                return False
-
-            return _atr_stop
+            return self._build_atr_multiple_evaluator(stop, wiring, location)
 
         if isinstance(stop, RiskRewardMultipleStop):
-            # R-multiple take-profit -- engine responsibility, same
-            # rationale as AtrMultipleStop above.
-            def _rr_stop(_ctx: _EvalContext) -> bool:
-                return False
-
-            return _rr_stop
+            return self._build_risk_reward_evaluator(wiring, location)
 
         if isinstance(stop, OppositeInnerBandTouchStop):
-            # Engine-side: needs the entry-bar inner-band snapshot.
-            def _opposite_band(_ctx: _EvalContext) -> bool:
-                return False
-
-            return _opposite_band
+            return self._build_opposite_inner_band_evaluator(wiring, location)
 
         if isinstance(stop, MiddleBandCloseViolationStop):
-            # Engine-side: needs the entry-side mid-band snapshot.
-            def _middle_band(_ctx: _EvalContext) -> bool:
-                return False
-
-            return _middle_band
+            return self._build_middle_band_close_evaluator(wiring, location)
 
         # The remaining ExitStop variants (basket-level stops) are out
         # of scope for M1.A3 (basket execution is M3.X2.5). Fail loudly
         # rather than silently accept them.
+        # DEFERRED to a future tranche: BasketAtrMultipleStop and
+        # BasketOpenLossPctStop need basket-aware position tracking
+        # which the M1.A3 single-symbol IRStrategy does not model.
         raise ValueError(
             f"unsupported ExitStop variant {type(stop).__name__} at {location}; "
             f"basket-level stops ship with the basket execution tranche"
         )
+
+    # ---------- per-kind exit evaluator builders ----------
+
+    def _build_atr_multiple_evaluator(
+        self,
+        stop: AtrMultipleStop,
+        wiring: _ExitWiring,
+        location: str,
+    ) -> ExitEvaluator:
+        """
+        Compile an atr_multiple initial stop.
+
+        For a LONG position with stop_distance = multiple * entry_atr:
+            - stop_price = entry_price - stop_distance
+            - fires when candle.low <= stop_price (intra-bar touch)
+        For a SHORT position:
+            - stop_price = entry_price + stop_distance
+            - fires when candle.high >= stop_price
+
+        The stop distance is FROZEN at entry (using the entry-bar ATR
+        snapshot held on _OpenTradeContext); subsequent ATR changes do
+        not move the stop. This matches the conventional "stop set at
+        entry" semantics every Lien-style FX strategy assumes.
+        """
+        if wiring.atr_indicator_id != stop.indicator:
+            # Defensive: _resolve_exit_wiring should already have
+            # captured this id. If it diverged the compile setup is
+            # inconsistent -- fail loudly.
+            raise IRReferenceError(
+                f"atr_multiple stop at {location} references {stop.indicator!r} "
+                f"but exit wiring resolved to {wiring.atr_indicator_id!r}; "
+                "this is a compiler bug -- the wiring resolver is the source of truth"
+            )
+
+        def _atr_stop(ctx: _EvalContext) -> bool:
+            snap = ctx.open_trade
+            if snap is None:
+                return False
+            if math.isnan(snap.stop_distance) or snap.stop_distance <= 0.0:
+                # Entry-bar ATR was unavailable (warmup) -- no stop.
+                return False
+            if snap.direction > 0:
+                stop_price = snap.entry_price - snap.stop_distance
+                return float(ctx.candle.low) <= stop_price
+            stop_price = snap.entry_price + snap.stop_distance
+            return float(ctx.candle.high) >= stop_price
+
+        return _atr_stop
+
+    def _build_risk_reward_evaluator(self, wiring: _ExitWiring, location: str) -> ExitEvaluator:
+        """
+        Compile a risk_reward_multiple take-profit.
+
+        For a LONG position with take_profit_distance = rr * stop_distance:
+            - tp_price = entry_price + take_profit_distance
+            - fires when candle.high >= tp_price (intra-bar touch)
+        For a SHORT position:
+            - tp_price = entry_price - take_profit_distance
+            - fires when candle.low <= tp_price
+
+        Requires a configured atr_multiple stop because the R unit is
+        ``stop_distance``. Without it the rr multiple has nothing to
+        scale, so the evaluator returns False (no take-profit).
+        """
+        if math.isnan(wiring.rr_multiple) or wiring.rr_multiple <= 0.0:
+            raise ValueError(
+                f"risk_reward_multiple stop at {location} has invalid "
+                f"multiple={wiring.rr_multiple!r}"
+            )
+
+        def _rr_take_profit(ctx: _EvalContext, _rr: float = wiring.rr_multiple) -> bool:
+            snap = ctx.open_trade
+            if snap is None:
+                return False
+            if math.isnan(snap.stop_distance) or snap.stop_distance <= 0.0:
+                # No risk anchor -> no R-multiple take-profit.
+                return False
+            tp_distance = _rr * snap.stop_distance
+            if snap.direction > 0:
+                tp_price = snap.entry_price + tp_distance
+                return float(ctx.candle.high) >= tp_price
+            tp_price = snap.entry_price - tp_distance
+            return float(ctx.candle.low) <= tp_price
+
+        return _rr_take_profit
+
+    def _build_opposite_inner_band_evaluator(
+        self, wiring: _ExitWiring, location: str
+    ) -> ExitEvaluator:
+        """
+        Compile an opposite_inner_band_touch take-profit.
+
+        For a LONG position: take profit when the bar's price action
+        touches the LOWER inner Bollinger band (the "opposite" band of
+        a long entered above the upper band).
+        For a SHORT position: touch the UPPER inner band.
+
+        Reads the LIVE inner-band values from indicator_values rather
+        than the entry snapshot -- the band slides as the SMA recomputes
+        and the take-profit condition is "we have given back enough that
+        the opposite band catches up to price", which is a moving
+        target by design.
+        """
+        if wiring.bb_upper_inner_id is None or wiring.bb_lower_inner_id is None:
+            raise IRReferenceError(
+                f"opposite_inner_band_touch stop at {location} requires both an "
+                "inner BollingerUpper and an inner BollingerLower indicator; "
+                "neither was found in the IR's indicators block"
+            )
+        upper_id = wiring.bb_upper_inner_id
+        lower_id = wiring.bb_lower_inner_id
+
+        def _opposite_band(ctx: _EvalContext, _u: str = upper_id, _l: str = lower_id) -> bool:
+            snap = ctx.open_trade
+            if snap is None:
+                return False
+            if snap.direction > 0:
+                lower_band = ctx.indicator_values.get(_l, math.nan)
+                if math.isnan(lower_band):
+                    return False
+                # Long take-profit: low of the bar touches the opposite
+                # (lower) inner band. We use ``low <= lower_band``
+                # rather than ``close <= lower_band`` so an intra-bar
+                # touch counts -- mirrors the M1.A3 BacktestEngine
+                # convention for stop touches.
+                return float(ctx.candle.low) <= lower_band
+            upper_band = ctx.indicator_values.get(_u, math.nan)
+            if math.isnan(upper_band):
+                return False
+            return float(ctx.candle.high) >= upper_band
+
+        return _opposite_band
+
+    def _build_middle_band_close_evaluator(
+        self, wiring: _ExitWiring, location: str
+    ) -> ExitEvaluator:
+        """
+        Compile a middle_band_close_violation trailing exit.
+
+        For a LONG position: exit when the close goes BELOW the SMA
+        middle band.
+        For a SHORT position: exit when the close goes ABOVE.
+
+        Uses ``close`` (not high/low) intentionally -- "close
+        violation" is the plain English meaning of the stop name and
+        matches every public Bollinger trading guide.
+        """
+        if wiring.bb_mid_id is None:
+            raise IRReferenceError(
+                f"middle_band_close_violation stop at {location} requires an SMA "
+                "indicator to serve as the Bollinger middle band; none was found"
+            )
+        mid_id = wiring.bb_mid_id
+
+        def _middle_band(ctx: _EvalContext, _m: str = mid_id) -> bool:
+            snap = ctx.open_trade
+            if snap is None:
+                return False
+            mid = ctx.indicator_values.get(_m, math.nan)
+            if math.isnan(mid):
+                return False
+            close = float(ctx.candle.close)
+            if snap.direction > 0:
+                return close < mid
+            return close > mid
+
+        return _middle_band
+
+    def _compile_trailing_stop_rule(
+        self,
+        rule: TrailingStopRule,
+        wiring: _ExitWiring,
+        location: str,
+    ) -> ExitEvaluator:
+        """
+        Compile a TrailingStopRule wrapper.
+
+        The wrapper carries ``type`` as a free-form string. For the
+        Lien-style strategies the only value used is
+        ``"middle_band_close_violation"``. We dispatch on that here so
+        the IR's ``trailing_stop`` block resolves to the same
+        evaluator shape as a populated ``trailing_exit`` ExitStop
+        would.
+
+        Raises:
+            ValueError: when ``rule.type`` is not a recognised trailing
+                stop kind. New kinds (e.g. ATR-trailing) should add a
+                branch here AND a matching builder above.
+        """
+        kind = rule.type.strip().lower()
+        if kind == "middle_band_close_violation":
+            return self._build_middle_band_close_evaluator(wiring, location)
+        raise ValueError(
+            f"unsupported trailing_stop type {rule.type!r} at {location}; "
+            "supported: middle_band_close_violation"
+        )
+
+    # ---------- priority freezing ----------
+
+    #: Aliases mapping the IR's colloquial priority-list names onto the
+    #: canonical exit-check names registered by :meth:`_compile_exit_logic`.
+    #: Matches the naming convention used across the production IRs:
+    #: ``"stop_loss"`` is the everyday name for the ``initial_stop``
+    #: ExitStop, etc. The compiler resolves the alias at compile time
+    #: so the priority list stays operator-readable.
+    _PRIORITY_NAME_ALIASES: dict[str, str] = {
+        "stop_loss": "initial_stop",
+    }
 
     def _freeze_exit_priority(
         self,
@@ -1260,10 +1933,13 @@ class StrategyIRCompiler:
         Freeze the compiled exit checks into a tuple ordered per
         ``exit_logic.same_bar_priority``.
 
-        Names appearing in the priority list but not in
-        ``compiled_exits`` raise :class:`IRReferenceError` (the
-        priority list is part of the IR; if it points at a stop that
-        is not configured, that's an authoring bug).
+        Name resolution proceeds in two passes:
+
+        1. Apply :data:`_PRIORITY_NAME_ALIASES` so colloquial names
+           like ``"stop_loss"`` map to the canonical ``"initial_stop"``.
+        2. If the canonical name is not in ``compiled_exits``, raise
+           :class:`IRReferenceError` -- the priority list is part of
+           the IR contract and a typo would silently disable a stop.
 
         Compiled exits NOT mentioned in the priority list are
         appended after the prioritised ones in alphabetical order so
@@ -1271,18 +1947,20 @@ class StrategyIRCompiler:
         """
         ordered: list[_ExitCheck] = []
         seen: set[str] = set()
-        for name in exit_logic.same_bar_priority:
-            if name not in compiled_exits:
+        for raw_name in exit_logic.same_bar_priority:
+            canonical = self._PRIORITY_NAME_ALIASES.get(raw_name, raw_name)
+            if canonical not in compiled_exits:
                 raise IRReferenceError(
-                    f"same_bar_priority lists {name!r} but no exit stop with that "
-                    f"name is configured; configured stops: {sorted(compiled_exits)}"
+                    f"same_bar_priority lists {raw_name!r} (canonical "
+                    f"{canonical!r}) but no exit stop with that name is "
+                    f"configured; configured stops: {sorted(compiled_exits)}"
                 )
-            if name in seen:
+            if canonical in seen:
                 # Duplicate priority entries: skip the second occurrence
                 # so the tuple stays a stable ordered set.
                 continue
-            ordered.append(compiled_exits[name])
-            seen.add(name)
+            ordered.append(compiled_exits[canonical])
+            seen.add(canonical)
         # Append any not-yet-included compiled exits in alphabetical
         # order for determinism.
         for name in sorted(compiled_exits.keys()):

@@ -395,3 +395,69 @@ def test_clear_log_wipes_log() -> None:
     assert provider.fetch_calls()
     provider.clear_log()
     assert provider.fetch_calls() == []
+
+
+# ---------------------------------------------------------------------------
+# Spread emission (M3.X1.x compiler-gap fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("symbol", _MAJORS)
+def test_every_emitted_candle_carries_a_spread(symbol: str) -> None:
+    """The synthetic provider must stamp ``spread`` on every emitted bar.
+
+    This is the prerequisite for the Strategy IR's spread-filter
+    leaf (``"lhs": "spread", "operator": "<=", "rhs": N,
+    "units": "pips"``) to evaluate. Before the M3.X1.x fix the
+    provider left ``spread`` as ``None`` and the CLI sanitised the
+    leaf out; after the fix the leaf must evaluate against a real
+    pip count.
+    """
+    provider = SyntheticFxMarketDataProvider(seed=42)
+    start, end = _w("2026-01-01T00:00:00", "2026-01-02T00:00:00")
+    bars = provider.fetch_bars(symbol=symbol, timeframe="H1", start=start, end=end)
+    assert bars
+    for candle in bars:
+        assert candle.spread is not None, (symbol, candle)
+        # Spread is in PRICE units (Decimal). Converting to pips at
+        # consumption time is the compiler's job; the provider's
+        # contract is "spread is positive and aligns with the symbol's
+        # pip size".
+        assert candle.spread > Decimal("0"), (symbol, candle.spread)
+
+
+def test_spread_is_constant_per_symbol() -> None:
+    """The synthetic provider models a static broker quote: the
+    spread must be identical across every bar of a single
+    fetch_bars call. This keeps the M3.X1 determinism contract
+    intact and lets the spread-filter compile-time decision be
+    "always pass" or "always fail" rather than a per-bar coin toss.
+    """
+    provider = SyntheticFxMarketDataProvider(seed=42)
+    start, end = _w("2026-01-01T00:00:00", "2026-01-04T00:00:00")
+    bars = provider.fetch_bars(symbol="EURUSD", timeframe="H1", start=start, end=end)
+    assert bars
+    spreads = {c.spread for c in bars}
+    assert len(spreads) == 1, (
+        "synthetic provider must emit a single constant spread per "
+        f"symbol; got {spreads!r} on EURUSD"
+    )
+
+
+def test_spread_roughly_matches_half_pip_for_majors() -> None:
+    """EURUSD spread should be ~0.5 pips (= 0.00005 in price units)."""
+    provider = SyntheticFxMarketDataProvider(seed=42)
+    start, end = _w("2026-01-01T00:00:00", "2026-01-02T00:00:00")
+    bars = provider.fetch_bars(symbol="EURUSD", timeframe="H1", start=start, end=end)
+    assert bars
+    # 0.5 pips * 0.0001 price/pip = 0.00005. Quantised to 5 decimals.
+    assert bars[0].spread == Decimal("0.00005"), bars[0].spread
+
+
+def test_spread_roughly_matches_pip_size_for_jpy() -> None:
+    """USDJPY spread should be 0.6 pips at 0.01 = 0.006 price units (3 dp)."""
+    provider = SyntheticFxMarketDataProvider(seed=42)
+    start, end = _w("2026-01-01T00:00:00", "2026-01-02T00:00:00")
+    bars = provider.fetch_bars(symbol="USDJPY", timeframe="H1", start=start, end=end)
+    assert bars
+    assert bars[0].spread == Decimal("0.006"), bars[0].spread

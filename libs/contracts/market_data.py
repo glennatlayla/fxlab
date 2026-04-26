@@ -116,6 +116,12 @@ class Candle(BaseModel):
         vwap: Volume-weighted average price (optional; not all providers supply it).
         trade_count: Number of individual trades in the interval (optional).
         timestamp: UTC timestamp of the candle's opening time.
+        spread: Bid/ask spread in price units at the close of the interval
+            (optional; only FX providers supply it). The Strategy IR's
+            spread filter (``"lhs": "spread", "operator": "<=", "rhs": N,
+            "units": "pips"``) reads this value at compile time. Equity
+            providers set it to ``None`` because exchange data does not
+            carry a single canonical spread.
 
     Example:
         candle = Candle(
@@ -142,6 +148,15 @@ class Candle(BaseModel):
     vwap: Decimal | None = Field(default=None, ge=0, description="Volume-weighted average price")
     trade_count: int | None = Field(default=None, ge=0, description="Number of trades in interval")
     timestamp: datetime = Field(..., description="UTC timestamp of candle open")
+    spread: Decimal | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Bid/ask spread in price units (FX providers only; None for equities). "
+            "Read by Strategy IR conditions of the form `spread <= N units=pips` "
+            "after pip conversion."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

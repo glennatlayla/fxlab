@@ -119,6 +119,30 @@ _PIP_SIZES: dict[str, Decimal] = {
 }
 
 
+#: Per-symbol synthetic spread expressed in pips. The synthetic provider
+#: must emit a spread on every candle so Strategy-IR conditions of the
+#: form ``spread <= N units=pips`` can evaluate (the M3.X1 CLI relies
+#: on this). The values mirror typical retail FX broker quotes:
+#: roughly half a pip on majors, slightly wider on USDJPY where the
+#: pip itself is two decimal places. The provider converts these pip
+#: counts into price units (``pip_size * spread_pips``) before stamping
+#: each :class:`Candle`.
+#:
+#: The numbers are deliberately conservative — small enough that the
+#: Lien Double-Bollinger entry filter (``spread <= 2.0 pips``) passes
+#: comfortably, large enough to round-trip cleanly through the Decimal
+#: quantisation step.
+_SYNTHETIC_SPREAD_PIPS: dict[str, float] = {
+    "EURUSD": 0.5,
+    "GBPUSD": 0.5,
+    "USDJPY": 0.6,
+    "USDCHF": 0.5,
+    "AUDUSD": 0.5,
+    "USDCAD": 0.5,
+    "NZDUSD": 0.5,
+}
+
+
 #: Per-timeframe metadata. The first entry of each value is the bar
 #: duration in seconds; the second is the :class:`CandleInterval`
 #: enum value used to stamp the emitted Candle.
@@ -603,6 +627,16 @@ class SyntheticFxMarketDataProvider(MarketDataProviderInterface):
         is_jpy = symbol.endswith("JPY")
         quant_decimals = 3 if is_jpy else 5
 
+        # Spread is constant per symbol and stamped on every emitted
+        # bar. Computed once outside the loop because the synthetic
+        # provider models a static broker quote: real Oanda-quoted
+        # spread varies bar-to-bar but the synthetic backend is allowed
+        # to be flat (the determinism contract takes precedence over
+        # micro-realism).
+        spread_pips = float(_SYNTHETIC_SPREAD_PIPS[symbol])
+        pip_size_decimal = _PIP_SIZES[symbol]
+        spread_value = self._quantise(spread_pips * float(pip_size_decimal), quant_decimals)
+
         # Build candles one bar at a time.
         candles: list[Candle] = []
         bar_open = float(params["start_price"])
@@ -633,6 +667,7 @@ class SyntheticFxMarketDataProvider(MarketDataProviderInterface):
                 close=self._quantise(bar_close, quant_decimals),
                 volume=volume_value,
                 timestamp=timestamp,
+                spread=spread_value,
             )
             candles.append(candle)
             bar_open = bar_close

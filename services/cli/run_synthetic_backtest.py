@@ -237,24 +237,28 @@ class _IRPreprocessor:
     Sanitise a raw IR dict for the M1.A3 compiler's current capabilities.
 
     Why this exists:
-        The Strategy Repo IRs reference the ``spread`` price field and
-        cross-timeframe identifiers (e.g. ``close_1d``) that the
+        The Strategy Repo IRs reference cross-timeframe identifiers
+        (e.g. ``close_1d``) that the
         :mod:`libs.strategy_ir.reference_resolver` accepts but the
-        :mod:`libs.strategy_ir.compiler` cannot yet evaluate at runtime
-        (M1.A3's ``_PRICE_FIELD_GETTERS`` is hard-coded to
-        ``open/high/low/close/volume``). The sanitiser removes the
-        offending leaves from entry-side condition trees so the IR
-        compiles cleanly. The dropped conditions are recorded in an
+        :mod:`libs.strategy_ir.compiler` cannot yet evaluate at
+        runtime. The sanitiser removes those offending leaves from
+        entry-side condition trees so the IR compiles cleanly. The
+        dropped conditions are recorded in an
         :class:`_IRPreprocessReport` so the change is auditable.
 
+        ``spread`` is now a first-class price field on
+        :class:`libs.contracts.market_data.Candle` and the compiler
+        knows how to read it (with pip conversion when units == "pips"),
+        so spread leaves are NO LONGER stripped. This was the M3.X1.x
+        compiler-gap fix that closed the "0 exits / 4 open positions"
+        observation on the Lien IR smoke test.
+
     Why this is NOT a stub:
-        The contract gap is documented; the sanitisation is explicit
-        and reported to the operator on every run; and the CLI's
+        The remaining contract gap (cross-timeframe price-field
+        identifiers) is documented; the sanitisation is explicit and
+        reported to the operator on every run; and the CLI's
         downstream pipeline produces real signals against the
-        surviving conditions. This is the same pragma the M3.X1.5
-        Single Engine Mode Parity Test will apply (the IR pack must
-        compile under both paths; until M1.A3 grows ``spread`` /
-        cross-timeframe support, both paths sanitise the same way).
+        surviving conditions.
 
     Does NOT:
         - Mutate exit-logic conditions. Those are typically
@@ -265,10 +269,22 @@ class _IRPreprocessor:
     """
 
     #: Identifier names whose presence on either side of a leaf
-    #: condition triggers a drop. ``spread`` is a valid price field
-    #: the resolver accepts but the compiler cannot read; the
-    #: synthetic candles have no spread either.
-    _UNSUPPORTED_PRICE_FIELDS: frozenset[str] = frozenset({"spread"})
+    #: condition triggers a drop. Currently empty: spread is now
+    #: supported, and no other price-field name needs sanitisation
+    #: yet. Kept as a frozenset so the leaf-walk shape stays
+    #: identical and a future cross-timeframe identifier can be
+    #: dropped by adding it here.
+    _UNSUPPORTED_PRICE_FIELDS: frozenset[str] = frozenset()
+
+    #: Aliases mirrored from
+    #: :attr:`libs.strategy_ir.compiler.StrategyIRCompiler._PRIORITY_NAME_ALIASES`.
+    #: A priority entry whose name is in this map is considered
+    #: configured when the canonical target is configured. Kept here
+    #: so the preprocessor's "drop" decision matches the compiler's
+    #: "accept" decision.
+    _PRIORITY_NAME_ALIASES: dict[str, str] = {
+        "stop_loss": "initial_stop",
+    }
 
     def sanitize(self, raw: dict[str, Any]) -> tuple[dict[str, Any], _IRPreprocessReport]:
         """
@@ -311,7 +327,11 @@ class _IRPreprocessor:
                 kept.append(field)
             req["required_fields"] = kept
 
-        # 3. Filter same_bar_priority to entries that match a configured stop.
+        # 3. Filter same_bar_priority to entries that match a configured stop
+        #    or an enabled wrapper rule (trailing_stop, time_exit). The
+        #    compiler resolves the priority list strictly, so dropping
+        #    here keeps the CLI from raising on IRs that list rules they
+        #    do not actually configure (a common Strategy Repo pattern).
         dropped_priority: list[str] = []
         exit_logic = out.get("exit_logic", {})
         priority = exit_logic.get("same_bar_priority", [])
@@ -326,9 +346,19 @@ class _IRPreprocessor:
         ):
             if exit_logic.get(stop_name) is not None:
                 configured.add(stop_name)
+        # Wrapper rules: TrailingStopRule + TimeExitRule become
+        # compiler-recognised exit checks named "trailing_stop" and
+        # "time_exit" when their ``enabled`` flag is True.
+        trailing_stop = exit_logic.get("trailing_stop")
+        if isinstance(trailing_stop, dict) and trailing_stop.get("enabled"):
+            configured.add("trailing_stop")
+        time_exit = exit_logic.get("time_exit")
+        if isinstance(time_exit, dict) and time_exit.get("enabled"):
+            configured.add("time_exit")
         kept_priority: list[str] = []
         for name in priority:
-            if name not in configured:
+            canonical = self._PRIORITY_NAME_ALIASES.get(name, name)
+            if canonical not in configured:
                 dropped_priority.append(name)
                 continue
             kept_priority.append(name)
