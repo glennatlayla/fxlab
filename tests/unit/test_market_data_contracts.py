@@ -60,10 +60,15 @@ class TestCandleInterval:
         assert CandleInterval.M5.value == "5m"
         assert CandleInterval.M15.value == "15m"
         assert CandleInterval.H1.value == "1h"
+        assert CandleInterval.H4.value == "4h"
         assert CandleInterval.D1.value == "1d"
 
-    def test_interval_count_is_five(self) -> None:
-        assert len(CandleInterval) == 5
+    def test_interval_count_is_six(self) -> None:
+        # 6 intervals: M1, M5, M15, H1, H4, D1.
+        # H4 was added on 2026-04-25 alongside the synthetic FX provider
+        # that emits H4 bars natively. Update this count + the rationale
+        # whenever a new interval lands.
+        assert len(CandleInterval) == 6
 
 
 # ---------------------------------------------------------------------------

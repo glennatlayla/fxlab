@@ -146,21 +146,13 @@ _SYNTHETIC_SPREAD_PIPS: dict[str, float] = {
 #: Per-timeframe metadata. The first entry of each value is the bar
 #: duration in seconds; the second is the :class:`CandleInterval`
 #: enum value used to stamp the emitted Candle.
-#:
-#: H4 has no enum member in :class:`CandleInterval`, so it is stamped
-#: with :class:`CandleInterval.H1`. The bar's true duration is
-#: encoded in the timestamp spacing -- two consecutive H4 bars are
-#: exactly four hours apart -- but the enum cannot communicate "H4"
-#: until that member is added. This is a documented contract gap;
-#: consumers that care about bar duration must rely on the timeframe
-#: argument they passed in, not the candle's ``interval`` field.
 _TIMEFRAME_TABLE: dict[str, tuple[int, CandleInterval]] = {
     "M15": (15 * 60, CandleInterval.M15),
     "15m": (15 * 60, CandleInterval.M15),
     "H1": (60 * 60, CandleInterval.H1),
     "1h": (60 * 60, CandleInterval.H1),
-    "H4": (4 * 60 * 60, CandleInterval.H1),
-    "4h": (4 * 60 * 60, CandleInterval.H1),
+    "H4": (4 * 60 * 60, CandleInterval.H4),
+    "4h": (4 * 60 * 60, CandleInterval.H4),
     "D": (24 * 60 * 60, CandleInterval.D1),
     "D1": (24 * 60 * 60, CandleInterval.D1),
     "1d": (24 * 60 * 60, CandleInterval.D1),

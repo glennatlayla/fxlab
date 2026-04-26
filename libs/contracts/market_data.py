@@ -72,6 +72,7 @@ class CandleInterval(str, Enum):  # noqa: UP042 — Python 3.10 compatibility (n
     M5 = "5m"
     M15 = "15m"
     H1 = "1h"
+    H4 = "4h"
     D1 = "1d"
 
 
@@ -88,6 +89,7 @@ INTERVAL_SECONDS: dict[CandleInterval, int] = {
     CandleInterval.M5: 300,
     CandleInterval.M15: 900,
     CandleInterval.H1: 3600,
+    CandleInterval.H4: 14400,
     CandleInterval.D1: 86400,
 }
 
