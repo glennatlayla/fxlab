@@ -244,6 +244,43 @@ class MockResearchRunRepository(ResearchRunRepositoryInterface):
                 return len(self._store)
             return sum(1 for r in self._store.values() if r.status == status)
 
+    def list_by_strategy_id(
+        self,
+        *,
+        strategy_id: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[ResearchRunRecord], int]:
+        """
+        Page records for a strategy and return the total matching count.
+
+        Mirrors the SQL implementation: filters by ``config.strategy_id``,
+        sorts by ``created_at`` descending, then paginates.
+
+        Args:
+            strategy_id: Filter by strategy ULID.
+            page: 1-based page index. Values < 1 are clamped to 1 so the
+                method is safe under direct unit-test calls.
+            page_size: Maximum runs per page. Must be >= 1.
+
+        Returns:
+            Tuple of (records, total_count).
+
+        Raises:
+            ValueError: If ``page_size`` < 1.
+        """
+        if page_size < 1:
+            raise ValueError("page_size must be >= 1")
+        safe_page = page if page >= 1 else 1
+        offset = (safe_page - 1) * page_size
+
+        with self._lock:
+            matches = [r for r in self._store.values() if r.config.strategy_id == strategy_id]
+            matches.sort(key=lambda r: r.created_at, reverse=True)
+            total = len(matches)
+            page_rows = matches[offset : offset + page_size]
+            return page_rows, total
+
     # ------------------------------------------------------------------
     # Introspection helpers (test-only)
     # ------------------------------------------------------------------

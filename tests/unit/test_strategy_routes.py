@@ -1128,3 +1128,357 @@ class TestGetStrategyParsedIRRoundTrip:
         app.dependency_overrides.clear()
         resp = client.get(f"/strategies/{strategy_id}")
         assert resp.status_code in (401, 403, 422)
+
+
+# ---------------------------------------------------------------------------
+# Tests: GET /strategies/{strategy_id}/runs (recent runs section)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def strategy_runs_test_env():
+    """
+    TestClient + real :class:`ResearchRunService` wired to
+    :class:`MockResearchRunRepository`.
+
+    The recent-runs endpoint reuses the runs router's
+    ``set_research_run_service`` registration (the strategies router
+    re-uses the same DI to avoid wiring the service twice). We build a
+    real service against the mock repo so the route exercises the actual
+    persistence projection logic, not a hand-rolled fake.
+
+    Yields:
+        Tuple of (TestClient, MockResearchRunRepository, ResearchRunService).
+    """
+    from datetime import datetime, timezone
+
+    from libs.contracts.mocks.mock_research_run_repository import (
+        MockResearchRunRepository,
+    )
+    from services.api.routes.runs import set_research_run_service
+    from services.api.services.research_run_service import ResearchRunService
+
+    repo = MockResearchRunRepository()
+    service = ResearchRunService(repo=repo)
+    set_research_run_service(service)
+    _override_auth(app)
+
+    # Pin a deterministic "now" reference that tests can use to build
+    # successive created_at timestamps without colliding.
+    repo._reference_now = datetime(2026, 4, 25, 12, 0, 0, tzinfo=timezone.utc)  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+    yield client, repo, service
+
+    app.dependency_overrides.clear()
+    set_research_run_service(None)  # type: ignore[arg-type]
+
+
+def _seed_run(
+    repo,
+    *,
+    run_id: str,
+    strategy_id: str,
+    status: str = "queued",
+    created_offset_seconds: int = 0,
+) -> None:
+    """
+    Insert a research run into the mock repository with explicit timing.
+
+    Each call increments the seed time by ``created_offset_seconds`` so
+    callers can control the newest-first ordering deterministically.
+
+    Args:
+        repo: The :class:`MockResearchRunRepository` instance.
+        run_id: ULID for the run.
+        strategy_id: ULID of the strategy this run belongs to.
+        status: Lifecycle status to seed (defaults to QUEUED).
+        created_offset_seconds: Seconds to add to the fixture's reference
+            time when stamping ``created_at``. Larger numbers = newer.
+    """
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from libs.contracts.research_run import (
+        ResearchRunConfig,
+        ResearchRunRecord,
+        ResearchRunStatus,
+        ResearchRunType,
+    )
+
+    base = repo._reference_now  # set by the fixture
+    created_at = base + timedelta(seconds=created_offset_seconds)
+    config = ResearchRunConfig(
+        run_type=ResearchRunType.BACKTEST,
+        strategy_id=strategy_id,
+        symbols=["EURUSD"],
+        initial_equity=Decimal("100000"),
+    )
+    record = ResearchRunRecord(
+        id=run_id,
+        config=config,
+        status=ResearchRunStatus(status),
+        created_by="01HTESTFAKE000000000000000",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    repo.create(record)
+
+
+class TestListStrategyRunsRoute:
+    """
+    Tests for ``GET /strategies/{strategy_id}/runs``.
+
+    Verifies:
+      * Empty store returns ``total_count == 0`` and ``runs == []``.
+      * Non-empty store returns one row per run, newest first.
+      * Pagination math (``page`` / ``page_size`` / ``total_count`` /
+        ``total_pages``) is correct across multiple pages.
+      * ``page_size`` above the schema cap returns 422 (FastAPI's ``le``
+        validator).
+      * The audit log line ``event=strategy_runs_browsed`` is emitted
+        per CLAUDE.md §8.
+      * Auth is enforced (the route inherits ``strategies:write`` from
+        the rest of the strategies router).
+    """
+
+    def test_empty_history_returns_total_count_zero(self, strategy_runs_test_env) -> None:
+        """A strategy with no runs returns an empty page envelope."""
+        client, _repo, _service = strategy_runs_test_env
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/runs?page=1&page_size=20",
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["runs"] == []
+        assert data["page"] == 1
+        assert data["page_size"] == 20
+        assert data["total_count"] == 0
+        assert data["total_pages"] == 0
+
+    def test_returns_runs_newest_first_with_summary_metrics(self, strategy_runs_test_env) -> None:
+        """Non-empty result populates the envelope; row schema is pinned."""
+        client, repo, _service = strategy_runs_test_env
+
+        strategy_id = "01HSTRAT0000000000000001"
+        # Seed three runs with monotonically increasing created_at so we
+        # can assert the newest-first ordering is honoured.
+        _seed_run(
+            repo,
+            run_id="01HRUN0000000000000000001",
+            strategy_id=strategy_id,
+            status="queued",
+            created_offset_seconds=0,
+        )
+        _seed_run(
+            repo,
+            run_id="01HRUN0000000000000000002",
+            strategy_id=strategy_id,
+            status="queued",
+            created_offset_seconds=10,
+        )
+        _seed_run(
+            repo,
+            run_id="01HRUN0000000000000000003",
+            strategy_id=strategy_id,
+            status="queued",
+            created_offset_seconds=20,
+        )
+
+        resp = client.get(
+            f"/strategies/{strategy_id}/runs?page=1&page_size=20",
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["page"] == 1
+        assert data["page_size"] == 20
+        assert data["total_count"] == 3
+        assert data["total_pages"] == 1
+        assert len(data["runs"]) == 3
+
+        # Newest-first ordering: created_offset 20 > 10 > 0.
+        assert [r["id"] for r in data["runs"]] == [
+            "01HRUN0000000000000000003",
+            "01HRUN0000000000000000002",
+            "01HRUN0000000000000000001",
+        ]
+
+        for row in data["runs"]:
+            # Pinned row schema — the frontend table relies on these keys.
+            for key in ("id", "status", "started_at", "completed_at", "summary_metrics"):
+                assert key in row, f"missing {key} in row {row}"
+            for metric_key in ("total_return_pct", "sharpe_ratio", "win_rate", "trade_count"):
+                assert metric_key in row["summary_metrics"], (
+                    f"missing summary_metrics.{metric_key} in row {row}"
+                )
+            # Runs without a result body have null metrics + 0 trades.
+            assert row["summary_metrics"]["total_return_pct"] is None
+            assert row["summary_metrics"]["sharpe_ratio"] is None
+            assert row["summary_metrics"]["win_rate"] is None
+            assert row["summary_metrics"]["trade_count"] == 0
+
+    def test_pagination_partitions_dataset(self, strategy_runs_test_env) -> None:
+        """page + page_size correctly partition the dataset."""
+        client, repo, _service = strategy_runs_test_env
+        strategy_id = "01HSTRAT0000000000000001"
+        for i in range(5):
+            _seed_run(
+                repo,
+                run_id=f"01HRUN000000000000000000{i}",
+                strategy_id=strategy_id,
+                status="queued",
+                created_offset_seconds=i,
+            )
+
+        # Page 1 of 3 (page_size=2): 2 rows, total_count=5, total_pages=3.
+        resp = client.get(
+            f"/strategies/{strategy_id}/runs?page=1&page_size=2",
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_count"] == 5
+        assert data["total_pages"] == 3
+        assert len(data["runs"]) == 2
+
+        # Page 3: last page, single row.
+        resp = client.get(
+            f"/strategies/{strategy_id}/runs?page=3&page_size=2",
+            headers=_auth_headers(),
+        )
+        data = resp.json()
+        assert data["page"] == 3
+        assert len(data["runs"]) == 1
+        assert data["total_pages"] == 3
+
+        # Page 4: out-of-range, empty rows but totals still populated.
+        resp = client.get(
+            f"/strategies/{strategy_id}/runs?page=4&page_size=2",
+            headers=_auth_headers(),
+        )
+        data = resp.json()
+        assert data["page"] == 4
+        assert data["runs"] == []
+        assert data["total_count"] == 5
+        assert data["total_pages"] == 3
+
+    def test_filters_to_strategy_id(self, strategy_runs_test_env) -> None:
+        """Runs for other strategies are excluded from the response."""
+        client, repo, _service = strategy_runs_test_env
+        target = "01HSTRAT0000000000000001"
+        other = "01HSTRAT0000000000000002"
+        _seed_run(
+            repo,
+            run_id="01HRUN0000000000000000001",
+            strategy_id=target,
+            status="queued",
+            created_offset_seconds=0,
+        )
+        _seed_run(
+            repo,
+            run_id="01HRUN0000000000000000002",
+            strategy_id=other,
+            status="queued",
+            created_offset_seconds=10,
+        )
+        _seed_run(
+            repo,
+            run_id="01HRUN0000000000000000003",
+            strategy_id=target,
+            status="queued",
+            created_offset_seconds=20,
+        )
+
+        resp = client.get(f"/strategies/{target}/runs", headers=_auth_headers())
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_count"] == 2
+        assert {r["id"] for r in data["runs"]} == {
+            "01HRUN0000000000000000001",
+            "01HRUN0000000000000000003",
+        }
+
+    def test_page_size_above_cap_returns_422(self, strategy_runs_test_env) -> None:
+        """``page_size`` above the cap (200) is a 422."""
+        client, _repo, _service = strategy_runs_test_env
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/runs?page=1&page_size=999",
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 422
+
+    def test_page_zero_returns_422(self, strategy_runs_test_env) -> None:
+        """``page=0`` violates the ``ge=1`` validator."""
+        client, _repo, _service = strategy_runs_test_env
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/runs?page=0&page_size=20",
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 422
+
+    def test_emits_audit_log_on_success(
+        self,
+        strategy_runs_test_env,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A successful list emits ``event=strategy_runs_browsed`` per CLAUDE.md §8."""
+        client, _repo, _service = strategy_runs_test_env
+        from services.api.routes import strategies as strategies_module
+
+        captured: list[tuple[str, dict[str, Any]]] = []
+        original_info = strategies_module.logger.info
+
+        def _spy_info(event: str, /, **kwargs: Any) -> Any:
+            captured.append((event, kwargs))
+            return original_info(event, **kwargs)
+
+        monkeypatch.setattr(strategies_module.logger, "info", _spy_info)
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/runs?page=1&page_size=20",
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200, resp.text
+
+        audit_calls = [c for c in captured if c[0] == "strategy_runs_browsed"]
+        assert len(audit_calls) == 1, (
+            f"expected exactly one strategy_runs_browsed audit line, got {len(audit_calls)}: "
+            f"{[c[0] for c in captured]}"
+        )
+        _event, kwargs = audit_calls[0]
+        assert kwargs["strategy_id"] == "01HSTRAT0000000000000001"
+        assert kwargs["page"] == 1
+        assert kwargs["page_size"] == 20
+        # CLAUDE.md §8 required structured fields:
+        assert "user_id" in kwargs
+        assert "correlation_id" in kwargs
+        assert kwargs["component"] == "strategies"
+
+    def test_requires_auth(self, strategy_runs_test_env) -> None:
+        """Request without auth is rejected before the service runs."""
+        client, _repo, _service = strategy_runs_test_env
+        app.dependency_overrides.clear()
+
+        resp = client.get("/strategies/01HSTRAT0000000000000001/runs?page=1&page_size=20")
+        assert resp.status_code in (401, 403, 422)
+
+    def test_returns_503_when_service_not_configured(self, strategy_runs_test_env) -> None:
+        """The route returns 503 when the research-run service is unwired."""
+        client, _repo, _service = strategy_runs_test_env
+        # Drop the service registration to simulate the unbootstrapped state.
+        from services.api.routes.runs import set_research_run_service
+
+        set_research_run_service(None)  # type: ignore[arg-type]
+
+        resp = client.get(
+            "/strategies/01HSTRAT0000000000000001/runs?page=1&page_size=20",
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 503

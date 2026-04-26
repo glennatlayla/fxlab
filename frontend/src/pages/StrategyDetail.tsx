@@ -52,15 +52,21 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "@/auth/useAuth";
 import { LoadingState } from "@/components/ui/LoadingState";
 import { IrDetailView } from "@/components/strategy_studio/IrDetailView";
 import { RunBacktestModal } from "@/components/strategy_studio/RunBacktestModal";
 import {
+  DEFAULT_STRATEGY_RUNS_PAGE_SIZE,
   getStrategy,
+  getStrategyRuns,
   GetStrategyError,
+  GetStrategyRunsError,
+  type RunStatus,
+  type RunSummaryItem,
   type StrategyDetail as StrategyDetailRecord,
+  type StrategyRunsPage,
 } from "@/api/strategies";
 
 // ---------------------------------------------------------------------------
@@ -196,6 +202,247 @@ function DraftFallbackPanel({ strategy }: { strategy: StrategyDetailRecord }) {
 }
 
 // ---------------------------------------------------------------------------
+// Recent runs section
+// ---------------------------------------------------------------------------
+
+/**
+ * Tailwind class fragments for the status pill, keyed by lifecycle status.
+ *
+ * Pulled into a constant so the table cells stay readable and the
+ * full set of status values is documented in one place.
+ */
+const STATUS_BADGE_STYLES: Record<RunStatus, string> = {
+  pending: "border-surface-200 bg-surface-50 text-surface-700",
+  queued: "border-surface-200 bg-surface-50 text-surface-700",
+  running: "border-blue-200 bg-blue-50 text-blue-800",
+  completed: "border-green-200 bg-green-50 text-green-800",
+  failed: "border-red-200 bg-red-50 text-red-700",
+  cancelled: "border-surface-300 bg-surface-100 text-surface-600",
+};
+
+/**
+ * Render a Decimal-as-string return percentage with two-decimal precision.
+ *
+ * Args:
+ *   value: The wire-format decimal string (e.g. ``"12.5"``) or ``null``
+ *     when the engine did not report this metric.
+ *
+ * Returns:
+ *   A formatted string (e.g. ``"12.50%"``) or em-dash for missing values.
+ */
+function formatPercent(value: string | null): string {
+  if (value === null) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return value;
+  return `${num.toFixed(2)}%`;
+}
+
+/**
+ * Render a Decimal-as-string Sharpe ratio with two-decimal precision.
+ *
+ * Args:
+ *   value: The wire-format decimal string or ``null``.
+ *
+ * Returns:
+ *   A formatted string (e.g. ``"1.45"``) or em-dash for missing values.
+ */
+function formatNumber(value: string | null): string {
+  if (value === null) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return value;
+  return num.toFixed(2);
+}
+
+/**
+ * Recent runs section — paginated table of historical runs for the strategy.
+ *
+ * Renders below the IR detail view (or draft fallback) on the
+ * StrategyDetail page. Calls ``GET /strategies/{id}/runs`` on mount and
+ * whenever the page changes; surfaces empty / error states inline so a
+ * failed history fetch never blocks the rest of the page from rendering.
+ */
+function RecentRunsSection({ strategyId }: { strategyId: string }) {
+  const navigate = useNavigate();
+
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<StrategyRunsPage | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    void (async () => {
+      try {
+        const result = await getStrategyRuns(strategyId, page, DEFAULT_STRATEGY_RUNS_PAGE_SIZE);
+        if (!cancelled) setData(result);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof GetStrategyRunsError) {
+          setErrorMessage(err.message);
+        } else {
+          setErrorMessage(err instanceof Error ? err.message : "Failed to load recent runs.");
+        }
+        setData(null);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [strategyId, page]);
+
+  const handleViewResults = useCallback(
+    (runId: string) => {
+      navigate(`/runs/${runId}/results`);
+    },
+    [navigate],
+  );
+
+  return (
+    <section
+      aria-label="Recent runs"
+      className="rounded-lg border border-surface-200 bg-white p-4"
+      data-testid="strategy-recent-runs"
+    >
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-surface-900">Recent runs</h2>
+        {data && data.total_count > 0 && (
+          <p className="text-xs text-surface-500" data-testid="strategy-recent-runs-summary">
+            {data.total_count} total · page {data.page} of {Math.max(1, data.total_pages)}
+          </p>
+        )}
+      </div>
+
+      {isLoading && (
+        <div data-testid="strategy-recent-runs-loading" className="py-6">
+          <LoadingState message="Loading recent runs…" />
+        </div>
+      )}
+
+      {!isLoading && errorMessage && (
+        <div
+          className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          data-testid="strategy-recent-runs-error"
+          role="alert"
+        >
+          <strong>Error loading recent runs:</strong> {errorMessage}
+        </div>
+      )}
+
+      {!isLoading && !errorMessage && data && data.runs.length === 0 && (
+        <p
+          className="rounded-md border border-dashed border-surface-200 bg-surface-50 px-3 py-4 text-center text-sm text-surface-500"
+          data-testid="strategy-recent-runs-empty"
+        >
+          No runs have been submitted for this strategy yet. Click "Execute backtest" to start one.
+        </p>
+      )}
+
+      {!isLoading && !errorMessage && data && data.runs.length > 0 && (
+        <>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-surface-200 text-sm">
+              <thead className="bg-surface-50 text-xs uppercase tracking-wider text-surface-500">
+                <tr>
+                  <th scope="col" className="px-3 py-2 text-left">
+                    Status
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-left">
+                    Started
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-right">
+                    Total return
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-right">
+                    Sharpe
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-right">
+                    Trades
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-right">
+                    Action
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-100">
+                {data.runs.map((row: RunSummaryItem) => (
+                  <tr key={row.id} data-testid={`recent-run-row-${row.id}`}>
+                    <td className="px-3 py-2">
+                      <span
+                        data-testid={`recent-run-status-${row.id}`}
+                        className={
+                          "rounded-full border px-2.5 py-0.5 text-xs font-medium " +
+                          STATUS_BADGE_STYLES[row.status]
+                        }
+                      >
+                        {row.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-surface-700">
+                      {row.started_at ? formatIso(row.started_at) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-surface-800">
+                      {formatPercent(row.summary_metrics.total_return_pct)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-surface-800">
+                      {formatNumber(row.summary_metrics.sharpe_ratio)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-surface-800">
+                      {row.summary_metrics.trade_count}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        data-testid={`recent-run-view-${row.id}`}
+                        onClick={() => handleViewResults(row.id)}
+                        className="inline-flex items-center rounded-md border border-brand-200 bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-800 hover:bg-brand-100"
+                      >
+                        View results
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {data.total_pages > 1 && (
+            <div className="mt-3 flex items-center justify-between text-xs text-surface-600">
+              <button
+                type="button"
+                data-testid="strategy-recent-runs-prev"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={data.page <= 1}
+                className="inline-flex items-center rounded-md border border-surface-200 bg-white px-2.5 py-1 font-medium text-surface-700 hover:bg-surface-50 disabled:cursor-not-allowed disabled:bg-surface-100 disabled:text-surface-400"
+              >
+                Previous
+              </button>
+              <span>
+                Page {data.page} of {Math.max(1, data.total_pages)}
+              </span>
+              <button
+                type="button"
+                data-testid="strategy-recent-runs-next"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={data.page >= data.total_pages}
+                className="inline-flex items-center rounded-md border border-surface-200 bg-white px-2.5 py-1 font-medium text-surface-700 hover:bg-surface-50 disabled:cursor-not-allowed disabled:bg-surface-100 disabled:text-surface-400"
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 
@@ -324,6 +571,8 @@ export default function StrategyDetail() {
       ) : (
         <DraftFallbackPanel strategy={strategy} />
       )}
+
+      <RecentRunsSection strategyId={strategy.id} />
 
       {canExecuteBacktest && strategy.parsed_ir && (
         <RunBacktestModal

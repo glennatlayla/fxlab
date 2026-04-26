@@ -156,6 +156,42 @@ class ResearchRunRepositoryInterface(ABC):
         """
 
     @abstractmethod
+    def list_by_strategy_id(
+        self,
+        *,
+        strategy_id: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[ResearchRunRecord], int]:
+        """
+        Page research runs for a strategy and return the matching total count.
+
+        Mirrors the M2.D5 ``SqlStrategyRepository.list_with_total`` shape so
+        the route layer can build a ``StrategyRunsPage`` envelope without
+        reaching into the repository's internals. Two queries hit the
+        database — one ``count(*)`` over the filtered set, one bounded
+        ``select`` for the page itself — sharing the same filter chain so
+        ``total_count`` is always consistent with the page rows.
+
+        Implementations MUST:
+            * Order rows by ``created_at`` descending (newest first).
+            * Treat ``page < 1`` as ``page = 1`` for offset purposes (the
+              route layer enforces ``page >= 1`` in production but the
+              repository must remain safe under direct tests).
+            * Treat ``page_size < 1`` as a programmer error and surface
+              it via Python's normal exception flow.
+
+        Args:
+            strategy_id: Filter by strategy ULID.
+            page: 1-based page index.
+            page_size: Maximum runs per page.
+
+        Returns:
+            Tuple of ``(records, total_count)`` — the page rows ordered
+            newest first and the total count of rows matching the filter.
+        """
+
+    @abstractmethod
     def count_by_status(self, status: ResearchRunStatus | None = None) -> int:
         """
         Count research runs, optionally filtered by status.

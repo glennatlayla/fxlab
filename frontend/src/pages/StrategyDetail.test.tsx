@@ -29,7 +29,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import StrategyDetail from "./StrategyDetail";
-import { GetStrategyError, type StrategyDetail as StrategyDetailRecord } from "@/api/strategies";
+import {
+  GetStrategyError,
+  GetStrategyRunsError,
+  type StrategyDetail as StrategyDetailRecord,
+  type StrategyRunsPage,
+} from "@/api/strategies";
 import type { StrategyIR } from "@/types/strategy_ir";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +46,7 @@ vi.mock("@/api/strategies", async (importOriginal) => {
   return {
     ...original,
     getStrategy: vi.fn(),
+    getStrategyRuns: vi.fn(),
   };
 });
 
@@ -61,9 +67,39 @@ vi.mock("@/api/runs", () => ({
   submitRunFromIr: vi.fn(),
 }));
 
-// Pull the mocked getStrategy reference for per-test arrangement.
+// Pull the mocked getStrategy / getStrategyRuns references for per-test arrangement.
 import * as strategiesApi from "@/api/strategies";
 const mockedGetStrategy = strategiesApi.getStrategy as unknown as ReturnType<typeof vi.fn>;
+const mockedGetStrategyRuns = strategiesApi.getStrategyRuns as unknown as ReturnType<typeof vi.fn>;
+
+/**
+ * Build an empty :class:`StrategyRunsPage` envelope for the recent-runs
+ * mock. Use ``pageWith`` for non-empty pages.
+ */
+function emptyRunsPage(): StrategyRunsPage {
+  return {
+    runs: [],
+    page: 1,
+    page_size: 20,
+    total_count: 0,
+    total_pages: 0,
+  };
+}
+
+/**
+ * Build a populated :class:`StrategyRunsPage` envelope for the recent-runs
+ * mock. The supplied row count drives ``total_count`` and ``total_pages``
+ * so the test can exercise the "page X of Y" copy.
+ */
+function pageWithRuns(rows: StrategyRunsPage["runs"]): StrategyRunsPage {
+  return {
+    runs: rows,
+    page: 1,
+    page_size: 20,
+    total_count: rows.length,
+    total_pages: 1,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -150,6 +186,11 @@ function renderPage(id: string = STRATEGY_ID) {
 describe("StrategyDetail page", () => {
   beforeEach(() => {
     mockedGetStrategy.mockReset();
+    mockedGetStrategyRuns.mockReset();
+    // Default: every test that does not arrange recent-runs explicitly
+    // gets an empty page so the section renders its empty-state without
+    // the test having to opt in.
+    mockedGetStrategyRuns.mockResolvedValue(emptyRunsPage());
   });
 
   it("shows a loading state while the GET /strategies/{id} call is in flight", async () => {
@@ -256,5 +297,174 @@ describe("StrategyDetail page", () => {
     });
 
     expect(screen.getByTestId("strategy-detail-error")).toHaveTextContent(/re-validation/i);
+  });
+
+  // ---------------------------------------------------------------------
+  // Recent runs section
+  // ---------------------------------------------------------------------
+
+  describe("Recent runs section", () => {
+    it("renders the empty state when the strategy has no runs", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      // Default beforeEach() arrangement already returns emptyRunsPage(),
+      // but pin it here for self-contained readability.
+      mockedGetStrategyRuns.mockResolvedValueOnce(emptyRunsPage());
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByTestId("strategy-detail-page")).toBeInTheDocument();
+      });
+
+      // The section mounts with the page body.
+      expect(screen.getByTestId("strategy-recent-runs")).toBeInTheDocument();
+
+      // Empty state appears once the GET resolves.
+      await waitFor(() => {
+        expect(screen.getByTestId("strategy-recent-runs-empty")).toBeInTheDocument();
+      });
+
+      // No table rows rendered.
+      expect(screen.queryByTestId(/^recent-run-row-/)).not.toBeInTheDocument();
+      // The endpoint was called with the strategy id.
+      expect(mockedGetStrategyRuns).toHaveBeenCalledWith(STRATEGY_ID, 1, 20);
+    });
+
+    it("renders one row per run when the API returns data", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      mockedGetStrategyRuns.mockResolvedValueOnce(
+        pageWithRuns([
+          {
+            id: "01HRUN00000000000000000001",
+            status: "completed",
+            started_at: "2026-04-25T11:55:00Z",
+            completed_at: "2026-04-25T12:00:00Z",
+            summary_metrics: {
+              total_return_pct: "12.50",
+              sharpe_ratio: "1.45",
+              win_rate: "0.55",
+              trade_count: 42,
+            },
+          },
+          {
+            id: "01HRUN00000000000000000002",
+            status: "failed",
+            started_at: "2026-04-24T11:55:00Z",
+            completed_at: "2026-04-24T12:00:00Z",
+            summary_metrics: {
+              total_return_pct: null,
+              sharpe_ratio: null,
+              win_rate: null,
+              trade_count: 0,
+            },
+          },
+        ]),
+      );
+
+      renderPage();
+
+      // Wait for the rows to render.
+      await waitFor(() => {
+        expect(screen.getByTestId("recent-run-row-01HRUN00000000000000000001")).toBeInTheDocument();
+      });
+      expect(screen.getByTestId("recent-run-row-01HRUN00000000000000000002")).toBeInTheDocument();
+
+      // Status badges show the lifecycle status.
+      expect(screen.getByTestId("recent-run-status-01HRUN00000000000000000001")).toHaveTextContent(
+        /completed/,
+      );
+      expect(screen.getByTestId("recent-run-status-01HRUN00000000000000000002")).toHaveTextContent(
+        /failed/,
+      );
+
+      // Summary cell shows the formatted return %; trades count is plain text.
+      const completedRow = screen.getByTestId("recent-run-row-01HRUN00000000000000000001");
+      expect(completedRow).toHaveTextContent(/12\.50%/);
+      expect(completedRow).toHaveTextContent(/1\.45/);
+      expect(completedRow).toHaveTextContent("42");
+
+      // The failed row renders em-dashes for missing metrics so the cells
+      // stay populated rather than collapsing to whitespace.
+      const failedRow = screen.getByTestId("recent-run-row-01HRUN00000000000000000002");
+      expect(failedRow).toHaveTextContent("—");
+
+      // Total / page summary appears.
+      expect(screen.getByTestId("strategy-recent-runs-summary")).toHaveTextContent(/2 total/);
+
+      // No empty state when there are rows.
+      expect(screen.queryByTestId("strategy-recent-runs-empty")).not.toBeInTheDocument();
+    });
+
+    it("navigates to /runs/:id/results when 'View results' is clicked", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      mockedGetStrategyRuns.mockResolvedValueOnce(
+        pageWithRuns([
+          {
+            id: "01HRUN00000000000000000001",
+            status: "completed",
+            started_at: "2026-04-25T11:55:00Z",
+            completed_at: "2026-04-25T12:00:00Z",
+            summary_metrics: {
+              total_return_pct: "12.50",
+              sharpe_ratio: "1.45",
+              win_rate: "0.55",
+              trade_count: 42,
+            },
+          },
+        ]),
+      );
+
+      // Render with a catch-all results route so we can assert the
+      // navigation actually landed on /runs/:id/results without
+      // pulling in the real route tree.
+      const renderResult = render(
+        <MemoryRouter initialEntries={[`/strategy-studio/${STRATEGY_ID}`]}>
+          <Routes>
+            <Route path="/strategy-studio/:id" element={<StrategyDetail />} />
+            <Route
+              path="/runs/:runId/results"
+              element={<div data-testid="run-results-stub" />}
+            />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      await waitFor(() => {
+        expect(
+          renderResult.getByTestId("recent-run-view-01HRUN00000000000000000001"),
+        ).toBeInTheDocument();
+      });
+
+      fireEvent.click(renderResult.getByTestId("recent-run-view-01HRUN00000000000000000001"));
+
+      // Router swapped to the stub element at /runs/:runId/results.
+      await waitFor(() => {
+        expect(renderResult.getByTestId("run-results-stub")).toBeInTheDocument();
+      });
+      // The strategy detail page is no longer mounted.
+      expect(renderResult.queryByTestId("strategy-detail-page")).not.toBeInTheDocument();
+    });
+
+    it("renders an inline error banner when the runs fetch fails", async () => {
+      mockedGetStrategy.mockResolvedValueOnce(makeIrUploadRecord());
+      mockedGetStrategyRuns.mockRejectedValueOnce(
+        new GetStrategyRunsError("Backend exploded", 503),
+      );
+
+      renderPage();
+
+      // Strategy body still loads (the recent-runs failure does not
+      // block the rest of the page).
+      await waitFor(() => {
+        expect(screen.getByTestId("strategy-detail-page")).toBeInTheDocument();
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("strategy-recent-runs-error")).toBeInTheDocument();
+      });
+      expect(screen.getByTestId("strategy-recent-runs-error")).toHaveTextContent(
+        /backend exploded/i,
+      );
+    });
   });
 });

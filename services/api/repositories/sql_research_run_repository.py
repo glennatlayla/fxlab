@@ -330,6 +330,48 @@ class SqlResearchRunRepository(ResearchRunRepositoryInterface):
         records = [self._orm_to_record(o) for o in orms]
         return records, total
 
+    def list_by_strategy_id(
+        self,
+        *,
+        strategy_id: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[ResearchRunRecord], int]:
+        """
+        Page runs for a strategy and return the matching total count.
+
+        Mirrors :meth:`SqlStrategyRepository.list_with_total` (M2.D5 commit
+        740e33e): two queries hit the database — one ``count(*)`` over the
+        filtered set, one bounded ``select`` for the page itself. Sharing
+        the filter chain keeps ``total_count`` perfectly consistent with
+        the page rows so the UI's "Page X of Y" never disagrees with the
+        rendered table on re-render.
+
+        Args:
+            strategy_id: Filter by strategy ULID.
+            page: 1-based page index. Values < 1 are clamped to 1 so the
+                method is safe under direct unit-test calls.
+            page_size: Maximum runs per page. Must be >= 1.
+
+        Returns:
+            Tuple of ``(records, total_count)`` — the page rows ordered
+            by ``created_at`` descending and the total count of rows
+            matching the strategy filter.
+
+        Raises:
+            ValueError: If ``page_size`` < 1.
+        """
+        if page_size < 1:
+            raise ValueError("page_size must be >= 1")
+        safe_page = page if page >= 1 else 1
+        offset = (safe_page - 1) * page_size
+
+        base = self._db.query(ResearchRun).filter(ResearchRun.strategy_id == strategy_id)
+        total_count = base.count()
+        orms = base.order_by(ResearchRun.created_at.desc()).offset(offset).limit(page_size).all()
+        records = [self._orm_to_record(o) for o in orms]
+        return records, total_count
+
     def count_by_status(self, status: ResearchRunStatus | None = None) -> int:
         """
         Count runs, optionally filtered by status.

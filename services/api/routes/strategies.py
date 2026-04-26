@@ -50,6 +50,10 @@ from sqlalchemy.orm import Session
 
 from libs.contracts.errors import NotFoundError, ValidationError
 from libs.contracts.governance import DraftAutosavePayload
+from libs.contracts.run_results import (
+    DEFAULT_STRATEGY_RUNS_PAGE_SIZE,
+    MAX_STRATEGY_RUNS_PAGE_SIZE,
+)
 from services.api.auth import AuthenticatedUser, require_scope
 from services.api.db import get_db
 from services.api.middleware.correlation import correlation_id_var
@@ -579,6 +583,133 @@ async def list_strategies(
     )
 
     return JSONResponse(content=result)
+
+
+# ---------------------------------------------------------------------------
+# Strategy run history (powers the StrategyDetail page's recent-runs section)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{strategy_id}/runs",
+    summary="List recent runs for a strategy (paginated, newest first)",
+)
+async def list_strategy_runs(
+    strategy_id: str = Path(..., description="Strategy ULID"),
+    page: int = Query(1, ge=1, description="1-based page index."),
+    page_size: int = Query(
+        DEFAULT_STRATEGY_RUNS_PAGE_SIZE,
+        ge=1,
+        le=MAX_STRATEGY_RUNS_PAGE_SIZE,
+        description=(
+            "Runs per page "
+            f"(default {DEFAULT_STRATEGY_RUNS_PAGE_SIZE}, "
+            f"max {MAX_STRATEGY_RUNS_PAGE_SIZE})."
+        ),
+    ),
+    user: AuthenticatedUser = Depends(require_scope("strategies:write")),
+) -> JSONResponse:
+    """
+    Return paginated run history for a given strategy.
+
+    Powers the "Recent runs" section on the StrategyDetail page. Runs
+    are ordered by ``created_at`` descending so the most recent submission
+    appears first. Each row carries the run id (used as the
+    ``/runs/{id}/results`` navigation target), the lifecycle status, the
+    started/completed timestamps, and the compact summary metrics
+    (``total_return_pct``, ``sharpe_ratio``, ``win_rate``, ``trade_count``)
+    surfaced on the table row.
+
+    Auth scope: ``strategies:write`` (matches every other strategy
+    endpoint in this module — the project's ROLE_SCOPES vocabulary
+    does not define a distinct ``strategies:read`` scope).
+
+    Args:
+        strategy_id: ULID of the strategy whose run history to fetch.
+        page: 1-based page index (default 1).
+        page_size: Runs per page (1-200, default 20).
+        user: Authenticated user with ``strategies:write`` scope.
+
+    Returns:
+        200 JSONResponse. Body shape:
+        ``{runs: [{id, status, started_at, completed_at, summary_metrics:
+        {total_return_pct, sharpe_ratio, win_rate, trade_count}}, ...],
+        page, page_size, total_count, total_pages}``.
+
+        Pages beyond the last populated page return an empty ``runs``
+        list with ``total_count`` and ``total_pages`` unchanged so the
+        UI can disable the "Next" button.
+
+    Raises:
+        HTTPException 422: If ``page`` < 1 or ``page_size`` outside
+            [1, 200] (FastAPI's ``ge`` / ``le`` validators).
+        HTTPException 503: If the research-run service is not configured
+            (raised by :func:`_get_research_run_service`).
+
+    Example:
+        GET /strategies/01HSTRAT0000000000000001/runs?page=1&page_size=20
+        → 200 {"runs": [{"id": "01HRUN...", "status": "completed",
+                        "started_at": "...", "completed_at": "...",
+                        "summary_metrics": {...}}, ...],
+                "page": 1, "page_size": 20,
+                "total_count": 5, "total_pages": 1}
+    """
+    corr_id = correlation_id_var.get("no-corr")
+    service = _get_research_run_service()
+
+    page_obj = service.list_runs_for_strategy(
+        strategy_id,
+        page=page,
+        page_size=page_size,
+    )
+    body = page_obj.model_dump(mode="json")
+
+    # Audit log per CLAUDE.md §8 — operators expect a per-request line
+    # so they can see who browsed which strategy's run history.
+    # ``strategy_runs_browsed`` is the literal event name; structlog
+    # binds the first positional arg as the ``event`` key.
+    logger.info(
+        "strategy_runs_browsed",
+        strategy_id=strategy_id,
+        page=page,
+        page_size=page_size,
+        returned=len(body["runs"]),
+        total_count=body["total_count"],
+        user_id=user.user_id,
+        correlation_id=corr_id,
+        component="strategies",
+        operation="list_strategy_runs",
+    )
+
+    return JSONResponse(content=body)
+
+
+def _get_research_run_service() -> Any:
+    """
+    Resolve the registered :class:`ResearchRunService` for the runs route.
+
+    The strategy router does not own the research-run service DI — the
+    runs router does (see :func:`services.api.routes.runs.set_research_run_service`).
+    We re-use that registration so this endpoint stays consistent with
+    the rest of the run history surface, and so the application bootstrap
+    in ``services/api/main.py`` does not have to wire the service twice.
+
+    Returns:
+        The registered :class:`ResearchRunService` instance.
+
+    Raises:
+        HTTPException 503: If no service has been registered.
+    """
+    # Local import keeps the dependency cycle explicit and avoids
+    # importing the runs router at module import time.
+    from services.api.routes.runs import _research_run_service
+
+    if _research_run_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Research run service not configured.",
+        )
+    return _research_run_service
 
 
 @router.post("/validate-dsl", summary="Validate DSL expression")

@@ -405,3 +405,138 @@ export async function listStrategies(
     throw err;
   }
 }
+
+// ---------------------------------------------------------------------------
+// GET /strategies/{strategy_id}/runs — recent runs section on StrategyDetail
+// ---------------------------------------------------------------------------
+
+/** Default page size for the recent-runs section on the StrategyDetail page. */
+export const DEFAULT_STRATEGY_RUNS_PAGE_SIZE = 20;
+
+/** Lifecycle status values surfaced on the recent-runs row. */
+export type RunStatus = "pending" | "queued" | "running" | "completed" | "failed" | "cancelled";
+
+/**
+ * Compact summary metrics surfaced inline on a recent-runs row.
+ *
+ * Mirrors :class:`libs.contracts.run_results.RunSummaryMetrics`. Decimal
+ * fields arrive over the wire as strings (Pydantic default Decimal
+ * encoding) so the frontend table can render them via standard
+ * string-to-number coercion when needed; ``null`` means "engine did not
+ * report this metric" and is rendered as an em-dash.
+ */
+export interface RunSummaryMetrics {
+  /** Total return percentage. ``null`` when the run produced no result. */
+  total_return_pct: string | null;
+  /** Annualised Sharpe ratio. ``null`` when not available. */
+  sharpe_ratio: string | null;
+  /** Fraction of winning trades, 0.0-1.0. ``null`` when not available. */
+  win_rate: string | null;
+  /** Total trade count; ``0`` when the run produced no result body. */
+  trade_count: number;
+}
+
+/**
+ * One row in the recent-runs section on the StrategyDetail page.
+ *
+ * Mirrors :class:`libs.contracts.run_results.RunSummaryItem`. Clicking the
+ * row's "View results" button navigates to ``/runs/{id}/results``.
+ */
+export interface RunSummaryItem {
+  /** ULID of the run; navigation target for ``/runs/{id}/results``. */
+  id: string;
+  /** Lifecycle status. Drives the status pill variant. */
+  status: RunStatus;
+  /** ISO-8601 timestamp when execution began. ``null`` for QUEUED runs. */
+  started_at: string | null;
+  /** ISO-8601 timestamp when execution finished. ``null`` for non-terminal. */
+  completed_at: string | null;
+  /** Headline metrics surfaced on the row. */
+  summary_metrics: RunSummaryMetrics;
+}
+
+/**
+ * Response body for ``GET /strategies/{strategy_id}/runs``.
+ *
+ * Mirrors :class:`libs.contracts.run_results.StrategyRunsPage`. The frontend
+ * grid renders ``runs`` and uses ``page`` / ``page_size`` / ``total_count``
+ * / ``total_pages`` to drive Next/Prev affordances and "Page X of Y" copy.
+ */
+export interface StrategyRunsPage {
+  runs: RunSummaryItem[];
+  page: number;
+  page_size: number;
+  total_count: number;
+  total_pages: number;
+}
+
+/**
+ * Typed error for ``GET /strategies/{strategy_id}/runs`` failures.
+ *
+ * Carries the HTTP status and the backend ``detail`` string so the
+ * recent-runs section can render a typed banner without parsing
+ * free-form messages.
+ */
+export class GetStrategyRunsError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "GetStrategyRunsError";
+  }
+}
+
+/**
+ * Fetch one page of recent runs for a given strategy.
+ *
+ * Args:
+ *   strategyId: ULID of the strategy whose run history to fetch.
+ *   page: 1-based page index (default 1).
+ *   page_size: Runs per page (server-capped at 200; default 20).
+ *
+ * Returns:
+ *   A :class:`StrategyRunsPage` envelope ready for the recent-runs table.
+ *
+ * Raises:
+ *   GetStrategyRunsError when the backend returns a non-2xx response.
+ *     ``statusCode`` carries the HTTP status (422 for invalid pagination,
+ *     503 when the research-run service is not configured, 401 for
+ *     missing auth handled by the global interceptor).
+ *   AxiosError on network failure.
+ *
+ * Example:
+ *   const page = await getStrategyRuns("01HZ...", 1, 20);
+ *   for (const row of page.runs) console.log(row.id, row.status);
+ */
+export async function getStrategyRuns(
+  strategyId: string,
+  page: number = 1,
+  page_size: number = DEFAULT_STRATEGY_RUNS_PAGE_SIZE,
+): Promise<StrategyRunsPage> {
+  try {
+    const resp = await apiClient.get<StrategyRunsPage>(`/strategies/${strategyId}/runs`, {
+      params: {
+        page: String(page),
+        page_size: String(page_size),
+      },
+    });
+    return resp.data;
+  } catch (err) {
+    if (err instanceof AxiosError && err.response) {
+      const status = err.response.status;
+      const detailRaw = err.response.data?.detail;
+      const detail =
+        typeof detailRaw === "string"
+          ? detailRaw
+          : `Failed to load runs for strategy ${strategyId} (status ${status})`;
+      throw new GetStrategyRunsError(
+        detail,
+        status,
+        typeof detailRaw === "string" ? detailRaw : undefined,
+      );
+    }
+    throw err;
+  }
+}

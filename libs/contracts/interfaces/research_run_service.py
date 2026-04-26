@@ -38,6 +38,7 @@ from libs.contracts.research_run import (
 from libs.contracts.run_results import (
     EquityCurveResponse,
     RunMetrics,
+    StrategyRunsPage,
     TradeBlotterPage,
 )
 
@@ -197,6 +198,43 @@ class ResearchRunServiceInterface(ABC):
             NotFoundError: If no record exists for ``run_id``.
             RunNotCompletedError: If the run is not COMPLETED.
             ValueError: If ``page`` < 1 or ``page_size`` < 1.
+        """
+
+    @abstractmethod
+    def list_runs_for_strategy(
+        self,
+        strategy_id: str,
+        *,
+        page: int,
+        page_size: int,
+    ) -> StrategyRunsPage:
+        """
+        Return one page of the recent-runs history for a given strategy.
+
+        Powers the "Recent runs" section on the StrategyDetail page. The
+        service projects the persistence-layer
+        :class:`ResearchRunRecord` rows into the wire-shaped
+        :class:`StrategyRunsPage` (status, timestamps, headline metrics)
+        so the route layer can serialise them directly.
+
+        Implementations MUST:
+            * Order rows by ``created_at`` descending (newest first).
+            * Populate ``total_count`` and ``total_pages`` even when the
+              requested page is empty so the UI can disable the "Next"
+              affordance without re-querying.
+            * Default missing summary fields to ``None`` rather than
+              fabricating zero values — consumers must be able to
+              distinguish "engine produced 0" from "engine did not
+              report this metric".
+
+        Args:
+            strategy_id: ULID of the strategy whose run history to fetch.
+            page: 1-based page index.
+            page_size: Maximum runs per page.
+
+        Returns:
+            :class:`StrategyRunsPage` — already validated against the
+            response schema, ready to ``model_dump`` for JSON output.
         """
 
     @abstractmethod

@@ -68,6 +68,9 @@ from libs.contracts.run_results import (
     EquityCurvePoint,
     EquityCurveResponse,
     RunMetrics,
+    RunSummaryItem,
+    RunSummaryMetrics,
+    StrategyRunsPage,
     TradeBlotterEntry,
     TradeBlotterPage,
 )
@@ -76,6 +79,7 @@ from libs.strategy_ir.interfaces.dataset_resolver_interface import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover -- typing-only import to avoid cycle
+    from services.api.services.run_executor_pool import RunExecutorPool
     from services.api.services.synthetic_backtest_executor import (
         SyntheticBacktestExecutor,
     )
@@ -135,6 +139,7 @@ class ResearchRunService(ResearchRunServiceInterface):
         *,
         executor: SyntheticBacktestExecutor | None = None,
         ir_loader: IRLoader | None = None,
+        executor_pool: RunExecutorPool | None = None,
     ) -> None:
         """
         Construct the service.
@@ -153,10 +158,27 @@ class ResearchRunService(ResearchRunServiceInterface):
                 Typically a thin closure around
                 :meth:`StrategyService.get_strategy` that returns the
                 ``parsed_code`` field.
+            executor_pool: Optional :class:`RunExecutorPool`. When wired,
+                :meth:`submit_from_ir` with ``auto_execute=False`` will
+                queue the run AND submit it to the pool for background
+                execution -- the route layer maps that to HTTP 202
+                Accepted. When ``None``, ``auto_execute=False`` keeps
+                the legacy M2.C2 contract: queue only, no execution.
         """
         self._repo = repo
         self._executor = executor
         self._ir_loader = ir_loader
+        self._executor_pool = executor_pool
+
+    @property
+    def executor_pool(self) -> RunExecutorPool | None:
+        """
+        Read-only accessor for the optional background pool.
+
+        Tests use this to await pool drain after a deferred submission;
+        production code does not need it.
+        """
+        return self._executor_pool
 
     # ------------------------------------------------------------------
     # submit_run
@@ -368,12 +390,53 @@ class ResearchRunService(ResearchRunServiceInterface):
 
         queued = self.submit_run(config, user_id, correlation_id=correlation_id)
 
+        # Deferred-execution path: when the caller explicitly opted out
+        # of synchronous execution AND the pool is wired, hand the run
+        # off so it actually runs in the background. Without the pool,
+        # the legacy QUEUED-only contract is preserved (caller owns
+        # dispatch). Without ir_loader the worker cannot build a
+        # request, so we degrade to QUEUED-only there too.
+        if not auto_execute:
+            if self._executor_pool is not None and self._ir_loader is not None:
+                from services.api.services.run_executor_pool import (
+                    build_submission,
+                )
+
+                self._executor_pool.submit(
+                    build_submission(
+                        run_id=queued.id,
+                        strategy_id=strategy_id,
+                        experiment_plan=experiment_plan,
+                        resolved_dataset=resolved_dataset,
+                        correlation_id=correlation_id,
+                    )
+                )
+                logger.info(
+                    "research_run.submit_from_ir.deferred_to_pool",
+                    run_id=queued.id,
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    component="research_run_service",
+                )
+            else:
+                logger.info(
+                    "research_run.submit_from_ir.deferred_no_pool",
+                    run_id=queued.id,
+                    strategy_id=strategy_id,
+                    pool_wired=self._executor_pool is not None,
+                    ir_loader_wired=self._ir_loader is not None,
+                    correlation_id=correlation_id,
+                    component="research_run_service",
+                    detail="defer_execution requested but background pool "
+                    "and/or ir_loader unwired; run remains QUEUED for "
+                    "external dispatch.",
+                )
+            return queued
+
         # Auto-execute path: only fires when explicitly requested AND
         # both the executor and the IR loader were injected. We do not
         # silently swap to QUEUED-only when the executor is missing;
         # instead we log loudly so an operator can spot misconfiguration.
-        if not auto_execute:
-            return queued
         if self._executor is None or self._ir_loader is None:
             logger.warning(
                 "research_run.submit_from_ir.auto_execute_skipped",
@@ -1058,3 +1121,149 @@ class ResearchRunService(ResearchRunServiceInterface):
             raise RunNotCompletedError(run_id, record.status)
 
         return record
+
+    # ------------------------------------------------------------------
+    # list_runs_for_strategy (StrategyDetail recent-runs section)
+    # ------------------------------------------------------------------
+    #
+    # Method intentionally appended at the END of the class to minimise
+    # merge friction with the sibling tranche modifying the run-executor
+    # bootstrap above. Do not interleave with the existing methods.
+
+    def list_runs_for_strategy(
+        self,
+        strategy_id: str,
+        *,
+        page: int,
+        page_size: int,
+    ) -> StrategyRunsPage:
+        """
+        Return one page of the recent-runs history for a given strategy.
+
+        Wraps :meth:`ResearchRunRepositoryInterface.list_by_strategy_id`
+        and projects the persistence-layer
+        :class:`ResearchRunRecord` rows into the wire-shaped
+        :class:`StrategyRunsPage` value object the route serialises.
+
+        Args:
+            strategy_id: ULID of the strategy whose runs to list.
+            page: 1-based page index (validated by the route layer).
+            page_size: Maximum runs per page (capped by the route layer).
+
+        Returns:
+            :class:`StrategyRunsPage` — already validated against the
+            response schema, ready to ``model_dump`` for JSON output.
+
+        Example:
+            page = service.list_runs_for_strategy(
+                "01HSTRAT0000000000000001",
+                page=1,
+                page_size=20,
+            )
+            assert page.runs[0].id.startswith("01H")
+        """
+        records, total_count = self._repo.list_by_strategy_id(
+            strategy_id=strategy_id,
+            page=page,
+            page_size=page_size,
+        )
+
+        items: list[RunSummaryItem] = [
+            RunSummaryItem(
+                id=record.id,
+                status=record.status.value,
+                started_at=record.started_at,
+                completed_at=record.completed_at,
+                summary_metrics=self._project_summary_metrics(record),
+            )
+            for record in records
+        ]
+
+        # ceil(total_count / page_size) without importing math.
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        result = StrategyRunsPage(
+            runs=items,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=total_pages,
+        )
+
+        logger.info(
+            "research_run.list_for_strategy.completed",
+            strategy_id=strategy_id,
+            page=page,
+            page_size=page_size,
+            returned=len(items),
+            total_count=total_count,
+            component="research_run_service",
+            operation="list_runs_for_strategy",
+        )
+
+        return result
+
+    @staticmethod
+    def _project_summary_metrics(record: ResearchRunRecord) -> RunSummaryMetrics:
+        """
+        Build the compact summary surfaced on the recent-runs row.
+
+        Selection rule: prefer the explicit ``backtest_result`` fields
+        (most accurate, typed Decimal), then fall back to the
+        ``summary_metrics`` flat map (engine-specific keys), then
+        leave fields ``None`` so consumers can distinguish "engine
+        produced 0" from "engine did not report this metric".
+
+        Args:
+            record: The persisted research run record.
+
+        Returns:
+            :class:`RunSummaryMetrics`. For runs without a populated
+            ``result`` (PENDING / QUEUED / RUNNING / FAILED-without-
+            result) every field is ``None`` and ``trade_count`` is 0.
+        """
+        result = record.result
+        if result is None:
+            return RunSummaryMetrics()
+
+        backtest_result = result.backtest_result
+        if backtest_result is not None:
+            return RunSummaryMetrics(
+                total_return_pct=backtest_result.total_return_pct,
+                sharpe_ratio=backtest_result.sharpe_ratio,
+                win_rate=backtest_result.win_rate,
+                trade_count=backtest_result.total_trades,
+            )
+
+        # No backtest_result body — try the flat summary_metrics map.
+        # Engine-specific keys vary; we read the four canonical names the
+        # synchronous executor emits (see _execute_synchronously above)
+        # and accept either string or numeric values.
+        flat = result.summary_metrics or {}
+
+        def _to_decimal(value: object) -> Decimal | None:
+            if value is None:
+                return None
+            try:
+                return Decimal(str(value))
+            except (ArithmeticError, ValueError):
+                return None
+
+        def _to_int(value: object) -> int:
+            if value is None:
+                return 0
+            try:
+                # ``int(Decimal(...))`` truncates the fractional part —
+                # backtest engines never emit a fractional trade count
+                # so truncation is harmless and avoids ValueError on
+                # "42.0" inputs.
+                return int(Decimal(str(value)))
+            except (ArithmeticError, ValueError):
+                return 0
+
+        return RunSummaryMetrics(
+            total_return_pct=_to_decimal(flat.get("total_return_pct")),
+            sharpe_ratio=_to_decimal(flat.get("sharpe_ratio")),
+            win_rate=_to_decimal(flat.get("win_rate")),
+            trade_count=_to_int(flat.get("total_trades") or flat.get("trade_count")),
+        )
