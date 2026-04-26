@@ -48,6 +48,7 @@ import {
 } from "recharts";
 import { useAuth } from "@/auth/useAuth";
 import {
+  exportBlotterCsv,
   getBlotter,
   getEquityCurve,
   getMetrics,
@@ -657,6 +658,16 @@ export default function RunResults() {
   const [error, setError] = useState<string | null>(null);
   const [isCompareModalOpen, setIsCompareModalOpen] = useState<boolean>(false);
 
+  // Export-blotter-csv state. ``exportStatus`` carries the inline toast-style
+  // confirmation / error message so operators see immediate feedback without
+  // a separate notification system. ``isExporting`` gates the button while
+  // the CSV stream downloads to prevent double-click races.
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [exportStatus, setExportStatus] = useState<{
+    kind: "success" | "error";
+    message: string;
+  } | null>(null);
+
   // Initial fetch — metrics + equity curve + page 1 of blotter in parallel.
   useEffect(() => {
     if (!runId) return;
@@ -715,6 +726,53 @@ export default function RunResults() {
     [runId],
   );
 
+  // Handle the "Export blotter (CSV)" click.
+  //
+  // Flow:
+  //   1. Disable the button (isExporting=true) so the user cannot
+  //      double-click while the CSV stream is in flight.
+  //   2. Call exportBlotterCsv(runId) which returns the response Blob.
+  //   3. Wrap the Blob in an object URL, attach it to a temporary anchor
+  //      with the canonical filename ``run-{runId}-blotter.csv``, click
+  //      the anchor to trigger the browser download dialog, then revoke
+  //      the URL so the blob is GC'd.
+  //   4. Surface success ("Blotter downloaded") or the typed error
+  //      message via the inline ``exportStatus`` banner. The same error
+  //      formatter the page uses for the load-time error banner is
+  //      re-used so 404 / 409 / 401 / 403 / network failures all surface
+  //      with consistent wording.
+  const handleExportBlotter = useCallback(async () => {
+    if (!runId) return;
+    setIsExporting(true);
+    setExportStatus(null);
+    try {
+      const blob = await exportBlotterCsv(runId);
+      const url = URL.createObjectURL(blob);
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `run-${runId}-blotter.csv`;
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        try {
+          anchor.click();
+        } finally {
+          document.body.removeChild(anchor);
+        }
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      setExportStatus({ kind: "success", message: "Blotter downloaded." });
+    } catch (err) {
+      setExportStatus({
+        kind: "error",
+        message: `Export failed: ${getErrorMessage(err, runId)}`,
+      });
+    } finally {
+      setIsExporting(false);
+    }
+  }, [runId]);
+
   if (!runId) {
     return (
       <div className="p-6" data-testid="run-results-no-run-id">
@@ -746,6 +804,50 @@ export default function RunResults() {
               </span>
             ) : null}
           </p>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          {/*
+           * Export-blotter button. Disabled until the run has loaded a
+           * metrics payload (which only happens for terminal/COMPLETED
+           * runs since the JSON metrics endpoint returns 409 otherwise),
+           * and while a download is in flight. The inline status pill
+           * below confirms success ("Blotter downloaded.") or surfaces
+           * the typed error message — no separate toast library to
+           * pull in.
+           */}
+          <button
+            type="button"
+            onClick={handleExportBlotter}
+            disabled={isExporting || metrics === null}
+            className="inline-flex items-center gap-2 rounded-md border border-surface-300 bg-white px-3 py-1.5 text-sm font-medium text-surface-700 shadow-sm hover:bg-surface-50 disabled:cursor-not-allowed disabled:opacity-50"
+            data-testid="export-blotter-csv-button"
+          >
+            {isExporting ? (
+              <>
+                <span
+                  className="h-3 w-3 animate-spin rounded-full border-2 border-surface-400 border-t-transparent"
+                  aria-hidden="true"
+                  data-testid="export-blotter-csv-spinner"
+                />
+                Exporting…
+              </>
+            ) : (
+              "Export blotter (CSV)"
+            )}
+          </button>
+          {exportStatus ? (
+            <p
+              className={
+                exportStatus.kind === "success"
+                  ? "text-xs text-green-600"
+                  : "text-xs text-red-600"
+              }
+              role="status"
+              data-testid="export-blotter-csv-status"
+            >
+              {exportStatus.message}
+            </p>
+          ) : null}
         </div>
       </header>
 

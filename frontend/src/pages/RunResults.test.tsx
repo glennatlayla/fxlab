@@ -42,6 +42,7 @@ vi.mock("@/api/run_results", async (importOriginal) => {
     getMetrics: vi.fn(),
     getEquityCurve: vi.fn(),
     getBlotter: vi.fn(),
+    exportBlotterCsv: vi.fn(),
   };
 });
 
@@ -360,5 +361,109 @@ describe("RunResults page (M2.D4)", () => {
     });
 
     expect(screen.getByTestId("run-results-error")).toHaveTextContent(RUN_ID);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Export blotter (CSV)
+  // ---------------------------------------------------------------------------
+
+  it(
+    "clicks Export blotter (CSV) once and triggers an anchor download for a completed run",
+    async () => {
+      vi.mocked(runResultsApi.getMetrics).mockResolvedValue(makeMetrics());
+      vi.mocked(runResultsApi.getEquityCurve).mockResolvedValue(makeEquityCurve(3));
+      vi.mocked(runResultsApi.getBlotter).mockResolvedValue(makeBlotterPage(1, 100, 250));
+
+      const blob = new Blob(
+        [
+          "trade_id,symbol,side,entry_time,exit_time,units,entry_price,exit_price,fees,realized_pnl,holding_period_seconds\n",
+        ],
+        { type: "text/csv" },
+      );
+      vi.mocked(runResultsApi.exportBlotterCsv).mockResolvedValue(blob);
+
+      // Stub URL.createObjectURL / revokeObjectURL (jsdom does not implement them).
+      const createObjectURL = vi.fn(() => "blob:mock-url");
+      const revokeObjectURL = vi.fn();
+      const originalCreate = (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+      const originalRevoke = (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+      Object.defineProperty(URL, "createObjectURL", {
+        value: createObjectURL,
+        writable: true,
+        configurable: true,
+      });
+      Object.defineProperty(URL, "revokeObjectURL", {
+        value: revokeObjectURL,
+        writable: true,
+        configurable: true,
+      });
+
+      // Spy on HTMLAnchorElement click so we can assert the download was triggered.
+      const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {
+        /* prevent actual navigation */
+      });
+
+      try {
+        renderPage();
+
+        const button = await screen.findByTestId("export-blotter-csv-button");
+        // Wait for the page to finish loading metrics so the button enables.
+        await waitFor(() => {
+          expect(button).not.toBeDisabled();
+        });
+
+        fireEvent.click(button);
+
+        await waitFor(() => {
+          expect(runResultsApi.exportBlotterCsv).toHaveBeenCalledTimes(1);
+        });
+        expect(runResultsApi.exportBlotterCsv).toHaveBeenCalledWith(RUN_ID);
+        expect(createObjectURL).toHaveBeenCalledWith(blob);
+        expect(anchorClick).toHaveBeenCalledTimes(1);
+
+        await waitFor(() => {
+          expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-url");
+        });
+
+        // Success status surfaces inline so the operator sees confirmation.
+        await waitFor(() => {
+          expect(screen.getByTestId("export-blotter-csv-status")).toHaveTextContent(
+            /Blotter downloaded/i,
+          );
+        });
+      } finally {
+        anchorClick.mockRestore();
+        // jsdom defines URL as a non-configurable class — restore the
+        // original (or undefined) via defineProperty rather than `delete`,
+        // which throws on non-configurable properties.
+        Object.defineProperty(URL, "createObjectURL", {
+          value: originalCreate,
+          writable: true,
+          configurable: true,
+        });
+        Object.defineProperty(URL, "revokeObjectURL", {
+          value: originalRevoke,
+          writable: true,
+          configurable: true,
+        });
+      }
+    },
+  );
+
+  it("disables the Export blotter (CSV) button when the run is in-progress (409)", async () => {
+    const conflict = new runResultsApi.RunResultsConflictError(RUN_ID);
+    vi.mocked(runResultsApi.getMetrics).mockRejectedValue(conflict);
+    vi.mocked(runResultsApi.getEquityCurve).mockRejectedValue(conflict);
+    vi.mocked(runResultsApi.getBlotter).mockRejectedValue(conflict);
+
+    renderPage();
+
+    // The error banner appears once the in-progress conflict surfaces.
+    await waitFor(() => {
+      expect(screen.getByTestId("run-results-error")).toBeInTheDocument();
+    });
+
+    const button = screen.getByTestId("export-blotter-csv-button");
+    expect(button).toBeDisabled();
   });
 });

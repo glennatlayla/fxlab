@@ -265,3 +265,45 @@ export async function getBlotter(
     throw normalizeError(err, runId);
   }
 }
+
+/**
+ * Download the round-trip trade blotter for a completed run as a CSV blob.
+ *
+ * The backend streams ``text/csv`` bytes via ``StreamingResponse``; here we
+ * request ``responseType: "blob"`` so axios exposes the body as a Blob the
+ * caller can hand to ``URL.createObjectURL`` for a browser download. The
+ * shared ``apiClient`` adds the auth header and X-Correlation-Id automatically.
+ *
+ * Args:
+ *   runId: ULID of the run to export.
+ *   signal: Optional AbortSignal for request cancellation.
+ *
+ * Returns:
+ *   A Blob containing the CSV body; the MIME type is preserved from the
+ *   server response (``text/csv``).
+ *
+ * Raises:
+ *   RunResultsNotFoundError, RunResultsConflictError, RunResultsAuthError,
+ *   RunResultsValidationError, RunResultsNetworkError — same hierarchy as
+ *   the JSON results helpers so the page can re-use its error formatter.
+ *
+ * Example:
+ *   const blob = await exportBlotterCsv("01HRUN0000000000000000000A");
+ *   const url = URL.createObjectURL(blob);
+ *   const anchor = document.createElement("a");
+ *   anchor.href = url;
+ *   anchor.download = "run-01HRUN…-blotter.csv";
+ *   anchor.click();
+ *   URL.revokeObjectURL(url);
+ */
+export async function exportBlotterCsv(runId: string, signal?: AbortSignal): Promise<Blob> {
+  try {
+    const resp = await apiClient.get<Blob>(`/runs/${runId}/exports/blotter.csv`, {
+      responseType: "blob",
+      signal,
+    });
+    return resp.data;
+  } catch (err) {
+    throw normalizeError(err, runId);
+  }
+}
