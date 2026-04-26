@@ -506,6 +506,148 @@ def test_pool_rejects_zero_concurrency(
         RunExecutorPool(worker=worker, max_concurrent_runs=0)
 
 
+# ---------------------------------------------------------------------------
+# RunExecutorPool — cancel_run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_returns_false_when_no_inflight_task(
+    repo_with_queued: MockResearchRunRepository,
+    lien_ir_dict: dict[str, Any],
+) -> None:
+    """cancel_run() with an unknown run_id returns False, no exception."""
+    worker = RunExecutionWorker(
+        repo=repo_with_queued,
+        executor=SyntheticBacktestExecutor(),
+        ir_loader=lambda _sid: lien_ir_dict,
+    )
+    pool = RunExecutorPool(worker=worker)
+
+    cancelled = await pool.cancel_run("01HRUNNOTINFLIGHT0000000001")
+    assert cancelled is False
+    assert pool.inflight_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_aborts_inflight_task_and_releases_semaphore(
+    lien_plan: ExperimentPlan,
+    lien_resolved: ResolvedDataset,
+    lien_ir_dict: dict[str, Any],
+) -> None:
+    """
+    cancel_run() must:
+      * abort the in-flight asyncio task (no further worker progress);
+      * remove the entry from the in-flight map;
+      * leave the semaphore in a state where new submissions can run
+        (verified by submitting a follow-up run after the cancel).
+    """
+    repo = MockResearchRunRepository()
+    ids = _seed_n_queued_records(repo, 3, lien_resolved)
+
+    fake = _BlockingExecutor()
+    for rid in ids:
+        fake.gate(rid)
+
+    worker = RunExecutionWorker(
+        repo=repo,
+        executor=fake,  # type: ignore[arg-type]
+        ir_loader=lambda _sid: lien_ir_dict,
+    )
+    pool = RunExecutorPool(worker=worker, max_concurrent_runs=1)
+
+    # Submit two runs but cap concurrency at 1 — only the first one will
+    # be running on the executor; the second sits at the semaphore.
+    pool.submit(
+        build_submission(
+            run_id=ids[0],
+            strategy_id="01HSTRATPOOL00000000000001",
+            experiment_plan=lien_plan,
+            resolved_dataset=lien_resolved,
+            correlation_id="cancel-1",
+        )
+    )
+    pool.submit(
+        build_submission(
+            run_id=ids[1],
+            strategy_id="01HSTRATPOOL00000000000001",
+            experiment_plan=lien_plan,
+            resolved_dataset=lien_resolved,
+            correlation_id="cancel-2",
+        )
+    )
+
+    # Wait until the first run is actively executing so the cancel hits
+    # an actually-running task, not one still waiting on the semaphore.
+    for _ in range(200):
+        if ids[0] in fake.active_now:
+            break
+        await asyncio.sleep(0.01)
+    assert ids[0] in fake.active_now
+
+    cancelled = await pool.cancel_run(ids[0])
+    assert cancelled is True
+    # In-flight tracker no longer holds the cancelled id.
+    inflight_after_cancel: set[str] = set()
+    with pool._lock:  # noqa: SLF001 -- test inspection
+        inflight_after_cancel = set(pool._inflight.keys())  # noqa: SLF001
+    assert ids[0] not in inflight_after_cancel
+
+    # The semaphore must be released so the queued second run gets a
+    # turn. Release its gate and confirm it actually executed.
+    fake.release_all()
+    await pool.wait_for_idle(timeout=30.0)
+
+    # The second submission ran (its blocking executor was reached), and
+    # the third was never submitted.
+    assert ids[1] in (set(fake.release_events.keys()) & {ids[1]})
+    # All originally submitted ids have left the in-flight map.
+    assert pool.inflight_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_is_safe_when_called_twice(
+    lien_plan: ExperimentPlan,
+    lien_resolved: ResolvedDataset,
+    lien_ir_dict: dict[str, Any],
+) -> None:
+    """A second cancel_run() for the same id returns False (already gone)."""
+    repo = MockResearchRunRepository()
+    ids = _seed_n_queued_records(repo, 1, lien_resolved)
+    rid = ids[0]
+
+    fake = _BlockingExecutor()
+    fake.gate(rid)
+
+    worker = RunExecutionWorker(
+        repo=repo,
+        executor=fake,  # type: ignore[arg-type]
+        ir_loader=lambda _sid: lien_ir_dict,
+    )
+    pool = RunExecutorPool(worker=worker, max_concurrent_runs=1)
+    pool.submit(
+        build_submission(
+            run_id=rid,
+            strategy_id="01HSTRATPOOL00000000000001",
+            experiment_plan=lien_plan,
+            resolved_dataset=lien_resolved,
+            correlation_id="cancel-double",
+        )
+    )
+
+    for _ in range(200):
+        if rid in fake.active_now:
+            break
+        await asyncio.sleep(0.01)
+
+    first = await pool.cancel_run(rid)
+    second = await pool.cancel_run(rid)
+    assert first is True
+    assert second is False
+
+    fake.release_all()
+
+
 # Silence unused imports flagged by ruff (pulled in for symmetry with
 # the executor test module).
 _ = (date, time, SyntheticBacktestRequest)

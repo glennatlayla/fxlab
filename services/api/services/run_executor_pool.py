@@ -463,6 +463,10 @@ class RunExecutorPool:
         # (FastAPI request handlers may submit from sync helpers via
         # `asyncio.run_coroutine_threadsafe`).
         self._lock = threading.Lock()
+        # Coroutine-level mutex used by :meth:`cancel_run` to serialise
+        # concurrent cancel requests for the same run_id. Built lazily on
+        # first use so it binds to the loop that actually owns the pool.
+        self._cancel_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -545,6 +549,93 @@ class RunExecutorPool:
             component="run_executor_pool",
         )
         return task
+
+    async def cancel_run(self, run_id: str) -> bool:
+        """
+        Cancel an in-flight task for ``run_id`` if one exists.
+
+        Looks the task up in the in-flight tracker; if present, calls
+        :meth:`asyncio.Task.cancel` and awaits the task so the
+        ``CancelledError`` propagation completes deterministically before
+        we return. The ``async with self._semaphore`` block in
+        :meth:`_run` guarantees the semaphore slot is released as part of
+        the unwind, even when the task is cancelled mid-execution.
+
+        Args:
+            run_id: The ULID whose in-flight task should be aborted.
+
+        Returns:
+            ``True`` if a task existed for ``run_id`` and was cancelled.
+            ``False`` if no such task was tracked (already completed,
+            never submitted, or cancelled by an earlier call).
+
+        Example::
+
+            cancelled = await pool.cancel_run("01H...")
+            if cancelled:
+                logger.info("aborted in-flight run %s", run_id)
+        """
+        # Bind the cancel-side lock to the running loop on first use; the
+        # ``threading.Lock`` continues to guard ``_inflight`` for the
+        # cross-thread invariants ``submit`` relies on.
+        if self._cancel_lock is None:
+            self._cancel_lock = asyncio.Lock()
+
+        async with self._cancel_lock:
+            # Pop under the threading lock so a concurrent done-callback
+            # cannot race our task lookup. If the task has already left
+            # the map (worker finished between submit and cancel), we
+            # surface that to the caller as ``False`` rather than silently
+            # returning ``True``; the service layer logs the race.
+            with self._lock:
+                task = self._inflight.pop(run_id, None)
+
+            if task is None:
+                logger.info(
+                    "research_run.pool.cancel_no_task",
+                    run_id=run_id,
+                    component="run_executor_pool",
+                )
+                return False
+
+            if task.done():
+                # Already terminal; nothing to cancel. We still report
+                # True because the caller's intent (the entry is no
+                # longer in-flight) is satisfied.
+                logger.info(
+                    "research_run.pool.cancel_already_done",
+                    run_id=run_id,
+                    component="run_executor_pool",
+                )
+                return True
+
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # Expected outcome of cancel() — the task body either
+                # propagated CancelledError out of an await point or
+                # raised it on re-entry. Suppress so cancel_run remains
+                # an idempotent operator action.
+                pass
+            except Exception as exc:  # noqa: BLE001 -- surface in log only
+                # The worker raised something else (e.g. it had already
+                # transitioned to FAILED before our cancel landed). The
+                # row's persisted state is the source of truth; we log
+                # and report success because the in-flight slot is gone.
+                logger.warning(
+                    "research_run.pool.cancel_task_raised",
+                    run_id=run_id,
+                    error=str(exc),
+                    component="run_executor_pool",
+                )
+
+            logger.info(
+                "research_run.pool.cancelled",
+                run_id=run_id,
+                component="run_executor_pool",
+            )
+            return True
 
     async def wait_for_idle(self, timeout: float | None = None) -> None:
         """

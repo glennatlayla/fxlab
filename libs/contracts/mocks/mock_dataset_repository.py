@@ -9,10 +9,9 @@ Purpose:
 
 Responsibilities:
     - Hold a ``dataset_ref -> DatasetRecord`` map.
-    - Implement find_by_ref / save / list_all / list_known_refs with
-      the same contract as the SQL adapter.
-    - Provide ``clear()`` and ``count()`` introspection helpers for
-      test setup/teardown.
+    - Implement find_by_ref / save / list_all / list_known_refs / count
+      with the same contract as the SQL adapter.
+    - Provide ``clear()`` introspection helper for test setup/teardown.
 
 Does NOT:
     - Touch any database, file system, or network resource.
@@ -106,6 +105,15 @@ class MockDatasetRepository(DatasetRepositoryInterface):
         """Return every registered ``dataset_ref``, sorted."""
         return sorted(self._store.keys())
 
+    def count(self) -> int:
+        """
+        Return the number of stored records.
+
+        Mirrors :meth:`SqlDatasetRepository.count` so unit tests of the
+        ``/health/details`` route can swap the repos transparently.
+        """
+        return len(self._store)
+
     def list_paged(
         self,
         *,
@@ -145,7 +153,3 @@ class MockDatasetRepository(DatasetRepositoryInterface):
     def clear(self) -> None:
         """Remove every record. Intended for fixture teardown."""
         self._store.clear()
-
-    def count(self) -> int:
-        """Return the number of stored records."""
-        return len(self._store)

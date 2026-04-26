@@ -11,6 +11,7 @@ Responsibilities:
     - save(): UPSERT a row (INSERT on miss, UPDATE on hit).
     - list_all(): SELECT every row, sorted by ``dataset_ref``.
     - list_known_refs(): SELECT only the ``dataset_ref`` column.
+    - count(): SELECT COUNT(*) — cheap inventory probe for ``/health/details``.
 
 Does NOT:
     - Drive ingestion (data-pipeline owns that).
@@ -240,6 +241,37 @@ class SqlDatasetRepository(DatasetRepositoryInterface):
             raise DatasetRepositoryError("Failed to list dataset refs") from exc
 
         return refs
+
+    def count(self) -> int:
+        """
+        Return the total number of rows in the ``datasets`` table.
+
+        Implemented as a ``SELECT COUNT(*) FROM datasets`` aggregate so
+        the database does the work — never load every row to count them.
+        Used by the ``/health/details`` endpoint to surface catalog
+        inventory cheaply.
+
+        Returns:
+            Non-negative integer row count. Zero when the catalog is
+            empty.
+
+        Raises:
+            DatasetRepositoryError: On driver / connection failure.
+        """
+        try:
+            stmt = select(func.count()).select_from(Dataset)
+            total = int(self._db.execute(stmt).scalar_one())
+        except SQLAlchemyError as exc:
+            logger.error(
+                "dataset_repository.count.failed",
+                component="SqlDatasetRepository",
+                operation="count",
+                error=str(exc),
+                exc_info=True,
+            )
+            raise DatasetRepositoryError("Failed to count datasets") from exc
+
+        return total
 
     def list_paged(
         self,

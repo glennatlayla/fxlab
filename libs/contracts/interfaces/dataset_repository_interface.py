@@ -178,6 +178,25 @@ class DatasetRepositoryInterface(ABC):
         ...
 
     @abstractmethod
+    def count(self) -> int:
+        """
+        Return the total number of rows in the dataset catalog.
+
+        Cheaper than :meth:`list_all` because the implementation only
+        executes a ``SELECT COUNT(*)`` aggregate — used by the
+        ``/health/details`` endpoint to surface catalog inventory at a
+        glance without materialising any rows.
+
+        Returns:
+            Non-negative integer row count. Zero when the catalog is
+            empty.
+
+        Raises:
+            DatasetRepositoryError: On driver / connection failure.
+        """
+        ...
+
+    @abstractmethod
     def list_paged(
         self,
         *,

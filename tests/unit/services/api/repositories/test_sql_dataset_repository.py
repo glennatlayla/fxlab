@@ -334,3 +334,44 @@ def test_list_paged_wraps_driver_error(db_session: Session) -> None:
     ):
         with pytest.raises(DatasetRepositoryError):
             repo.list_paged(limit=10, offset=0)
+
+
+# ---------------------------------------------------------------------------
+# count
+# ---------------------------------------------------------------------------
+
+
+def test_count_empty_returns_zero(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.count() == 0
+
+
+def test_count_returns_number_of_rows(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    _seed_three(repo)
+    assert repo.count() == 3
+
+
+def test_count_after_save_increases_by_one(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    assert repo.count() == 0
+    repo.save(_make_record())
+    assert repo.count() == 1
+    repo.save(
+        _make_record(
+            id_="01HD0000000000000000000099",
+            dataset_ref="another-ref",
+        )
+    )
+    assert repo.count() == 2
+
+
+def test_count_wraps_driver_error(db_session: Session) -> None:
+    repo = SqlDatasetRepository(db=db_session)
+    with patch.object(
+        db_session,
+        "execute",
+        side_effect=OperationalError("stmt", {}, Exception("db gone")),
+    ):
+        with pytest.raises(DatasetRepositoryError):
+            repo.count()
