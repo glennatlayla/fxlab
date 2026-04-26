@@ -2,13 +2,19 @@
 Health check and readiness probe routes for API service.
 
 Purpose:
-    Expose GET /health (liveness) and GET /ready (readiness) for container
-    orchestration (Docker health checks, Kubernetes probes, load balancers).
+    Expose GET /health (liveness), GET /ready (readiness), and
+    GET /health/details (catalog + run-pool inventory) for container
+    orchestration (Docker health checks, Kubernetes probes, load
+    balancers) and operator dashboards.
 
 Responsibilities:
     - GET /health: Lightweight liveness probe — checks database connectivity.
     - GET /ready: Comprehensive readiness probe — checks database, Redis,
       broker adapters, and reports per-component status.
+    - GET /health/details: Authenticated read-only endpoint that surfaces
+      catalog + run-pool inventory counts (datasets, strategies, runs in
+      flight + total persisted) so operators can confirm the API process
+      sees the expected state at a glance.
     - Return 200 OK when checks pass, 503 Service Unavailable when degraded.
     - Export HEALTH_STATUS_OK and HEALTH_SERVICE_NAME constants for test assertions.
     - Do NOT raise exceptions; catch all errors and return graceful 503 status.
@@ -16,11 +22,17 @@ Responsibilities:
 Does NOT:
     - Contain business logic.
     - Log database credentials.
-    - Require authentication (health/readiness probes must be unauthenticated).
+    - Require authentication on /health and /ready (those probes must be
+      unauthenticated). /health/details DOES require authentication and
+      the admin:manage scope (matches /admin/* convention).
 
 Dependencies:
     - check_db_connection (imported dynamically to avoid circular imports at test time).
     - BrokerAdapterRegistry (via app.state, optional).
+    - DatasetServiceInterface (via app.state.dataset_service, set by main.py
+      lifespan startup): used by /health/details to read catalog inventory.
+    - RunExecutorPool (via app.state.run_executor_pool, set by main.py):
+      used by /health/details for in-flight run count.
 
 Example:
     GET /health when DB is up:
@@ -35,14 +47,36 @@ Example:
     GET /ready when DB down:
         503 Service Unavailable
         {"status": "not_ready", "checks": {"database": "error"}}
+
+    GET /health/details when everything is happy:
+        200 OK
+        {
+            "status": "ok",
+            "service": "fxlab-api",
+            "version": "0.1.0-bootstrap",
+            "components": {
+                "database": "ok",
+                "datasets":   {"status": "ok", "count": 3},
+                "strategies": {"status": "ok", "count": 12},
+                "runs":       {"status": "ok", "in_flight": 1,
+                               "total_persisted": 47}
+            },
+            "checked_at": "2026-04-26T16:30:00+00:00"
+        }
 """
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
+from libs.contracts.models import ResearchRun, Strategy
+from services.api.auth import AuthenticatedUser, require_scope
+from services.api.db import get_db
 from services.api.middleware.correlation import correlation_id_var
 
 logger = structlog.get_logger(__name__)
@@ -259,6 +293,234 @@ async def readiness_check() -> Response:
 
     return Response(
         content=json.dumps({"status": status, "checks": checks}),
+        status_code=status_code,
+        media_type="application/json",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Detailed inventory probe — authenticated, admin-scoped
+# ---------------------------------------------------------------------------
+
+
+#: Generic redacted reason returned in 503 components when an aggregate
+#: query fails. We deliberately do NOT echo the upstream exception
+#: message here because driver errors (psycopg2, sqlalchemy) frequently
+#: include host names, ports, and occasionally credential fragments. Use
+#: server-side structured logs (see ``health_details.component_failed``)
+#: to inspect the underlying cause.
+_DETAILS_REDACTED_ERROR = "Aggregate query failed; see structured logs."
+
+
+def _count_table(db: Session, model: Any) -> int:
+    """
+    Return the row count for an ORM-mapped table via ``SELECT COUNT(*)``.
+
+    Args:
+        db: Request-scoped SQLAlchemy session.
+        model: ORM model class (e.g. :class:`Strategy`,
+            :class:`ResearchRun`). The function reads the model's
+            ``__table__`` so it works for any declarative base.
+
+    Returns:
+        Non-negative integer row count.
+
+    Raises:
+        Whatever the SQLAlchemy driver raises on connection failure.
+        Callers MUST translate driver exceptions into a degraded
+        component status — see :func:`_safe_component_count`.
+    """
+    stmt = select(func.count()).select_from(model)
+    return int(db.execute(stmt).scalar_one())
+
+
+def _safe_component_count(
+    label: str,
+    counter: Any,
+    *,
+    correlation_id: str,
+) -> tuple[int | None, str | None]:
+    """
+    Invoke ``counter`` (a zero-argument callable returning int) and
+    translate any exception into a redacted reason string suitable for
+    inclusion in the 503 body.
+
+    Args:
+        label: Component name used in the structured log entry
+            (``"datasets"``, ``"strategies"``, ``"runs"``).
+        counter: Zero-arg callable that returns the integer count.
+        correlation_id: Propagated through the structured log on failure.
+
+    Returns:
+        ``(count, None)`` on success, ``(None, reason)`` on failure.
+        ``reason`` is the generic :data:`_DETAILS_REDACTED_ERROR`
+        constant — the wire body never carries driver text.
+    """
+    try:
+        return int(counter()), None
+    except Exception as exc:
+        logger.warning(
+            "health_details.component_failed",
+            component=label,
+            error=str(exc),
+            exc_info=True,
+            correlation_id=correlation_id,
+        )
+        return None, _DETAILS_REDACTED_ERROR
+
+
+@router.get("/health/details", tags=["health"])
+def health_details(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(require_scope("admin:manage")),
+) -> Response:
+    """
+    Read-only inventory probe surfacing catalog + run-pool counts.
+
+    Returns three component blocks: datasets (registered catalog rows),
+    strategies (rows in the ``strategies`` table), and runs (in-flight
+    count from :class:`RunExecutorPool` + total persisted research-run
+    rows). Each block is independent — if one aggregate query fails, the
+    other components still report their real counts and the failed block
+    reports ``status: "error"`` with a redacted reason. The top-level
+    status is ``"degraded"`` whenever any component is in error.
+
+    Args:
+        request: FastAPI request (read for ``request.app.state`` lookups
+            of the run executor pool and dataset service).
+        db: Request-scoped SQLAlchemy session injected by
+            :func:`services.api.db.get_db`.
+        user: Authenticated user with the ``admin:manage`` scope.
+
+    Returns:
+        200 + payload (see module docstring) on full success.
+        503 + payload with the same shape but ``status: "degraded"`` on
+        partial failure.
+
+    Raises:
+        HTTPException(401): Missing / invalid Authorization header
+            (raised by :func:`get_current_user` upstream of the scope
+            dependency).
+        HTTPException(403): Caller lacks the ``admin:manage`` scope.
+    """
+    correlation_id = correlation_id_var.get("no-corr")
+    logger.info(
+        "health_details.requested",
+        operation="health_details",
+        component="health",
+        correlation_id=correlation_id,
+        user_id=user.user_id,
+    )
+
+    # --- Datasets count via the dataset service on app.state ---------------
+    dataset_service = getattr(request.app.state, "dataset_service", None)
+    if dataset_service is None:
+        # The service is wired during lifespan startup; if it is not
+        # present we treat the dataset path as unconfigured rather than
+        # erroring (parity with /ready's broker handling).
+        datasets_count: int | None = 0
+        datasets_reason: str | None = None
+    else:
+        datasets_count, datasets_reason = _safe_component_count(
+            "datasets",
+            dataset_service.count,
+            correlation_id=correlation_id,
+        )
+
+    # --- Strategies + total persisted runs via direct SQL ------------------
+    strategies_count, strategies_reason = _safe_component_count(
+        "strategies",
+        lambda: _count_table(db, Strategy),
+        correlation_id=correlation_id,
+    )
+    runs_total_persisted, runs_total_reason = _safe_component_count(
+        "runs",
+        lambda: _count_table(db, ResearchRun),
+        correlation_id=correlation_id,
+    )
+
+    # --- In-flight runs from the executor pool on app.state ----------------
+    pool = getattr(request.app.state, "run_executor_pool", None)
+    if pool is None:
+        in_flight = 0
+    else:
+        try:
+            in_flight = int(pool.inflight_count())
+        except Exception as exc:
+            logger.warning(
+                "health_details.in_flight_lookup_failed",
+                component="runs",
+                error=str(exc),
+                exc_info=True,
+                correlation_id=correlation_id,
+            )
+            in_flight = 0
+
+    # --- Compose component blocks -----------------------------------------
+    db_status = "ok" if strategies_reason is None and runs_total_reason is None else "error"
+
+    datasets_block: dict[str, Any] = (
+        {"status": "ok", "count": datasets_count}
+        if datasets_reason is None
+        else {"status": "error", "count": 0, "reason": datasets_reason}
+    )
+    strategies_block: dict[str, Any] = (
+        {"status": "ok", "count": strategies_count}
+        if strategies_reason is None
+        else {"status": "error", "count": 0, "reason": strategies_reason}
+    )
+    runs_block: dict[str, Any] = (
+        {
+            "status": "ok",
+            "in_flight": in_flight,
+            "total_persisted": runs_total_persisted,
+        }
+        if runs_total_reason is None
+        else {
+            "status": "error",
+            "in_flight": in_flight,
+            "total_persisted": 0,
+            "reason": runs_total_reason,
+        }
+    )
+
+    components = {
+        "database": db_status,
+        "datasets": datasets_block,
+        "strategies": strategies_block,
+        "runs": runs_block,
+    }
+
+    any_error = any(
+        block["status"] == "error" for block in (datasets_block, strategies_block, runs_block)
+    )
+    top_status = "degraded" if any_error else "ok"
+    status_code = 503 if any_error else 200
+
+    body = {
+        "status": top_status,
+        "service": HEALTH_SERVICE_NAME,
+        "version": API_VERSION,
+        "components": components,
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+
+    logger.info(
+        "health_details.completed",
+        operation="health_details",
+        component="health",
+        correlation_id=correlation_id,
+        status=top_status,
+        dataset_count=datasets_block.get("count"),
+        strategy_count=strategies_block.get("count"),
+        runs_in_flight=in_flight,
+        runs_total_persisted=runs_block.get("total_persisted"),
+        result="success" if not any_error else "degraded",
+    )
+
+    return Response(
+        content=json.dumps(body),
         status_code=status_code,
         media_type="application/json",
     )
