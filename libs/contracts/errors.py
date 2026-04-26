@@ -17,6 +17,8 @@ Hierarchy:
     ├── NotFoundError          — resource does not exist
     ├── SeparationOfDutiesError — submitter == reviewer on governance action
     ├── StrategyNameConflictError — clone target name already exists (409)
+    ├── StrategyArchiveStateError — archive/restore in invalid state (409)
+    ├── RowVersionConflictError — optimistic lock mismatch on update (409)
     ├── AuthError              — authentication / authorisation failure
     ├── ExternalServiceError   — downstream API / DB failure
     │   ├── TransientError     — retriable subset
@@ -75,6 +77,76 @@ class StrategyNameConflictError(FXLabError):
     def __init__(self, message: str, *, name: str = "") -> None:
         super().__init__(message)
         self.name = name
+
+
+class StrategyArchiveStateError(FXLabError):
+    """
+    Archive/restore lifecycle precondition failed.
+
+    Raised by ``StrategyService.archive_strategy`` when the strategy is
+    already archived (``archived_at`` is non-NULL), and by
+    ``StrategyService.restore_strategy`` when the strategy is not
+    currently archived (``archived_at`` is NULL). Maps to HTTP 409
+    Conflict at the controller layer — the request was syntactically
+    valid but cannot be applied in the resource's current state.
+
+    Attributes:
+        strategy_id: ULID of the strategy whose state precluded the
+            requested action. Included so the route layer can echo it
+            in the 409 detail body for operator clarity.
+        current_state: Either ``"archived"`` (when archive was
+            requested but the row is already archived) or ``"active"``
+            (when restore was requested on a non-archived row). Drives
+            the error message the route emits.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        strategy_id: str = "",
+        current_state: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.strategy_id = strategy_id
+        self.current_state = current_state
+
+
+class RowVersionConflictError(FXLabError):
+    """
+    Optimistic-locking row_version mismatch on UPDATE.
+
+    Raised when a write operation supplies an ``expected_row_version``
+    that does not match the row's current ``row_version`` value. This
+    means a concurrent writer mutated the row between the caller's
+    read and write — applying the update would silently overwrite the
+    other writer's changes, so we reject and let the caller re-read
+    and retry. Maps to HTTP 409 Conflict at the controller layer.
+
+    Attributes:
+        entity: Human-readable label of the entity type (e.g.
+            ``"strategy"``). Used in the error message + audit log.
+        entity_id: ULID of the row whose row_version did not match.
+        expected_row_version: The row_version the caller asserted when
+            issuing the update.
+        actual_row_version: The row_version actually persisted at the
+            moment the repository read the row.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        entity: str = "",
+        entity_id: str = "",
+        expected_row_version: int = 0,
+        actual_row_version: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.entity = entity
+        self.entity_id = entity_id
+        self.expected_row_version = expected_row_version
+        self.actual_row_version = actual_row_version
 
 
 class AuthError(FXLabError):

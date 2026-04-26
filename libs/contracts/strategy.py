@@ -146,6 +146,10 @@ class StrategyListItem(BaseModel):
         created_by: ULID of the creating user.
         created_at: ISO-8601 timestamp of creation.
         is_active: Soft-delete flag (``True`` for visible strategies).
+        archived_at: ISO-8601 timestamp when the strategy was soft-archived,
+            or ``None`` for active rows. The frontend uses this to render
+            the "Archived" badge on rows surfaced via the Show-archived
+            toggle. Backed by migration 0030.
 
     Example:
         item = StrategyListItem(
@@ -156,6 +160,7 @@ class StrategyListItem(BaseModel):
             created_by="01HUSER...",
             created_at="2026-04-25T12:00:00+00:00",
             is_active=True,
+            archived_at=None,
         )
     """
 
@@ -172,6 +177,13 @@ class StrategyListItem(BaseModel):
     created_by: str = Field(..., min_length=1, description="Creator ULID.")
     created_at: str = Field(..., min_length=1, description="ISO-8601 creation timestamp.")
     is_active: bool = Field(..., description="Soft-delete flag.")
+    archived_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 timestamp when soft-archived, or None for active rows. "
+            "Drives the Archived badge in the browse page."
+        ),
+    )
 
 
 class StrategyListPage(BaseModel):

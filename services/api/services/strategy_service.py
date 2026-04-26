@@ -33,6 +33,7 @@ Example:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -40,6 +41,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from libs.contracts.errors import (
     NotFoundError,
+    StrategyArchiveStateError,
     StrategyNameConflictError,
     ValidationError,
 )
@@ -740,6 +742,7 @@ class StrategyService(StrategyServiceInterface):
         is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         """
         List strategies with optional filtering and pagination.
@@ -749,6 +752,10 @@ class StrategyService(StrategyServiceInterface):
             is_active: Filter by active flag.
             limit: Page size.
             offset: Page offset.
+            include_archived: When ``False`` (default), soft-archived
+                strategies (``archived_at IS NOT NULL``) are excluded
+                from the response. Existing callers that do not pass
+                this kwarg keep getting archive-hidden behaviour.
 
         Returns:
             Dict with strategies list and pagination metadata.
@@ -758,11 +765,13 @@ class StrategyService(StrategyServiceInterface):
             is_active=is_active,
             limit=limit,
             offset=offset,
+            include_archived=include_archived,
         )
 
         logger.debug(
             "strategy.list.completed",
             count=len(strategies),
+            include_archived=include_archived,
             component="StrategyService",
             operation="list_strategies",
         )
@@ -783,6 +792,7 @@ class StrategyService(StrategyServiceInterface):
         name_contains: str | None = None,
         created_by: str | None = None,
         is_active: bool | None = None,
+        include_archived: bool = False,
     ) -> StrategyListPage:
         """
         Return one page of the strategies catalogue (M2.D5).
@@ -801,6 +811,8 @@ class StrategyService(StrategyServiceInterface):
             name_contains: Case-insensitive substring filter on ``name``.
             created_by: Optional creator ULID filter.
             is_active: Optional active-flag filter.
+            include_archived: When ``False`` (default), archived rows
+                are excluded from both the page and the total count.
 
         Returns:
             :class:`StrategyListPage` value object — already validated
@@ -818,6 +830,7 @@ class StrategyService(StrategyServiceInterface):
             name_contains=name_contains,
             limit=page_size,
             offset=offset,
+            include_archived=include_archived,
         )
 
         items: list[StrategyListItem] = []
@@ -826,6 +839,7 @@ class StrategyService(StrategyServiceInterface):
             # 0025 still satisfies the response schema. Never silently
             # drop a row — operators need to see everything in the table.
             source = row.get("source") or "draft_form"
+            archived_at_raw = row.get("archived_at")
             items.append(
                 StrategyListItem(
                     id=str(row["id"]),
@@ -835,6 +849,7 @@ class StrategyService(StrategyServiceInterface):
                     created_by=str(row["created_by"]),
                     created_at=str(row["created_at"]),
                     is_active=bool(row.get("is_active", True)),
+                    archived_at=str(archived_at_raw) if archived_at_raw is not None else None,
                 )
             )
 
@@ -862,6 +877,216 @@ class StrategyService(StrategyServiceInterface):
         )
 
         return result
+
+    def archive_strategy(
+        self,
+        strategy_id: str,
+        *,
+        requested_by: str,
+        expected_row_version: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Soft-archive a strategy by setting ``archived_at`` to UTC now.
+
+        See :meth:`StrategyServiceInterface.archive_strategy` for the
+        full contract; behaviour summary below mirrors the interface
+        docstring so on-call operators can read this method in
+        isolation.
+
+        Behaviour:
+
+        1. Resolve the source strategy via the repository. Missing →
+           :class:`NotFoundError` (route maps to 404).
+        2. If ``archived_at`` is already non-NULL → raise
+           :class:`StrategyArchiveStateError` with
+           ``current_state="archived"`` (route maps to 409).
+        3. Persist via ``set_archived(archived_at=now,
+           expected_row_version=...)``. Optimistic-lock mismatches
+           raise :class:`RowVersionConflictError` from the repository
+           layer; we let it propagate so the route maps to 409.
+        4. Emit ``strategy_archived`` audit log line.
+
+        Args:
+            strategy_id: ULID of the strategy to archive.
+            requested_by: ULID of the operator clicking Archive.
+            expected_row_version: Optional optimistic-lock guard
+                forwarded to the repository.
+
+        Returns:
+            Updated strategy dict with ``archived_at`` populated and
+            ``row_version`` bumped.
+
+        Raises:
+            NotFoundError: Strategy does not exist.
+            StrategyArchiveStateError: Strategy is already archived.
+            RowVersionConflictError: ``expected_row_version`` mismatch
+                (propagated from the repository).
+        """
+        logger.info(
+            "strategy.archive.started",
+            strategy_id=strategy_id,
+            requested_by=requested_by,
+            expected_row_version=expected_row_version,
+            component="StrategyService",
+            operation="archive_strategy",
+        )
+
+        existing = self._strategy_repo.get_by_id(strategy_id)
+        if existing is None:
+            logger.warning(
+                "strategy.archive.not_found",
+                strategy_id=strategy_id,
+                requested_by=requested_by,
+                component="StrategyService",
+                operation="archive_strategy",
+            )
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+
+        if existing.get("archived_at") is not None:
+            logger.warning(
+                "strategy.archive.already_archived",
+                strategy_id=strategy_id,
+                requested_by=requested_by,
+                component="StrategyService",
+                operation="archive_strategy",
+            )
+            raise StrategyArchiveStateError(
+                f"Strategy {strategy_id} is already archived",
+                strategy_id=strategy_id,
+                current_state="archived",
+            )
+
+        now = datetime.now(timezone.utc)
+        # set_archived raises RowVersionConflictError on mismatch — we
+        # let it propagate so the route layer can map it to 409 without
+        # the service swallowing the lock failure.
+        updated = self._strategy_repo.set_archived(
+            strategy_id,
+            archived_at=now,
+            expected_row_version=expected_row_version,
+        )
+
+        # set_archived returns None only when the row vanished between
+        # the get_by_id above and this UPDATE. Treat as NotFound — the
+        # operator's view is stale and they need to refresh.
+        if updated is None:
+            logger.warning(
+                "strategy.archive.disappeared",
+                strategy_id=strategy_id,
+                requested_by=requested_by,
+                component="StrategyService",
+                operation="archive_strategy",
+            )
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+
+        logger.info(
+            "strategy_archived",
+            strategy_id=strategy_id,
+            requested_by=requested_by,
+            archived_at=updated.get("archived_at"),
+            row_version=updated.get("row_version"),
+            component="StrategyService",
+            operation="archive_strategy",
+        )
+
+        return updated
+
+    def restore_strategy(
+        self,
+        strategy_id: str,
+        *,
+        requested_by: str,
+        expected_row_version: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Restore a soft-archived strategy by clearing ``archived_at``.
+
+        Inverse of :meth:`archive_strategy`. See the interface docstring
+        for the full contract.
+
+        Behaviour:
+
+        1. Resolve the source strategy. Missing → :class:`NotFoundError`.
+        2. If ``archived_at`` is already NULL → raise
+           :class:`StrategyArchiveStateError` with
+           ``current_state="active"``.
+        3. Persist via ``set_archived(archived_at=None, ...)``.
+        4. Emit ``strategy_restored`` audit log line.
+
+        Args:
+            strategy_id: ULID of the strategy to restore.
+            requested_by: ULID of the operator clicking Restore.
+            expected_row_version: Optional optimistic-lock guard.
+
+        Returns:
+            Updated strategy dict — ``archived_at`` is ``None`` and
+            ``row_version`` has been bumped.
+
+        Raises:
+            NotFoundError: Strategy does not exist.
+            StrategyArchiveStateError: Strategy is not archived.
+            RowVersionConflictError: ``expected_row_version`` mismatch.
+        """
+        logger.info(
+            "strategy.restore.started",
+            strategy_id=strategy_id,
+            requested_by=requested_by,
+            expected_row_version=expected_row_version,
+            component="StrategyService",
+            operation="restore_strategy",
+        )
+
+        existing = self._strategy_repo.get_by_id(strategy_id)
+        if existing is None:
+            logger.warning(
+                "strategy.restore.not_found",
+                strategy_id=strategy_id,
+                requested_by=requested_by,
+                component="StrategyService",
+                operation="restore_strategy",
+            )
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+
+        if existing.get("archived_at") is None:
+            logger.warning(
+                "strategy.restore.not_archived",
+                strategy_id=strategy_id,
+                requested_by=requested_by,
+                component="StrategyService",
+                operation="restore_strategy",
+            )
+            raise StrategyArchiveStateError(
+                f"Strategy {strategy_id} is not archived",
+                strategy_id=strategy_id,
+                current_state="active",
+            )
+
+        updated = self._strategy_repo.set_archived(
+            strategy_id,
+            archived_at=None,
+            expected_row_version=expected_row_version,
+        )
+
+        if updated is None:
+            logger.warning(
+                "strategy.restore.disappeared",
+                strategy_id=strategy_id,
+                requested_by=requested_by,
+                component="StrategyService",
+                operation="restore_strategy",
+            )
+            raise NotFoundError(f"Strategy {strategy_id} not found")
+
+        logger.info(
+            "strategy_restored",
+            strategy_id=strategy_id,
+            requested_by=requested_by,
+            row_version=updated.get("row_version"),
+            component="StrategyService",
+            operation="restore_strategy",
+        )
+
+        return updated
 
     def validate_dsl_expression(self, expression: str) -> dict[str, Any]:
         """

@@ -30,6 +30,7 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any
 
 
@@ -96,6 +97,7 @@ class StrategyRepositoryInterface(ABC):
         is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> list[dict[str, Any]]:
         """
         List strategies with optional filtering and pagination.
@@ -105,6 +107,9 @@ class StrategyRepositoryInterface(ABC):
             is_active: Filter by active status.
             limit: Maximum results to return.
             offset: Number of results to skip.
+            include_archived: When ``False`` (the default), rows with
+                ``archived_at IS NOT NULL`` are excluded. When ``True``,
+                the result set spans both active and archived rows.
 
         Returns:
             List of strategy dicts ordered by created_at descending.
@@ -120,6 +125,7 @@ class StrategyRepositoryInterface(ABC):
         name_contains: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         List strategies with filters + pagination and return the total count.
@@ -138,12 +144,58 @@ class StrategyRepositoryInterface(ABC):
                 strategy ``name`` column. ``None`` means no name filter.
             limit: Maximum results to return on this page.
             offset: Number of results to skip before the page starts.
+            include_archived: When ``False`` (the default), rows with
+                ``archived_at IS NOT NULL`` are excluded — the default
+                browse view stays focused on the active catalogue.
+                When ``True``, the page + total span both archived and
+                active rows so the "Show archived" toggle in the UI can
+                reveal them.
 
         Returns:
             ``(strategies, total_count)`` where ``strategies`` is the
             page (length <= ``limit``) ordered by ``created_at``
             descending, and ``total_count`` is the total number of rows
             matching the filters across all pages.
+        """
+
+    @abstractmethod
+    def set_archived(
+        self,
+        strategy_id: str,
+        *,
+        archived_at: datetime | None,
+        expected_row_version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Set or clear ``strategies.archived_at`` for a single row.
+
+        Performs a single conditional UPDATE that bumps ``row_version``
+        atomically with the ``archived_at`` write. The
+        ``expected_row_version`` guard implements optimistic locking:
+        the UPDATE only proceeds if the row's current ``row_version``
+        matches; on mismatch the method raises
+        :class:`RowVersionConflictError` and persists nothing.
+
+        Args:
+            strategy_id: ULID of the strategy to mutate.
+            archived_at: New value for the column. ``None`` restores
+                the row to the active catalogue; a UTC ``datetime``
+                soft-archives it.
+            expected_row_version: When supplied, the UPDATE only fires
+                if the row's current ``row_version`` equals this value.
+                ``None`` skips the check (caller accepts last-writer-
+                wins semantics).
+
+        Returns:
+            Updated strategy dict, or ``None`` if no row matched
+            ``strategy_id``.
+
+        Raises:
+            RowVersionConflictError: ``expected_row_version`` did not
+                match the persisted value. Carries
+                ``actual_row_version`` so the caller can decide whether
+                to surface "another user just changed this" or to
+                re-read and retry.
         """
 
     @abstractmethod

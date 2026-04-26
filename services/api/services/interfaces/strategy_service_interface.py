@@ -224,6 +224,7 @@ class StrategyServiceInterface(ABC):
         is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         """
         List strategies with pagination.
@@ -233,9 +234,113 @@ class StrategyServiceInterface(ABC):
             is_active: Filter by active flag.
             limit: Page size.
             offset: Page offset.
+            include_archived: When ``False`` (the default), soft-archived
+                rows (``archived_at IS NOT NULL``) are excluded from the
+                result set so the operator's default browse view stays
+                focused on the active catalogue. When ``True``, archived
+                rows are included so the "Show archived" toggle in the
+                UI can surface them. The default is ``False`` so existing
+                callers that do not pass the kwarg get archive-hidden
+                behaviour automatically.
 
         Returns:
             Dict with strategies list and total count.
+        """
+
+    @abstractmethod
+    def archive_strategy(
+        self,
+        strategy_id: str,
+        *,
+        requested_by: str,
+        expected_row_version: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Soft-archive a strategy by setting ``archived_at`` to now (UTC).
+
+        Behaviour:
+
+        - Resolve the strategy via the repository. Missing → raise
+          :class:`NotFoundError` (route maps to 404).
+        - If the strategy already has ``archived_at`` set, raise
+          :class:`StrategyArchiveStateError` with
+          ``current_state="archived"`` (route maps to 409).
+        - If ``expected_row_version`` is supplied and does not match
+          the persisted ``row_version``, raise
+          :class:`RowVersionConflictError` (route maps to 409). When
+          ``None``, the archive blindly overwrites — used by the
+          single-button UI flow where the operator just clicked Archive
+          on a freshly-fetched row.
+        - Persist ``archived_at = now`` and bump ``row_version`` via
+          the repository's ``set_archived`` operation (single UPDATE).
+        - Emit structured ``strategy_archived`` audit log per
+          CLAUDE.md §8 with ``correlation_id``, ``strategy_id``, and
+          ``requested_by``.
+
+        Args:
+            strategy_id: ULID of the strategy to archive.
+            requested_by: ULID of the operator clicking Archive —
+                recorded in the audit log so attribution survives.
+            expected_row_version: Optional optimistic-lock guard. When
+                supplied, the repository UPDATE is conditional on the
+                row's current ``row_version`` matching this value; on
+                mismatch a :class:`RowVersionConflictError` is raised
+                without persisting.
+
+        Returns:
+            Updated strategy dict (the same shape :meth:`get_strategy`
+            returns) — includes ``archived_at`` (non-NULL ISO-8601),
+            the bumped ``row_version``, and the unchanged identity
+            fields.
+
+        Raises:
+            NotFoundError: Strategy does not exist.
+            StrategyArchiveStateError: Strategy is already archived.
+            RowVersionConflictError: ``expected_row_version`` mismatch.
+        """
+
+    @abstractmethod
+    def restore_strategy(
+        self,
+        strategy_id: str,
+        *,
+        requested_by: str,
+        expected_row_version: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Restore a soft-archived strategy by clearing ``archived_at``.
+
+        Inverse of :meth:`archive_strategy`. The strategy reappears in
+        the default browse view immediately after a successful restore.
+
+        Behaviour:
+
+        - Resolve the strategy via the repository. Missing → raise
+          :class:`NotFoundError` (route maps to 404).
+        - If the strategy's ``archived_at`` is already NULL, raise
+          :class:`StrategyArchiveStateError` with
+          ``current_state="active"`` (route maps to 409).
+        - If ``expected_row_version`` is supplied and does not match
+          the persisted ``row_version``, raise
+          :class:`RowVersionConflictError` (route maps to 409).
+        - Persist ``archived_at = NULL`` and bump ``row_version``.
+        - Emit structured ``strategy_restored`` audit log per
+          CLAUDE.md §8 with ``correlation_id``, ``strategy_id``, and
+          ``requested_by``.
+
+        Args:
+            strategy_id: ULID of the strategy to restore.
+            requested_by: ULID of the operator clicking Restore.
+            expected_row_version: Optional optimistic-lock guard.
+
+        Returns:
+            Updated strategy dict — ``archived_at`` is ``None`` and
+            ``row_version`` has been bumped.
+
+        Raises:
+            NotFoundError: Strategy does not exist.
+            StrategyArchiveStateError: Strategy is not archived.
+            RowVersionConflictError: ``expected_row_version`` mismatch.
         """
 
     @abstractmethod

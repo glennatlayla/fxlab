@@ -25,6 +25,8 @@ import pytest
 
 from libs.contracts.errors import (
     NotFoundError,
+    RowVersionConflictError,
+    StrategyArchiveStateError,
     StrategyNameConflictError,
     ValidationError,
 )
@@ -561,3 +563,262 @@ class TestCloneStrategy:
         assert kwargs["new_id"] == clone["id"]
         assert kwargs["new_name"] == "Audit Clone"
         assert kwargs["requested_by"] == "01HCLONER0000000000000001"
+
+
+# ---------------------------------------------------------------------------
+# Archive / restore lifecycle (POST /strategies/{id}/archive | /restore)
+# ---------------------------------------------------------------------------
+
+
+def _seed_strategy_for_archive(
+    service: StrategyService,
+    *,
+    name: str = "Archivable Strategy",
+) -> dict:
+    """Create a fresh strategy and return the persisted dict.
+
+    Reuses the production create path so each archive test exercises a
+    record that already carries the columns the archive flow reads
+    (id, row_version, archived_at=None).
+    """
+    result = service.create_strategy(
+        name=name,
+        entry_condition="RSI(14) < 30",
+        exit_condition="RSI(14) > 70",
+        created_by="01HUSER000000000000000001",
+    )
+    return result["strategy"]
+
+
+class TestArchiveStrategy:
+    """Tests for ``StrategyService.archive_strategy`` (POST /archive)."""
+
+    def test_archive_happy_path_sets_timestamp_and_bumps_row_version(self) -> None:
+        """Archive sets archived_at to a UTC timestamp and bumps row_version."""
+        service, repo = _make_service()
+        source = _seed_strategy_for_archive(service)
+        original_rv = source["row_version"]
+
+        updated = service.archive_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        assert updated["id"] == source["id"]
+        assert updated["archived_at"] is not None
+        # ISO-8601 timestamp; the mock repo writes via ``isoformat()``.
+        assert "T" in updated["archived_at"]
+        assert updated["row_version"] == original_rv + 1
+
+        # Persisted in the repo too — re-read confirms durability.
+        re_read = repo.get_by_id(source["id"])
+        assert re_read is not None
+        assert re_read["archived_at"] == updated["archived_at"]
+        assert re_read["row_version"] == updated["row_version"]
+
+    def test_archive_unknown_strategy_raises_not_found(self) -> None:
+        """Archive on a missing id raises NotFoundError (route maps 404)."""
+        service, _ = _make_service()
+        with pytest.raises(NotFoundError, match="not found"):
+            service.archive_strategy(
+                "01HMISSING0000000000000001",
+                requested_by="01HOPER000000000000000001",
+            )
+
+    def test_archive_already_archived_raises_state_error(self) -> None:
+        """Archive on an already-archived row raises StrategyArchiveStateError."""
+        service, _ = _make_service()
+        source = _seed_strategy_for_archive(service)
+        service.archive_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        with pytest.raises(StrategyArchiveStateError) as excinfo:
+            service.archive_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        # The 409-mappable error carries enough state for the route layer
+        # to render an actionable message without re-querying.
+        assert excinfo.value.strategy_id == source["id"]
+        assert excinfo.value.current_state == "archived"
+
+    def test_archive_with_matching_row_version_succeeds(self) -> None:
+        """Optimistic-lock guard accepts a matching row_version."""
+        service, _ = _make_service()
+        source = _seed_strategy_for_archive(service)
+
+        updated = service.archive_strategy(
+            source["id"],
+            requested_by="01HOPER000000000000000001",
+            expected_row_version=source["row_version"],
+        )
+        assert updated["archived_at"] is not None
+
+    def test_archive_with_stale_row_version_raises_conflict(self) -> None:
+        """Stale expected_row_version raises RowVersionConflictError (409)."""
+        service, _ = _make_service()
+        source = _seed_strategy_for_archive(service)
+
+        with pytest.raises(RowVersionConflictError) as excinfo:
+            service.archive_strategy(
+                source["id"],
+                requested_by="01HOPER000000000000000001",
+                expected_row_version=source["row_version"] + 99,
+            )
+
+        # Operator UI surfaces the actual row_version so the user can
+        # decide whether to refresh or force the write.
+        assert excinfo.value.entity == "strategy"
+        assert excinfo.value.entity_id == source["id"]
+        assert excinfo.value.actual_row_version == source["row_version"]
+
+    def test_archive_emits_strategy_archived_audit_log(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Successful archive emits ``strategy_archived`` per CLAUDE.md §8."""
+        service, _ = _make_service()
+        from services.api.services import strategy_service as svc_module
+
+        captured: list[tuple[str, dict]] = []
+        original_info = svc_module.logger.info
+
+        def _spy(event: str, /, **kwargs):
+            captured.append((event, kwargs))
+            return original_info(event, **kwargs)
+
+        monkeypatch.setattr(svc_module.logger, "info", _spy)
+
+        source = _seed_strategy_for_archive(service, name="Audit Archive Source")
+        service.archive_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        archive_events = [(ev, kw) for (ev, kw) in captured if ev == "strategy_archived"]
+        assert len(archive_events) == 1, (
+            f"expected exactly one strategy_archived line; got {captured}"
+        )
+        _ev, kwargs = archive_events[0]
+        assert kwargs["strategy_id"] == source["id"]
+        assert kwargs["requested_by"] == "01HOPER000000000000000001"
+        assert kwargs["archived_at"] is not None
+
+
+class TestRestoreStrategy:
+    """Tests for ``StrategyService.restore_strategy`` (POST /restore)."""
+
+    def test_restore_happy_path_clears_timestamp_and_bumps_row_version(self) -> None:
+        """Restore clears archived_at and bumps row_version."""
+        service, repo = _make_service()
+        source = _seed_strategy_for_archive(service)
+        archived = service.archive_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        restored = service.restore_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        assert restored["archived_at"] is None
+        assert restored["row_version"] == archived["row_version"] + 1
+
+        # Persisted in the repo too.
+        re_read = repo.get_by_id(source["id"])
+        assert re_read is not None
+        assert re_read["archived_at"] is None
+
+    def test_restore_unknown_strategy_raises_not_found(self) -> None:
+        """Restore on a missing id raises NotFoundError."""
+        service, _ = _make_service()
+        with pytest.raises(NotFoundError, match="not found"):
+            service.restore_strategy(
+                "01HMISSING0000000000000001",
+                requested_by="01HOPER000000000000000001",
+            )
+
+    def test_restore_when_not_archived_raises_state_error(self) -> None:
+        """Restore on an active row raises StrategyArchiveStateError."""
+        service, _ = _make_service()
+        source = _seed_strategy_for_archive(service)
+
+        with pytest.raises(StrategyArchiveStateError) as excinfo:
+            service.restore_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        assert excinfo.value.strategy_id == source["id"]
+        assert excinfo.value.current_state == "active"
+
+    def test_restore_emits_strategy_restored_audit_log(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Successful restore emits ``strategy_restored`` per CLAUDE.md §8."""
+        service, _ = _make_service()
+        source = _seed_strategy_for_archive(service, name="Audit Restore Source")
+        service.archive_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        from services.api.services import strategy_service as svc_module
+
+        captured: list[tuple[str, dict]] = []
+        original_info = svc_module.logger.info
+
+        def _spy(event: str, /, **kwargs):
+            captured.append((event, kwargs))
+            return original_info(event, **kwargs)
+
+        monkeypatch.setattr(svc_module.logger, "info", _spy)
+
+        service.restore_strategy(source["id"], requested_by="01HOPER000000000000000001")
+
+        restore_events = [(ev, kw) for (ev, kw) in captured if ev == "strategy_restored"]
+        assert len(restore_events) == 1, (
+            f"expected exactly one strategy_restored line; got {captured}"
+        )
+        _ev, kwargs = restore_events[0]
+        assert kwargs["strategy_id"] == source["id"]
+        assert kwargs["requested_by"] == "01HOPER000000000000000001"
+
+
+class TestListStrategiesIncludeArchived:
+    """Coverage for the include_archived kwarg on the list_strategies methods."""
+
+    def test_list_strategies_excludes_archived_by_default(self) -> None:
+        """Archived rows disappear from the default list view."""
+        service, _ = _make_service()
+        keep = _seed_strategy_for_archive(service, name="Active Strategy")
+        archived_src = _seed_strategy_for_archive(service, name="To Be Archived")
+        service.archive_strategy(archived_src["id"], requested_by="01HOPER000000000000000001")
+
+        result = service.list_strategies()
+        ids = [row["id"] for row in result["strategies"]]
+
+        assert keep["id"] in ids
+        assert archived_src["id"] not in ids
+        assert result["count"] == 1
+
+    def test_list_strategies_include_archived_returns_everything(self) -> None:
+        """include_archived=True surfaces archived rows alongside active ones."""
+        service, _ = _make_service()
+        keep = _seed_strategy_for_archive(service, name="Active Strategy")
+        archived_src = _seed_strategy_for_archive(service, name="To Be Archived")
+        service.archive_strategy(archived_src["id"], requested_by="01HOPER000000000000000001")
+
+        result = service.list_strategies(include_archived=True)
+        ids = [row["id"] for row in result["strategies"]]
+
+        assert keep["id"] in ids
+        assert archived_src["id"] in ids
+        assert result["count"] == 2
+
+    def test_list_strategies_page_excludes_archived_by_default(self) -> None:
+        """The browse-page envelope also hides archived rows by default."""
+        service, _ = _make_service()
+        _seed_strategy_for_archive(service, name="Active 1")
+        archived_src = _seed_strategy_for_archive(service, name="To Be Archived")
+        service.archive_strategy(archived_src["id"], requested_by="01HOPER000000000000000001")
+
+        page = service.list_strategies_page(page=1, page_size=20)
+        ids = [item.id for item in page.strategies]
+
+        assert archived_src["id"] not in ids
+        assert page.total_count == 1
+
+    def test_list_strategies_page_include_archived_surfaces_them_with_field(self) -> None:
+        """include_archived=True populates StrategyListItem.archived_at."""
+        service, _ = _make_service()
+        archived_src = _seed_strategy_for_archive(service, name="To Be Archived")
+        archived = service.archive_strategy(
+            archived_src["id"], requested_by="01HOPER000000000000000001"
+        )
+
+        page = service.list_strategies_page(page=1, page_size=20, include_archived=True)
+        archived_item = next(item for item in page.strategies if item.id == archived_src["id"])
+
+        # The contract field is non-None and matches the persisted value.
+        assert archived_item.archived_at is not None
+        assert archived_item.archived_at == archived["archived_at"]

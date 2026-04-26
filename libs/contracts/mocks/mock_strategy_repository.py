@@ -26,6 +26,7 @@ from typing import Any
 
 from ulid import ULID
 
+from libs.contracts.errors import RowVersionConflictError
 from libs.contracts.interfaces.strategy_repository_interface import (
     StrategyRepositoryInterface,
 )
@@ -94,6 +95,7 @@ class MockStrategyRepository(StrategyRepositoryInterface):
             "is_active": True,
             "row_version": 1,
             "source": source,
+            "archived_at": None,
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }
@@ -120,6 +122,7 @@ class MockStrategyRepository(StrategyRepositoryInterface):
         is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> list[dict[str, Any]]:
         """
         List strategies with optional filtering and pagination.
@@ -129,6 +132,10 @@ class MockStrategyRepository(StrategyRepositoryInterface):
             is_active: Filter by active status.
             limit: Maximum results.
             offset: Pagination offset.
+            include_archived: When ``False`` (default), rows whose
+                ``archived_at`` is non-NULL are excluded so the
+                operator's default browse view stays focused on the
+                active catalogue.
 
         Returns:
             List of strategy dicts, most recent first.
@@ -139,6 +146,8 @@ class MockStrategyRepository(StrategyRepositoryInterface):
             results = [r for r in results if r["created_by"] == created_by]
         if is_active is not None:
             results = [r for r in results if r["is_active"] == is_active]
+        if not include_archived:
+            results = [r for r in results if r.get("archived_at") is None]
 
         # Sort by created_at descending
         results.sort(key=lambda r: r["created_at"], reverse=True)
@@ -153,6 +162,7 @@ class MockStrategyRepository(StrategyRepositoryInterface):
         name_contains: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Page strategies with filters and return the matching total count.
@@ -168,6 +178,9 @@ class MockStrategyRepository(StrategyRepositoryInterface):
             name_contains: Case-insensitive substring match on ``name``.
             limit: Page size.
             offset: Pagination offset.
+            include_archived: When ``False`` (default), archived rows
+                (``archived_at`` non-NULL) are excluded from both the
+                page and the total count.
 
         Returns:
             ``(page_rows, total_count)`` ordered by ``created_at``
@@ -184,6 +197,8 @@ class MockStrategyRepository(StrategyRepositoryInterface):
         if name_contains is not None and name_contains.strip():
             needle = name_contains.strip().lower()
             results = [r for r in results if needle in str(r.get("name", "")).lower()]
+        if not include_archived:
+            results = [r for r in results if r.get("archived_at") is None]
 
         total_count = len(results)
         results.sort(key=lambda r: r["created_at"], reverse=True)
@@ -226,6 +241,61 @@ class MockStrategyRepository(StrategyRepositoryInterface):
             record["is_active"] = is_active
 
         record["row_version"] = record["row_version"] + 1
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return dict(record)
+
+    def set_archived(
+        self,
+        strategy_id: str,
+        *,
+        archived_at: datetime | None,
+        expected_row_version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Set or clear ``archived_at`` for a single strategy row.
+
+        Mirrors :meth:`SqlStrategyRepository.set_archived` so unit tests
+        running against the mock see the same optimistic-lock semantics
+        production callers will see.
+
+        Args:
+            strategy_id: ULID of the strategy to mutate.
+            archived_at: New ``archived_at`` value. ``None`` restores
+                the row; a ``datetime`` archives it.
+            expected_row_version: Optional optimistic-lock guard. When
+                supplied and not equal to the persisted ``row_version``,
+                raises :class:`RowVersionConflictError` without writing.
+
+        Returns:
+            Updated strategy dict, or ``None`` when no row matches
+            ``strategy_id``.
+
+        Raises:
+            RowVersionConflictError: ``expected_row_version`` mismatch.
+        """
+        record = self._store.get(strategy_id)
+        if record is None:
+            return None
+
+        actual_rv = int(record["row_version"])
+        if expected_row_version is not None and expected_row_version != actual_rv:
+            raise RowVersionConflictError(
+                (
+                    f"Strategy {strategy_id} row_version mismatch "
+                    f"(expected {expected_row_version}, actual {actual_rv})"
+                ),
+                entity="strategy",
+                entity_id=strategy_id,
+                expected_row_version=expected_row_version,
+                actual_row_version=actual_rv,
+            )
+
+        # Normalise the timestamp to ISO-8601 so the dict shape matches
+        # the SQL repo's ``_strategy_to_dict`` output (which serialises
+        # via ``isoformat()``). The frontend's archived_at type is
+        # ``string | null`` so this match matters end-to-end.
+        record["archived_at"] = archived_at.isoformat() if archived_at is not None else None
+        record["row_version"] = actual_rv + 1
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
         return dict(record)
 
