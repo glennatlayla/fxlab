@@ -11,6 +11,13 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The Python build-artifact ``lib/`` rule above is global; un-ignore the
+# frontend source subfolder so ``frontend/src/lib/**`` (TypeScript
+# helpers like ir_diff.ts) is tracked. Without this negation, hand-
+# created TS modules under that path would be silently excluded from
+# the repo and only surface as drift at install time.
+!frontend/src/lib/
+!frontend/src/lib/**
 lib64/
 parts/
 sdist/
