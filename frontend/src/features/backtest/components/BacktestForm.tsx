@@ -183,9 +183,7 @@ export function BacktestForm({
 
   const filteredSymbols = useMemo(() => {
     if (!symbolSearch) return MOCK_SYMBOLS;
-    return MOCK_SYMBOLS.filter((sym) =>
-      sym.toUpperCase().includes(symbolSearch.toUpperCase()),
-    );
+    return MOCK_SYMBOLS.filter((sym) => sym.toUpperCase().includes(symbolSearch.toUpperCase()));
   }, [symbolSearch]);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -225,7 +223,6 @@ export function BacktestForm({
     setFormValues((prev) => ({ ...prev, commission_rate: value }));
   };
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handleSlippageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value ? parseInt(e.target.value, 10) : undefined;
     setFormValues((prev) => ({ ...prev, slippage_bps: value }));
@@ -242,9 +239,7 @@ export function BacktestForm({
   // Render
   // ─────────────────────────────────────────────────────────────────────────
 
-  const selectedStrategy = MOCK_STRATEGIES.find(
-    (s) => s.id === formValues.strategy_build_id,
-  );
+  const selectedStrategy = MOCK_STRATEGIES.find((s) => s.id === formValues.strategy_build_id);
   const selectedSymbols = formValues.symbols || [];
 
   return (
@@ -257,14 +252,14 @@ export function BacktestForm({
       <div className="flex flex-col gap-2">
         <label htmlFor="strategy-picker" className="block text-sm font-medium text-surface-900">
           Strategy
-          <span className="text-red-500 ml-1">*</span>
+          <span className="ml-1 text-red-500">*</span>
         </label>
         <button
           id="strategy-picker"
           type="button"
           onClick={() => setStrategySheetOpen(true)}
           className={clsx(
-            "flex items-center justify-between px-4 py-3 border rounded-lg",
+            "flex items-center justify-between rounded-lg border px-4 py-3",
             "transition-colors duration-200",
             getFieldError("strategy_build_id")
               ? "border-red-300 bg-red-50"
@@ -272,9 +267,7 @@ export function BacktestForm({
           )}
         >
           <span
-            className={clsx(
-              selectedStrategy ? "text-surface-900 font-medium" : "text-surface-500",
-            )}
+            className={clsx(selectedStrategy ? "font-medium text-surface-900" : "text-surface-500")}
           >
             {selectedStrategy?.name || "Select strategy..."}
           </span>
@@ -291,14 +284,14 @@ export function BacktestForm({
       <div className="flex flex-col gap-2">
         <label htmlFor="symbol-picker" className="block text-sm font-medium text-surface-900">
           Symbols
-          <span className="text-red-500 ml-1">*</span>
+          <span className="ml-1 text-red-500">*</span>
         </label>
         <button
           id="symbol-picker"
           type="button"
           onClick={() => setSymbolSheetOpen(true)}
           className={clsx(
-            "flex items-center justify-between px-4 py-3 border rounded-lg",
+            "flex items-center justify-between rounded-lg border px-4 py-3",
             "transition-colors duration-200",
             getFieldError("symbols")
               ? "border-red-300 bg-red-50"
@@ -328,7 +321,7 @@ export function BacktestForm({
         <div className="flex flex-col gap-2">
           <label htmlFor="start-date" className="block text-sm font-medium text-surface-900">
             Start Date
-            <span className="text-red-500 ml-1">*</span>
+            <span className="ml-1 text-red-500">*</span>
           </label>
           <input
             id="start-date"
@@ -336,7 +329,7 @@ export function BacktestForm({
             value={formValues.start_date || ""}
             onChange={(e) => handleDateChange("start_date", e.target.value)}
             className={clsx(
-              "px-4 py-2 border rounded-lg text-sm font-mono",
+              "rounded-lg border px-4 py-2 font-mono text-sm",
               "transition-colors duration-200",
               getFieldError("start_date")
                 ? "border-red-300 bg-red-50"
@@ -353,7 +346,7 @@ export function BacktestForm({
         <div className="flex flex-col gap-2">
           <label htmlFor="end-date" className="block text-sm font-medium text-surface-900">
             End Date
-            <span className="text-red-500 ml-1">*</span>
+            <span className="ml-1 text-red-500">*</span>
           </label>
           <input
             id="end-date"
@@ -361,7 +354,7 @@ export function BacktestForm({
             value={formValues.end_date || ""}
             onChange={(e) => handleDateChange("end_date", e.target.value)}
             className={clsx(
-              "px-4 py-2 border rounded-lg text-sm font-mono",
+              "rounded-lg border px-4 py-2 font-mono text-sm",
               "transition-colors duration-200",
               getFieldError("end_date")
                 ? "border-red-300 bg-red-50"
@@ -380,7 +373,7 @@ export function BacktestForm({
       <div className="flex flex-col gap-2">
         <label htmlFor="interval-control" className="block text-sm font-medium text-surface-900">
           Interval
-          <span className="text-red-500 ml-1">*</span>
+          <span className="ml-1 text-red-500">*</span>
         </label>
         <SegmentedControl
           id="interval-control"
@@ -399,10 +392,10 @@ export function BacktestForm({
       <div className="flex flex-col gap-2">
         <label htmlFor="initial-equity" className="block text-sm font-medium text-surface-900">
           Initial Equity
-          <span className="text-red-500 ml-1">*</span>
+          <span className="ml-1 text-red-500">*</span>
         </label>
-        <div className="flex items-center border rounded-lg px-4 py-2">
-          <span className="text-surface-500 font-medium mr-2">$</span>
+        <div className="flex items-center rounded-lg border px-4 py-2">
+          <span className="mr-2 font-medium text-surface-500">$</span>
           <input
             id="initial-equity"
             type="number"
@@ -412,7 +405,7 @@ export function BacktestForm({
             max={BACKTEST_CONSTRAINTS.MAX_INITIAL_EQUITY}
             placeholder="10000"
             className={clsx(
-              "flex-1 outline-none text-sm font-mono",
+              "flex-1 font-mono text-sm outline-none",
               getFieldError("initial_equity") ? "bg-red-50" : "bg-white",
             )}
           />
@@ -434,7 +427,7 @@ export function BacktestForm({
           type="button"
           onClick={() => setExpandedAdvanced(!expandedAdvanced)}
           className={clsx(
-            "flex w-full items-center justify-between py-2 px-0",
+            "flex w-full items-center justify-between px-0 py-2",
             "text-sm font-medium text-surface-700 hover:text-surface-900",
             "transition-colors duration-200",
           )}
@@ -458,7 +451,9 @@ export function BacktestForm({
               <input
                 id="commission"
                 type="number"
-                value={formValues.commission_rate !== undefined ? formValues.commission_rate * 100 : ""}
+                value={
+                  formValues.commission_rate !== undefined ? formValues.commission_rate * 100 : ""
+                }
                 onChange={(e) =>
                   handleCommissionChange({
                     ...e,
@@ -466,6 +461,7 @@ export function BacktestForm({
                       ...e.target,
                       value: e.target.value ? (parseFloat(e.target.value) / 100).toString() : "",
                     },
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- synthetic-event-rebuild
                   } as any)
                 }
                 min="0"
@@ -473,7 +469,7 @@ export function BacktestForm({
                 step="0.001"
                 placeholder="0"
                 className={clsx(
-                  "px-4 py-2 border rounded-lg text-sm font-mono",
+                  "rounded-lg border px-4 py-2 font-mono text-sm",
                   "transition-colors duration-200",
                   getFieldError("commission_rate")
                     ? "border-red-300 bg-red-50"
@@ -501,7 +497,7 @@ export function BacktestForm({
                 max={BACKTEST_CONSTRAINTS.MAX_SLIPPAGE_BPS}
                 placeholder="0"
                 className={clsx(
-                  "px-4 py-2 border rounded-lg text-sm font-mono",
+                  "rounded-lg border px-4 py-2 font-mono text-sm",
                   "transition-colors duration-200",
                   getFieldError("slippage_bps")
                     ? "border-red-300 bg-red-50"
@@ -523,11 +519,11 @@ export function BacktestForm({
         type="submit"
         disabled={!isFormValid || isSubmitting}
         className={clsx(
-          "fixed bottom-0 left-0 right-0 py-4 px-4 font-semibold",
+          "fixed bottom-0 left-0 right-0 px-4 py-4 font-semibold",
           "transition-colors duration-200",
           isFormValid && !isSubmitting
             ? "bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-800"
-            : "bg-surface-200 text-surface-500 cursor-not-allowed",
+            : "cursor-not-allowed bg-surface-200 text-surface-500",
         )}
       >
         {isSubmitting ? "Submitting..." : "Run Backtest"}
@@ -546,10 +542,10 @@ export function BacktestForm({
               type="button"
               onClick={() => handleStrategySelect(strategy.id)}
               className={clsx(
-                "w-full text-left px-4 py-3 rounded-lg",
+                "w-full rounded-lg px-4 py-3 text-left",
                 "transition-colors duration-200",
                 formValues.strategy_build_id === strategy.id
-                  ? "bg-brand-100 text-brand-700 font-medium"
+                  ? "bg-brand-100 font-medium text-brand-700"
                   : "bg-surface-50 text-surface-900 hover:bg-surface-100",
               )}
             >
@@ -572,7 +568,7 @@ export function BacktestForm({
             placeholder="Search symbols..."
             value={symbolSearch}
             onChange={(e) => setSymbolSearch(e.target.value)}
-            className="px-4 py-2 border border-surface-200 rounded-lg text-sm"
+            className="rounded-lg border border-surface-200 px-4 py-2 text-sm"
           />
 
           {/* Symbol Grid */}
@@ -583,7 +579,7 @@ export function BacktestForm({
                 type="button"
                 onClick={() => handleSymbolToggle(symbol)}
                 className={clsx(
-                  "px-3 py-2 rounded-lg text-sm font-medium",
+                  "rounded-lg px-3 py-2 text-sm font-medium",
                   "transition-colors duration-200",
                   selectedSymbols.includes(symbol)
                     ? "bg-brand-600 text-white"
@@ -599,7 +595,7 @@ export function BacktestForm({
           <button
             type="button"
             onClick={() => setSymbolSheetOpen(false)}
-            className="w-full py-3 mt-4 bg-brand-600 text-white font-medium rounded-lg hover:bg-brand-700"
+            className="mt-4 w-full rounded-lg bg-brand-600 py-3 font-medium text-white hover:bg-brand-700"
           >
             Done
           </button>

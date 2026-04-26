@@ -104,7 +104,7 @@ def _check_redis_connectivity() -> dict:
         import redis
 
         r = redis.Redis.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2)
-        r.ping()  # type: ignore[attr-defined]
+        r.ping()  # type: ignore[attr-defined]  # redis.Redis.from_url stub returns None-typed in some versions
         return {"status": "ok"}
     except Exception:
         return {

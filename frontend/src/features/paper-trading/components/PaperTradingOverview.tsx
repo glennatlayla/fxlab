@@ -69,29 +69,21 @@ export function PaperTradingOverview() {
   } = useQuery({
     queryKey: ["paper-deployment", selectedDeploymentId],
     queryFn: () =>
-      selectedDeploymentId
-        ? paperTradingApi.getDeploymentDetail(selectedDeploymentId)
-        : null,
+      selectedDeploymentId ? paperTradingApi.getDeploymentDetail(selectedDeploymentId) : null,
     enabled: selectedDeploymentId !== null,
   });
 
   // Fetch positions for selected deployment
   const { data: positions = [] } = useQuery({
     queryKey: ["paper-positions", selectedDeploymentId],
-    queryFn: () =>
-      selectedDeploymentId
-        ? paperTradingApi.getPositions(selectedDeploymentId)
-        : [],
+    queryFn: () => (selectedDeploymentId ? paperTradingApi.getPositions(selectedDeploymentId) : []),
     enabled: selectedDeploymentId !== null,
   });
 
   // Fetch orders for selected deployment
   const { data: orders = [] } = useQuery({
     queryKey: ["paper-orders", selectedDeploymentId],
-    queryFn: () =>
-      selectedDeploymentId
-        ? paperTradingApi.getOrders(selectedDeploymentId)
-        : [],
+    queryFn: () => (selectedDeploymentId ? paperTradingApi.getOrders(selectedDeploymentId) : []),
     enabled: selectedDeploymentId !== null,
   });
 
@@ -145,6 +137,7 @@ export function PaperTradingOverview() {
             className="flex items-center gap-2 rounded bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"
             onClick={() => {
               // Navigate to create new deployment
+              // eslint-disable-next-line no-console -- placeholder-handler-pending-routing
               console.log("Create new deployment");
             }}
             aria-label="Create new paper trading deployment"
@@ -184,10 +177,7 @@ export function PaperTradingOverview() {
         {isLoadingDeployments ? (
           <div className="space-y-3">
             {[1, 2, 3].map((i) => (
-              <div
-                key={i}
-                className="h-32 animate-pulse rounded-lg bg-gray-700"
-              />
+              <div key={i} className="h-32 animate-pulse rounded-lg bg-gray-700" />
             ))}
           </div>
         ) : filteredDeployments.length === 0 ? (
@@ -202,6 +192,7 @@ export function PaperTradingOverview() {
                 className="mt-3 rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
                 onClick={() => {
                   // Navigate to create new deployment
+                  // eslint-disable-next-line no-console -- placeholder-handler-pending-routing
                   console.log("Create new deployment");
                 }}
               >
@@ -225,7 +216,7 @@ export function PaperTradingOverview() {
       {/* Detail Modal / BottomSheet */}
       {selectedDeploymentId && selectedDeployment && (
         <div className="fixed inset-0 z-50 flex items-end bg-black/50">
-          <div className="w-full rounded-t-lg bg-gray-800 p-4 max-h-[80vh] overflow-y-auto">
+          <div className="max-h-[80vh] w-full overflow-y-auto rounded-t-lg bg-gray-800 p-4">
             {/* Close button */}
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-bold">Deployment Details</h2>
@@ -242,10 +233,7 @@ export function PaperTradingOverview() {
             {isLoadingDetail ? (
               <div className="space-y-3">
                 {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-20 animate-pulse rounded bg-gray-700"
-                  />
+                  <div key={i} className="h-20 animate-pulse rounded bg-gray-700" />
                 ))}
               </div>
             ) : (

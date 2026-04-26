@@ -24,11 +24,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { PaperTradingForm } from "../components/PaperTradingForm";
-import type {
-  DeploymentMetadata,
-  StrategyBuildMetadata,
-  PaperTradingConfig,
-} from "../types";
+import type { DeploymentMetadata, StrategyBuildMetadata, PaperTradingConfig } from "../types";
 
 /**
  * Helper: Create mock deployment metadata.

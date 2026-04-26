@@ -97,9 +97,7 @@ export const paperTradingApi = {
    *   const deployments = await paperTradingApi.getDeployments();
    */
   async getDeployments(): Promise<DeploymentMetadata[]> {
-    const response = await apiClient.get<DeploymentMetadata[]>(
-      "/deployments?status=active",
-    );
+    const response = await apiClient.get<DeploymentMetadata[]>("/deployments?status=active");
     return response.data;
   },
 
@@ -142,9 +140,7 @@ export const paperTradingApi = {
    *   const deployments = await paperTradingApi.listDeployments();
    */
   async listDeployments(): Promise<PaperDeploymentSummary[]> {
-    const response = await apiClient.get<PaperDeploymentSummary[]>(
-      "/paper/deployments",
-    );
+    const response = await apiClient.get<PaperDeploymentSummary[]>("/paper/deployments");
     return response.data;
   },
 
@@ -211,9 +207,7 @@ export const paperTradingApi = {
    *   const orders = await paperTradingApi.getOrders("01HDEPLOY...");
    */
   async getOrders(deploymentId: string): Promise<PaperOrder[]> {
-    const response = await apiClient.get<PaperOrder[]>(
-      `/paper/deployments/${deploymentId}/orders`,
-    );
+    const response = await apiClient.get<PaperOrder[]>(`/paper/deployments/${deploymentId}/orders`);
     return response.data;
   },
 

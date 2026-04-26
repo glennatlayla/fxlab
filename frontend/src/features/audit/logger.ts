@@ -43,11 +43,9 @@ function emit(level: "debug" | "info" | "warn" | "error", message: string, extra
       console.info(`[Audit] ${message}`, entry);
       break;
     case "warn":
-      // eslint-disable-next-line no-console
       console.warn(`[Audit] ${message}`, entry);
       break;
     case "error":
-      // eslint-disable-next-line no-console
       console.error(`[Audit] ${message}`, entry);
       break;
   }

@@ -140,11 +140,7 @@ export interface StrategyBuildMetadata {
 // ---------------------------------------------------------------------------
 
 /** Paper deployment lifecycle status. */
-export type PaperDeploymentStatus =
-  | "active"
-  | "paused"
-  | "frozen"
-  | "stopped";
+export type PaperDeploymentStatus = "active" | "paused" | "frozen" | "stopped";
 
 /**
  * Named constants for paper deployment status values.

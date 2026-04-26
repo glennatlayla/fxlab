@@ -96,7 +96,7 @@ export function ParameterRangeEditor({
         return updated;
       });
     },
-    [parameters, onChange]
+    [parameters, onChange],
   );
 
   const handleParameterChange = useCallback(
@@ -108,7 +108,7 @@ export function ParameterRangeEditor({
       };
       onChange(updated);
     },
-    [parameters, onChange]
+    [parameters, onChange],
   );
 
   const handleBlur = useCallback(
@@ -118,16 +118,13 @@ export function ParameterRangeEditor({
 
       if (!result.success) {
         const fieldErrors: Record<string, string> = {};
-        result.error.flatten().fieldErrors as Record<string, string[]> | undefined;
 
         // Aggregate errors by field
-        Object.entries(result.error.flatten().fieldErrors || {}).forEach(
-          ([field, messages]) => {
-            if (Array.isArray(messages) && messages.length > 0) {
-              fieldErrors[field] = messages[0];
-            }
+        Object.entries(result.error.flatten().fieldErrors || {}).forEach(([field, messages]) => {
+          if (Array.isArray(messages) && messages.length > 0) {
+            fieldErrors[field] = messages[0];
           }
-        );
+        });
 
         // Also validate min < max constraint
         if (parameters[index].min >= parameters[index].max) {
@@ -147,7 +144,7 @@ export function ParameterRangeEditor({
         });
       }
     },
-    [parameters]
+    [parameters],
   );
 
   // Calculate combinations for a single parameter
@@ -160,13 +157,13 @@ export function ParameterRangeEditor({
     return (
       <div className={`${className || ""}`}>
         <div className="rounded-lg border-2 border-dashed border-gray-300 p-6 text-center">
-          <p className="text-gray-600 mb-4">No parameters added</p>
+          <p className="mb-4 text-gray-600">No parameters added</p>
           <button
             type="button"
             onClick={handleAddParameter}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="h-4 w-4" />
             Add parameter
           </button>
         </div>
@@ -182,109 +179,81 @@ export function ParameterRangeEditor({
         const combinations = getCombinations(param);
 
         return (
-          <div key={index} className="border border-gray-200 rounded-lg p-4 bg-white">
+          <div key={index} className="rounded-lg border border-gray-200 bg-white p-4">
             {/* Parameter name and remove button */}
-            <div className="flex items-center justify-between mb-3">
+            <div className="mb-3 flex items-center justify-between">
               <input
                 type="text"
                 value={param.name}
-                onChange={(e) =>
-                  handleParameterChange(index, "name", e.target.value)
-                }
+                onChange={(e) => handleParameterChange(index, "name", e.target.value)}
                 placeholder="Parameter name (e.g., ma_fast)"
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <button
                 type="button"
                 onClick={() => handleRemoveParameter(index)}
-                className="ml-3 p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                className="ml-3 rounded-lg p-2 text-red-600 transition-colors hover:bg-red-50"
                 title="Remove parameter"
               >
-                <Trash2 className="w-4 h-4" />
+                <Trash2 className="h-4 w-4" />
               </button>
             </div>
 
             {/* Min, Max, Step inputs */}
-            <div className="grid grid-cols-3 gap-3 mb-3">
+            <div className="mb-3 grid grid-cols-3 gap-3">
               {/* Min */}
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Min
-                </label>
+                <label className="mb-1 block text-xs font-medium text-gray-600">Min</label>
                 <input
                   type="number"
                   value={param.min}
                   onChange={(e) =>
-                    handleParameterChange(
-                      index,
-                      "min",
-                      parseFloat(e.target.value) || 0
-                    )
+                    handleParameterChange(index, "min", parseFloat(e.target.value) || 0)
                   }
                   onBlur={() => handleBlur(index)}
-                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    paramErrors.min
-                      ? "border-red-500 bg-red-50"
-                      : "border-gray-300"
+                  className={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    paramErrors.min ? "border-red-500 bg-red-50" : "border-gray-300"
                   }`}
                 />
-                {paramErrors.min && (
-                  <p className="text-xs text-red-600 mt-1">{paramErrors.min}</p>
-                )}
+                {paramErrors.min && <p className="mt-1 text-xs text-red-600">{paramErrors.min}</p>}
               </div>
 
               {/* Max */}
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Max
-                </label>
+                <label className="mb-1 block text-xs font-medium text-gray-600">Max</label>
                 <input
                   type="number"
                   value={param.max}
                   onChange={(e) =>
-                    handleParameterChange(
-                      index,
-                      "max",
-                      parseFloat(e.target.value) || 0
-                    )
+                    handleParameterChange(index, "max", parseFloat(e.target.value) || 0)
                   }
                   onBlur={() => handleBlur(index)}
-                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                  className={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                     paramErrors.max || paramErrors.min
                       ? "border-red-500 bg-red-50"
                       : "border-gray-300"
                   }`}
                 />
-                {paramErrors.max && (
-                  <p className="text-xs text-red-600 mt-1">{paramErrors.max}</p>
-                )}
+                {paramErrors.max && <p className="mt-1 text-xs text-red-600">{paramErrors.max}</p>}
               </div>
 
               {/* Step */}
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Step
-                </label>
+                <label className="mb-1 block text-xs font-medium text-gray-600">Step</label>
                 <input
                   type="number"
                   value={param.step}
                   onChange={(e) =>
-                    handleParameterChange(
-                      index,
-                      "step",
-                      parseFloat(e.target.value) || 0
-                    )
+                    handleParameterChange(index, "step", parseFloat(e.target.value) || 0)
                   }
                   onBlur={() => handleBlur(index)}
                   step="any"
-                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    paramErrors.step
-                      ? "border-red-500 bg-red-50"
-                      : "border-gray-300"
+                  className={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    paramErrors.step ? "border-red-500 bg-red-50" : "border-gray-300"
                   }`}
                 />
                 {paramErrors.step && (
-                  <p className="text-xs text-red-600 mt-1">{paramErrors.step}</p>
+                  <p className="mt-1 text-xs text-red-600">{paramErrors.step}</p>
                 )}
               </div>
             </div>
@@ -295,7 +264,7 @@ export function ParameterRangeEditor({
                 <span className="text-xs text-gray-600">
                   {combinations} combination{combinations !== 1 ? "s" : ""}
                 </span>
-                <span className="inline-block bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full">
+                <span className="inline-block rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">
                   {combinations}
                 </span>
               </div>
@@ -308,9 +277,9 @@ export function ParameterRangeEditor({
       <button
         type="button"
         onClick={handleAddParameter}
-        className="w-full flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-gray-300 text-gray-700 rounded-lg hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-colors text-sm font-medium"
+        className="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 px-4 py-3 text-sm font-medium text-gray-700 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600"
       >
-        <Plus className="w-4 h-4" />
+        <Plus className="h-4 w-4" />
         Add parameter
       </button>
     </div>

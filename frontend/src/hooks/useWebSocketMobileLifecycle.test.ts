@@ -734,10 +734,7 @@ describe("useWebSocket - Mobile Lifecycle: Clean Teardown", () => {
     unmount();
 
     // Should have removed visibilitychange listener
-    expect(removeEventListenerSpy).toHaveBeenCalledWith(
-      "visibilitychange",
-      expect.any(Function),
-    );
+    expect(removeEventListenerSpy).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
   });
 
   it("test_unmount_removes_network_listeners", () => {

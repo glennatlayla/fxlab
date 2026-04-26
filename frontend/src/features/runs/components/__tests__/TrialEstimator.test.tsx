@@ -17,9 +17,7 @@ import type { ParameterRange } from "../../optimisation";
 describe("TrialEstimator", () => {
   describe("rendering", () => {
     it("renders_trial_count", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 5, max: 20, step: 5 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 5, max: 20, step: 5 }];
 
       render(<TrialEstimator parameters={params} />);
 
@@ -28,9 +26,7 @@ describe("TrialEstimator", () => {
     });
 
     it("renders_count_and_badge", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 5, max: 20, step: 5 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 5, max: 20, step: 5 }];
 
       render(<TrialEstimator parameters={params} />);
 
@@ -41,9 +37,7 @@ describe("TrialEstimator", () => {
 
   describe("color coding", () => {
     it("shows_green_for_low_count", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 1, max: 5, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 1, max: 5, step: 1 }];
 
       render(<TrialEstimator parameters={params} />);
 
@@ -52,9 +46,7 @@ describe("TrialEstimator", () => {
     });
 
     it("shows_amber_for_moderate_count", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 1, max: 101, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 1, max: 101, step: 1 }];
       // 101 - 1 / 1 + 1 = 101 combinations (moderate: 100-999)
 
       render(<TrialEstimator parameters={params} />);
@@ -64,9 +56,7 @@ describe("TrialEstimator", () => {
     });
 
     it("shows_orange_for_high_count", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 1, max: 1001, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 1, max: 1001, step: 1 }];
       // 1001 - 1 / 1 + 1 = 1001 combinations (high: 1000-9999)
 
       render(<TrialEstimator parameters={params} />);
@@ -76,9 +66,7 @@ describe("TrialEstimator", () => {
     });
 
     it("shows_red_for_extreme_count", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 1, max: 10001, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 1, max: 10001, step: 1 }];
       // 10001 - 1 / 1 + 1 = 10001 combinations (extreme: 10000+)
 
       render(<TrialEstimator parameters={params} />);
@@ -90,18 +78,14 @@ describe("TrialEstimator", () => {
 
   describe("updates", () => {
     it("updates_on_parameter_change", async () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 1, max: 10, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 1, max: 10, step: 1 }];
 
       const { rerender } = render(<TrialEstimator parameters={params} />);
 
       expect(screen.getByText("10")).toBeInTheDocument();
 
       // Update parameters to create more combinations
-      const newParams: ParameterRange[] = [
-        { name: "fast", min: 1, max: 20, step: 1 },
-      ];
+      const newParams: ParameterRange[] = [{ name: "fast", min: 1, max: 20, step: 1 }];
 
       rerender(<TrialEstimator parameters={newParams} />);
 
@@ -125,28 +109,20 @@ describe("TrialEstimator", () => {
 
   describe("extreme count warning", () => {
     it("shows_warning_for_count_over_10000", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 1, max: 10001, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 1, max: 10001, step: 1 }];
       // 10001 - 1 / 1 + 1 = 10001 combinations (exceeds soft limit of 10000)
 
       render(<TrialEstimator parameters={params} />);
 
-      expect(
-        screen.getByText(/may take considerable time/i)
-      ).toBeInTheDocument();
+      expect(screen.getByText(/may take considerable time/i)).toBeInTheDocument();
     });
 
     it("hides_warning_for_count_under_10000", () => {
-      const params: ParameterRange[] = [
-        { name: "fast", min: 1, max: 100, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "fast", min: 1, max: 100, step: 1 }];
 
       render(<TrialEstimator parameters={params} />);
 
-      expect(
-        screen.queryByText(/consider reducing parameters/i)
-      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/consider reducing parameters/i)).not.toBeInTheDocument();
     });
   });
 
@@ -154,15 +130,11 @@ describe("TrialEstimator", () => {
     it("handles_empty_parameters", () => {
       render(<TrialEstimator parameters={[]} />);
 
-      expect(
-        screen.getByText(/add parameters to estimate trial count/i)
-      ).toBeInTheDocument();
+      expect(screen.getByText(/add parameters to estimate trial count/i)).toBeInTheDocument();
     });
 
     it("handles_fractional_step_sizes", () => {
-      const params: ParameterRange[] = [
-        { name: "threshold", min: 0.1, max: 0.9, step: 0.1 },
-      ];
+      const params: ParameterRange[] = [{ name: "threshold", min: 0.1, max: 0.9, step: 0.1 }];
 
       render(<TrialEstimator parameters={params} />);
 

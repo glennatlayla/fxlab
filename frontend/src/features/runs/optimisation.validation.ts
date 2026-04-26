@@ -53,17 +53,7 @@ export const MAX_PARAMETERS = 10;
  *
  * Must match backend BacktestInterval enum.
  */
-export const VALID_INTERVALS = [
-  "1m",
-  "5m",
-  "15m",
-  "30m",
-  "1h",
-  "4h",
-  "1d",
-  "1w",
-  "1mo",
-] as const;
+export const VALID_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mo"] as const;
 
 export type ValidInterval = (typeof VALID_INTERVALS)[number];
 
@@ -113,17 +103,13 @@ const backtestFormSchema = z.object({
   symbols: z
     .array(z.string().min(1))
     .min(1, "At least one symbol required")
-    .transform((symbols) =>
-      symbols.map((s) => s.trim().toUpperCase()).filter(Boolean)
-    ),
+    .transform((symbols) => symbols.map((s) => s.trim().toUpperCase()).filter(Boolean)),
   start_date: z.string().date("Start date must be YYYY-MM-DD"),
   end_date: z.string().date("End date must be YYYY-MM-DD"),
   interval: z.enum(VALID_INTERVALS as readonly [ValidInterval, ...ValidInterval[]], {
     message: `Interval must be one of: ${VALID_INTERVALS.join(", ")}`,
   }),
-  initial_equity: z
-    .number()
-    .gt(0, "Initial equity must be greater than zero"),
+  initial_equity: z.number().gt(0, "Initial equity must be greater than zero"),
 });
 
 /**
@@ -136,7 +122,7 @@ const backtestWithDateConstraints = backtestFormSchema.refine(
   {
     message: "Start date must be before end date",
     path: ["start_date"],
-  }
+  },
 );
 
 /**
@@ -192,7 +178,7 @@ export const optimizationFormSchema = optimizationBaseSchema
     {
       message: "Min must be less than max for all parameters",
       path: ["parameters"],
-    }
+    },
   )
   .refine(
     (data) => {
@@ -205,9 +191,8 @@ export const optimizationFormSchema = optimizationBaseSchema
     (data: any) => ({
       message: `Trial count (${estimateTrialCount(data.parameters)}) exceeds maximum (${MAX_TRIAL_COUNT}). Reduce parameter ranges or step sizes.`,
       path: ["parameters"],
-    })
-  )
-;
+    }),
+  );
 
 export const optimizationWithConstraints = optimizationFormSchema;
 

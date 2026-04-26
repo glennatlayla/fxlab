@@ -42,11 +42,9 @@ function emit(level: "debug" | "info" | "warn" | "error", message: string, extra
       console.info(`[Artifacts] ${message}`, entry);
       break;
     case "warn":
-      // eslint-disable-next-line no-console
       console.warn(`[Artifacts] ${message}`, entry);
       break;
     case "error":
-      // eslint-disable-next-line no-console
       console.error(`[Artifacts] ${message}`, entry);
       break;
   }

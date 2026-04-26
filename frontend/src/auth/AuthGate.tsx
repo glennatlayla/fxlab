@@ -44,6 +44,7 @@ export type AuthMode = "oidc" | "local";
  * Returns:
  *   "oidc" or "local" (default).
  */
+// eslint-disable-next-line react-refresh/only-export-components -- env-helper-co-located-with-gate
 export function getAuthMode(): AuthMode {
   const mode = import.meta.env.VITE_AUTH_MODE || "local";
   if (mode === "oidc") return "oidc";

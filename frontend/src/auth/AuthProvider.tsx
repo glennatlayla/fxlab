@@ -256,14 +256,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const login = useCallback(
     async (email: string, password: string) => {
       setIsLoading(true);
+      // eslint-disable-next-line no-console -- auth-debug-instrumentation
       console.log("[FXLab:auth] login() called", { email, baseURL: apiClient.defaults.baseURL });
       try {
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] POST /auth/token sending...");
         const resp = await apiClient.post<TokenResponse>("/auth/token", {
           grant_type: "password",
           username: email,
           password,
         });
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] POST /auth/token response:", {
           status: resp.status,
           hasAccessToken: !!resp.data?.access_token,
@@ -272,27 +275,36 @@ export function AuthProvider({ children }: AuthProviderProps) {
         });
         const data = resp.data;
 
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] Setting access token...");
         setAccessToken(data.access_token);
         accessTokenRef.current = data.access_token;
 
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] Storing refresh token in sessionStorage...");
         sessionStorage.setItem(REFRESH_TOKEN_KEY, data.refresh_token);
 
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] Decoding JWT...");
         const decoded = decodeUser(data.access_token);
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] Decoded user:", decoded);
         setUser(decoded);
 
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] Scheduling refresh...");
         scheduleRefresh(data.access_token);
 
+        // eslint-disable-next-line no-console -- auth-debug-instrumentation
         console.log("[FXLab:auth] Login complete — success");
       } catch (err) {
         console.error("[FXLab:auth] Login failed at some stage:", err);
         console.error("[FXLab:auth] Error type:", typeof err);
         console.error("[FXLab:auth] Error name:", err instanceof Error ? err.name : "N/A");
-        console.error("[FXLab:auth] Error message:", err instanceof Error ? err.message : String(err));
+        console.error(
+          "[FXLab:auth] Error message:",
+          err instanceof Error ? err.message : String(err),
+        );
         if (err && typeof err === "object" && "response" in err) {
           const axErr = err as { response?: { status?: number; data?: unknown } };
           console.error("[FXLab:auth] HTTP status:", axErr.response?.status);

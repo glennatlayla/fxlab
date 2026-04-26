@@ -95,11 +95,7 @@ function formatCurrency(value: number): string {
  *   onClick: Callback when card is clicked.
  *   className: Optional additional CSS classes.
  */
-export function DeploymentCard({
-  deployment,
-  onClick,
-  className = "",
-}: DeploymentCardProps) {
+export function DeploymentCard({ deployment, onClick, className = "" }: DeploymentCardProps) {
   const equityPercentage = (deployment.equity / deployment.initial_equity) * 100;
   const equityPercentageClamp = Math.min(100, Math.max(10, equityPercentage));
 
@@ -112,13 +108,11 @@ export function DeploymentCard({
     >
       {/* Top row: Strategy name + Status Badge */}
       <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-sm font-medium text-gray-100">
-          {deployment.strategy_name}
-        </span>
+        <span className="text-sm font-medium text-gray-100">{deployment.strategy_name}</span>
         <span
           role="status"
           className={`rounded-full px-2 py-0.5 text-xs font-semibold ${getStatusBadgeColor(
-            deployment.status
+            deployment.status,
           )}`}
         >
           {deployment.status}
@@ -181,19 +175,15 @@ export function DeploymentCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex gap-4 text-xs text-gray-400">
           <span>
-            {deployment.open_positions}{" "}
-            {deployment.open_positions === 1 ? "position" : "positions"}
+            {deployment.open_positions} {deployment.open_positions === 1 ? "position" : "positions"}
           </span>
           <span>
-            {deployment.open_orders}{" "}
-            {deployment.open_orders === 1 ? "order" : "orders"}
+            {deployment.open_orders} {deployment.open_orders === 1 ? "order" : "orders"}
           </span>
         </div>
         <div className="flex items-center gap-1">
           <span className="text-xs text-gray-500">
-            {deployment.last_trade_at
-              ? formatTimestamp(deployment.last_trade_at)
-              : "never"}
+            {deployment.last_trade_at ? formatTimestamp(deployment.last_trade_at) : "never"}
           </span>
           <ChevronRight className="h-4 w-4 text-gray-500" aria-hidden="true" />
         </div>

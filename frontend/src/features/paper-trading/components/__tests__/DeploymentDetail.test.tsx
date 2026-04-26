@@ -19,15 +19,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { DeploymentDetail } from "../DeploymentDetail";
-import type {
-  PaperDeploymentSummary,
-  PaperPosition,
-  PaperOrder,
-} from "../../types";
-import {
-  PAPER_DEPLOYMENT_STATUS,
-  ORDER_STATUS,
-} from "../../types";
+import type { PaperDeploymentSummary, PaperPosition, PaperOrder } from "../../types";
+import { PAPER_DEPLOYMENT_STATUS, ORDER_STATUS } from "../../types";
 
 describe("DeploymentDetail", () => {
   const mockDeployment: PaperDeploymentSummary = {
@@ -88,7 +81,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText(/Momentum Breakout/)).toBeInTheDocument();
@@ -105,7 +98,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("AAPL")).toBeInTheDocument();
@@ -123,7 +116,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("TSLA")).toBeInTheDocument();
@@ -139,7 +132,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     const freezeButton = screen.getByRole("button", { name: /freeze/i });
@@ -161,7 +154,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     const unfreezeButton = screen.getByRole("button", { name: /unfreeze/i });
@@ -178,7 +171,7 @@ describe("DeploymentDetail", () => {
         isLoading={true}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     const freezeButton = screen.getByRole("button", { name: /freeze/i });
@@ -199,7 +192,7 @@ describe("DeploymentDetail", () => {
         isLoading={true}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     const unfreezeButton = screen.getByRole("button", { name: /unfreeze/i });
@@ -216,7 +209,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={onFreeze}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     const freezeButton = screen.getByRole("button", { name: /freeze/i });
@@ -239,7 +232,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={onUnfreeze}
-      />
+      />,
     );
 
     const unfreezeButton = screen.getByRole("button", { name: /unfreeze/i });
@@ -256,12 +249,10 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
-    expect(
-      screen.getByText(/no open positions/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/no open positions/i)).toBeInTheDocument();
   });
 
   it("test_renders_empty_orders_state", () => {
@@ -273,12 +264,10 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
-    expect(
-      screen.getByText(/no orders/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/no orders/i)).toBeInTheDocument();
   });
 
   it("test_renders_different_position_sides", () => {
@@ -311,7 +300,7 @@ describe("DeploymentDetail", () => {
         isLoading={false}
         onFreeze={vi.fn()}
         onUnfreeze={vi.fn()}
-      />
+      />,
     );
 
     // Check that both symbols appear (which imply their sides are shown)

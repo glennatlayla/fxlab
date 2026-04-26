@@ -190,8 +190,8 @@ describe("ResultsSummaryCard", () => {
     });
 
     // Total return is +2% (from 10000 to 10200)
-    const totalReturnTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Total Return"),
+    const totalReturnTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Total Return"),
     );
     expect(totalReturnTile).toHaveAttribute("data-sentiment", "positive");
   });
@@ -213,8 +213,8 @@ describe("ResultsSummaryCard", () => {
       expect(screen.getByText("Results Summary")).toBeInTheDocument();
     });
 
-    const totalReturnTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Total Return"),
+    const totalReturnTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Total Return"),
     );
     expect(totalReturnTile).toHaveAttribute("data-sentiment", "negative");
   });
@@ -222,7 +222,19 @@ describe("ResultsSummaryCard", () => {
   // AC-5: Sharpe ratio color coding
   it("displays sharpe ratio in green when > 1.5", async () => {
     const mockData = makeRunCharts({
-      trial_summaries: [{ trial_id: "t1", trial_index: 0, parameters: {}, objective_value: 1.8, sharpe_ratio: 1.8, max_drawdown_pct: -10, total_return_pct: 20, trade_count: 5, status: "completed" }],
+      trial_summaries: [
+        {
+          trial_id: "t1",
+          trial_index: 0,
+          parameters: {},
+          objective_value: 1.8,
+          sharpe_ratio: 1.8,
+          max_drawdown_pct: -10,
+          total_return_pct: 20,
+          trade_count: 5,
+          status: "completed",
+        },
+      ],
     });
     vi.mocked(resultsApi.getRunCharts).mockResolvedValueOnce(mockData);
 
@@ -234,15 +246,27 @@ describe("ResultsSummaryCard", () => {
       expect(screen.getByText("Results Summary")).toBeInTheDocument();
     });
 
-    const sharpeTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Sharpe Ratio"),
+    const sharpeTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Sharpe Ratio"),
     );
     expect(sharpeTile).toHaveAttribute("data-sentiment", "positive");
   });
 
   it("displays sharpe ratio in amber when 0.5-1.5", async () => {
     const mockData = makeRunCharts({
-      trial_summaries: [{ trial_id: "t1", trial_index: 0, parameters: {}, objective_value: 0.9, sharpe_ratio: 0.9, max_drawdown_pct: -15, total_return_pct: 15, trade_count: 5, status: "completed" }],
+      trial_summaries: [
+        {
+          trial_id: "t1",
+          trial_index: 0,
+          parameters: {},
+          objective_value: 0.9,
+          sharpe_ratio: 0.9,
+          max_drawdown_pct: -15,
+          total_return_pct: 15,
+          trade_count: 5,
+          status: "completed",
+        },
+      ],
     });
     vi.mocked(resultsApi.getRunCharts).mockResolvedValueOnce(mockData);
 
@@ -254,15 +278,27 @@ describe("ResultsSummaryCard", () => {
       expect(screen.getByText("Results Summary")).toBeInTheDocument();
     });
 
-    const sharpeTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Sharpe Ratio"),
+    const sharpeTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Sharpe Ratio"),
     );
     expect(sharpeTile).toHaveAttribute("data-sentiment", "warning");
   });
 
   it("displays sharpe ratio in red when < 0.5", async () => {
     const mockData = makeRunCharts({
-      trial_summaries: [{ trial_id: "t1", trial_index: 0, parameters: {}, objective_value: 0.3, sharpe_ratio: 0.3, max_drawdown_pct: -20, total_return_pct: 5, trade_count: 5, status: "completed" }],
+      trial_summaries: [
+        {
+          trial_id: "t1",
+          trial_index: 0,
+          parameters: {},
+          objective_value: 0.3,
+          sharpe_ratio: 0.3,
+          max_drawdown_pct: -20,
+          total_return_pct: 5,
+          trade_count: 5,
+          status: "completed",
+        },
+      ],
     });
     vi.mocked(resultsApi.getRunCharts).mockResolvedValueOnce(mockData);
 
@@ -274,8 +310,8 @@ describe("ResultsSummaryCard", () => {
       expect(screen.getByText("Results Summary")).toBeInTheDocument();
     });
 
-    const sharpeTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Sharpe Ratio"),
+    const sharpeTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Sharpe Ratio"),
     );
     expect(sharpeTile).toHaveAttribute("data-sentiment", "negative");
   });
@@ -293,8 +329,8 @@ describe("ResultsSummaryCard", () => {
       expect(screen.getByText("Results Summary")).toBeInTheDocument();
     });
 
-    const drawdownTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Max Drawdown"),
+    const drawdownTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Max Drawdown"),
     );
     expect(drawdownTile).toHaveAttribute("data-sentiment", "negative");
   });
@@ -313,8 +349,8 @@ describe("ResultsSummaryCard", () => {
     });
 
     // With 2 trades and both positive PnL, win rate is 100%
-    const winRateTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Win Rate"),
+    const winRateTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Win Rate"),
     );
     expect(winRateTile).toHaveAttribute("data-sentiment", "positive");
   });
@@ -361,8 +397,8 @@ describe("ResultsSummaryCard", () => {
     });
 
     // Win rate is 50% (1 win, 1 loss)
-    const winRateTile = Array.from(container.querySelectorAll("[data-sentiment]")).find(
-      (el) => el.textContent.includes("Win Rate"),
+    const winRateTile = Array.from(container.querySelectorAll("[data-sentiment]")).find((el) =>
+      el.textContent.includes("Win Rate"),
     );
     expect(winRateTile).toHaveAttribute("data-sentiment", "negative");
   });

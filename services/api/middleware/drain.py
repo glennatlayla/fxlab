@@ -169,7 +169,7 @@ class DrainMiddleware(BaseHTTPMiddleware):
             self._accepting_lock = threading.Lock()
 
         if app is not None:
-            super().__init__(app)  # type: ignore[arg-type]
+            super().__init__(app)  # type: ignore[arg-type]  # Starlette BaseHTTPMiddleware expects ASGI callable; we pass the app object as-is
 
     # ------------------------------------------------------------------
     # Public API

@@ -64,11 +64,9 @@ function emit(level: "debug" | "info" | "warn" | "error", message: string, extra
       console.info(`[Governance] ${message}`, entry);
       break;
     case "warn":
-      // eslint-disable-next-line no-console
       console.warn(`[Governance] ${message}`, entry);
       break;
     case "error":
-      // eslint-disable-next-line no-console
       console.error(`[Governance] ${message}`, entry);
       break;
   }

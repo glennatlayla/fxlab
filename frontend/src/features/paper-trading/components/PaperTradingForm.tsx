@@ -42,11 +42,7 @@
 import React, { useState, useCallback } from "react";
 import { BottomSheet } from "@/components/mobile/BottomSheet";
 import { paperTradingConfigSchema } from "../validation";
-import type {
-  DeploymentMetadata,
-  StrategyBuildMetadata,
-  PaperTradingConfig,
-} from "../types";
+import type { DeploymentMetadata, StrategyBuildMetadata, PaperTradingConfig } from "../types";
 
 export interface PaperTradingFormProps {
   /** List of available deployments for selection. */
@@ -125,7 +121,6 @@ export function PaperTradingForm({
     const result = paperTradingConfigSchema.safeParse(config);
     if (!result.success) {
       const errors: Record<string, string> = {};
-      result.error.flatten().fieldErrors;
       const flatErrors = result.error.flatten().fieldErrors;
       Object.entries(flatErrors).forEach(([key, msgs]) => {
         if (msgs && msgs.length > 0) {
@@ -139,7 +134,16 @@ export function PaperTradingForm({
     // Clear errors and call onSubmit
     setFieldErrors({});
     onSubmit(result.data);
-  }, [selectedDeploymentId, selectedStrategyId, initialEquity, maxPositionSize, maxDailyLoss, maxLeverage, symbolsInput, onSubmit]);
+  }, [
+    selectedDeploymentId,
+    selectedStrategyId,
+    initialEquity,
+    maxPositionSize,
+    maxDailyLoss,
+    maxLeverage,
+    symbolsInput,
+    onSubmit,
+  ]);
 
   /**
    * Check if form is complete enough to submit.
@@ -155,20 +159,16 @@ export function PaperTradingForm({
   return (
     <div className="flex flex-col gap-6 p-4">
       {/* Error banner */}
-      {error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-          {error}
-        </div>
-      )}
+      {error && <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
       {/* Deployment Picker */}
       <div>
-        <label className="block text-sm font-medium text-surface-900 mb-2">
+        <label className="mb-2 block text-sm font-medium text-surface-900">
           Deployment <span className="text-red-600">*</span>
         </label>
         <button
           onClick={() => setShowDeploymentPicker(true)}
-          className="w-full px-4 py-3 text-left border border-surface-300 rounded-lg bg-white hover:bg-surface-50 transition-colors"
+          className="w-full rounded-lg border border-surface-300 bg-white px-4 py-3 text-left transition-colors hover:bg-surface-50"
           aria-label="Select deployment"
         >
           {selectedDeployment ? selectedDeployment.name : "Select a deployment"}
@@ -191,10 +191,10 @@ export function PaperTradingForm({
                 setSelectedDeploymentId(deployment.id);
                 setShowDeploymentPicker(false);
               }}
-              className="p-3 text-left border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+              className="rounded-lg border border-surface-200 p-3 text-left transition-colors hover:bg-surface-50"
             >
               <div className="font-medium text-surface-900">{deployment.name}</div>
-              <div className="text-xs text-surface-500 mt-1">Status: {deployment.status}</div>
+              <div className="mt-1 text-xs text-surface-500">Status: {deployment.status}</div>
             </button>
           ))}
         </div>
@@ -202,12 +202,12 @@ export function PaperTradingForm({
 
       {/* Strategy Picker */}
       <div>
-        <label className="block text-sm font-medium text-surface-900 mb-2">
+        <label className="mb-2 block text-sm font-medium text-surface-900">
           Strategy <span className="text-red-600">*</span>
         </label>
         <button
           onClick={() => setShowStrategyPicker(true)}
-          className="w-full px-4 py-3 text-left border border-surface-300 rounded-lg bg-white hover:bg-surface-50 transition-colors"
+          className="w-full rounded-lg border border-surface-300 bg-white px-4 py-3 text-left transition-colors hover:bg-surface-50"
           aria-label="Select strategy"
         >
           {selectedStrategy ? selectedStrategy.name : "Select a strategy"}
@@ -230,11 +230,11 @@ export function PaperTradingForm({
                 setSelectedStrategyId(strategy.id);
                 setShowStrategyPicker(false);
               }}
-              className="p-3 text-left border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+              className="rounded-lg border border-surface-200 p-3 text-left transition-colors hover:bg-surface-50"
             >
               <div className="font-medium text-surface-900">{strategy.name}</div>
               {strategy.version && (
-                <div className="text-xs text-surface-500 mt-1">Version: {strategy.version}</div>
+                <div className="mt-1 text-xs text-surface-500">Version: {strategy.version}</div>
               )}
             </button>
           ))}
@@ -243,7 +243,7 @@ export function PaperTradingForm({
 
       {/* Initial Equity */}
       <div>
-        <label className="block text-sm font-medium text-surface-900 mb-2">
+        <label className="mb-2 block text-sm font-medium text-surface-900">
           Initial Equity <span className="text-red-600">*</span>
         </label>
         <div className="relative">
@@ -254,7 +254,7 @@ export function PaperTradingForm({
             max="1000000"
             value={initialEquity}
             onChange={(e) => setInitialEquity(Number(e.target.value))}
-            className="w-full pl-8 pr-4 py-3 border border-surface-300 rounded-lg bg-white focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+            className="w-full rounded-lg border border-surface-300 bg-white py-3 pl-8 pr-4 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
             aria-label="Initial equity"
           />
         </div>
@@ -265,11 +265,11 @@ export function PaperTradingForm({
 
       {/* Risk Limits Section */}
       <div className="border-t border-surface-200 pt-4">
-        <h3 className="text-sm font-semibold text-surface-900 mb-4">Risk Limits</h3>
+        <h3 className="mb-4 text-sm font-semibold text-surface-900">Risk Limits</h3>
 
         {/* Max Position Size */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-surface-900 mb-2">
+          <label className="mb-2 block text-sm font-medium text-surface-900">
             Max Position Size
           </label>
           <div className="relative">
@@ -280,7 +280,7 @@ export function PaperTradingForm({
               step="100"
               value={maxPositionSize}
               onChange={(e) => setMaxPositionSize(Number(e.target.value))}
-              className="w-full pl-8 pr-4 py-3 border border-surface-300 rounded-lg bg-white focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+              className="w-full rounded-lg border border-surface-300 bg-white py-3 pl-8 pr-4 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
             />
           </div>
           {fieldErrors.max_position_size && (
@@ -290,9 +290,7 @@ export function PaperTradingForm({
 
         {/* Max Daily Loss */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-surface-900 mb-2">
-            Max Daily Loss
-          </label>
+          <label className="mb-2 block text-sm font-medium text-surface-900">Max Daily Loss</label>
           <div className="relative">
             <span className="absolute left-4 top-1/2 -translate-y-1/2 text-surface-600">$</span>
             <input
@@ -301,7 +299,7 @@ export function PaperTradingForm({
               step="100"
               value={maxDailyLoss}
               onChange={(e) => setMaxDailyLoss(Number(e.target.value))}
-              className="w-full pl-8 pr-4 py-3 border border-surface-300 rounded-lg bg-white focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+              className="w-full rounded-lg border border-surface-300 bg-white py-3 pl-8 pr-4 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
             />
           </div>
           {fieldErrors.max_daily_loss && (
@@ -311,7 +309,7 @@ export function PaperTradingForm({
 
         {/* Max Leverage */}
         <div>
-          <label className="block text-sm font-medium text-surface-900 mb-2">
+          <label className="mb-2 block text-sm font-medium text-surface-900">
             Max Leverage: {maxLeverage.toFixed(1)}x
           </label>
           <input
@@ -324,7 +322,7 @@ export function PaperTradingForm({
             className="w-full"
             aria-label="Leverage"
           />
-          <div className="flex justify-between text-xs text-surface-500 mt-1">
+          <div className="mt-1 flex justify-between text-xs text-surface-500">
             <span>1x</span>
             <span>10x</span>
           </div>
@@ -336,7 +334,7 @@ export function PaperTradingForm({
 
       {/* Symbols */}
       <div>
-        <label className="block text-sm font-medium text-surface-900 mb-2">
+        <label className="mb-2 block text-sm font-medium text-surface-900">
           Trading Symbols <span className="text-red-600">*</span>
         </label>
         <input
@@ -344,19 +342,17 @@ export function PaperTradingForm({
           placeholder="AAPL,MSFT,GOOGL"
           value={symbolsInput}
           onChange={(e) => setSymbolsInput(e.target.value)}
-          className="w-full px-4 py-3 border border-surface-300 rounded-lg bg-white focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+          className="w-full rounded-lg border border-surface-300 bg-white px-4 py-3 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
         />
         <p className="mt-1 text-xs text-surface-500">Comma-separated list of symbols</p>
-        {fieldErrors.symbols && (
-          <p className="mt-1 text-sm text-red-600">{fieldErrors.symbols}</p>
-        )}
+        {fieldErrors.symbols && <p className="mt-1 text-sm text-red-600">{fieldErrors.symbols}</p>}
       </div>
 
       {/* Submit Button */}
       <button
         onClick={handleSubmit}
         disabled={!isFormValid || isLoading}
-        className="w-full py-3 rounded-lg bg-brand-500 text-white font-medium hover:bg-brand-600 disabled:bg-surface-300 disabled:text-surface-500 disabled:cursor-not-allowed transition-colors"
+        className="w-full rounded-lg bg-brand-500 py-3 font-medium text-white transition-colors hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-surface-300 disabled:text-surface-500"
       >
         {isLoading ? "Loading..." : "Continue to Review"}
       </button>

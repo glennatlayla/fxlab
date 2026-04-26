@@ -65,7 +65,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         enable_hsts: bool = False,
         hsts_max_age: int = 31_536_000,
     ) -> None:
-        super().__init__(app)  # type: ignore[arg-type]
+        super().__init__(app)  # type: ignore[arg-type]  # Starlette BaseHTTPMiddleware expects ASGI callable; we pass the app object as-is
         self._enable_hsts = enable_hsts
         self._hsts_max_age = hsts_max_age
 

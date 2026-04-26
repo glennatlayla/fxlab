@@ -224,7 +224,6 @@ export function OidcProvider({ children, userManager: injectedManager }: OidcPro
       manager.events.removeSilentRenewError(handleRenewError);
       manager.events.removeAccessTokenExpired(handleTokenExpired);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [injectedManager]);
 
   // -------------------------------------------------------------------------
@@ -290,7 +289,7 @@ export function OidcProvider({ children, userManager: injectedManager }: OidcPro
       isAuthenticated: !!user && !!accessToken,
       // OIDC login doesn't take email/password — it redirects.
       // The signature matches AuthContextValue for compatibility.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
       login: async (_email?: string, _password?: string) => {
         await login();
       },

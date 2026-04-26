@@ -149,7 +149,6 @@ export function useRunPolling(runId: string | null | undefined): UseRunPollingRe
    *   pollFn: The poll function to schedule.
    */
   const scheduleNextPoll = useCallback(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic poll fn
     (pollFn: () => void) => {
       // Race condition guard: don't schedule if component unmounted
       if (!isMountedRef.current) return;

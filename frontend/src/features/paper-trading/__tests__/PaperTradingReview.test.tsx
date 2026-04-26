@@ -55,13 +55,7 @@ describe("PaperTradingReview", () => {
     const mockOnConfirm = vi.fn();
     const summary = createMockReviewSummary();
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={false}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={false} onConfirm={mockOnConfirm} />);
 
     // Verify all fields are displayed
     expect(screen.getByText("Test Deployment")).toBeInTheDocument();
@@ -84,13 +78,7 @@ describe("PaperTradingReview", () => {
       maxDailyLossDisplay: "$2,500.00",
     });
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={false}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={false} onConfirm={mockOnConfirm} />);
 
     expect(screen.getByText("$50,000.00")).toBeInTheDocument();
     expect(screen.getByText("$25,000.00")).toBeInTheDocument();
@@ -107,13 +95,7 @@ describe("PaperTradingReview", () => {
       maxLeverage: 3.5,
     });
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={false}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={false} onConfirm={mockOnConfirm} />);
 
     expect(screen.getByText("3.5x")).toBeInTheDocument();
   });
@@ -125,13 +107,7 @@ describe("PaperTradingReview", () => {
     const mockOnConfirm = vi.fn();
     const summary = createMockReviewSummary();
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={false}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={false} onConfirm={mockOnConfirm} />);
 
     // SlideToConfirm should have a label about sliding
     expect(screen.getByText(/slide/i)).toBeInTheDocument();
@@ -144,13 +120,7 @@ describe("PaperTradingReview", () => {
     const mockOnConfirm = vi.fn();
     const summary = createMockReviewSummary();
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={false}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={false} onConfirm={mockOnConfirm} />);
 
     // Find the slider track
     const slider = screen.getByRole("slider");
@@ -168,13 +138,7 @@ describe("PaperTradingReview", () => {
     const mockOnConfirm = vi.fn();
     const summary = createMockReviewSummary();
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={true}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={true} onConfirm={mockOnConfirm} />);
 
     // SlideToConfirm should be disabled (has disabled attribute)
     const slider = screen.getByRole("slider");
@@ -214,13 +178,7 @@ describe("PaperTradingReview", () => {
       symbols: ["AAPL", "MSFT", "GOOGL", "AMZN"],
     });
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={false}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={false} onConfirm={mockOnConfirm} />);
 
     expect(screen.getByText(/AAPL.*MSFT.*GOOGL.*AMZN/)).toBeInTheDocument();
   });
@@ -232,13 +190,7 @@ describe("PaperTradingReview", () => {
     const mockOnConfirm = vi.fn();
     const summary = createMockReviewSummary();
 
-    render(
-      <PaperTradingReview
-        summary={summary}
-        isSubmitting={false}
-        onConfirm={mockOnConfirm}
-      />,
-    );
+    render(<PaperTradingReview summary={summary} isSubmitting={false} onConfirm={mockOnConfirm} />);
 
     // All fields should be displayed for review
     expect(screen.getByText("Test Deployment")).toBeInTheDocument();

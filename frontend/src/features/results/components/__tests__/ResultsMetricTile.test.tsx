@@ -14,13 +14,7 @@ import { ResultsMetricTile } from "../ResultsMetricTile";
 describe("ResultsMetricTile", () => {
   // AC-1: Renders label and value
   it("renders label and value", () => {
-    render(
-      <ResultsMetricTile
-        label="Total Return"
-        value="+12.5%"
-        sentiment="positive"
-      />
-    );
+    render(<ResultsMetricTile label="Total Return" value="+12.5%" sentiment="positive" />);
     expect(screen.getByText("Total Return")).toBeInTheDocument();
     expect(screen.getByText("+12.5%")).toBeInTheDocument();
   });
@@ -28,11 +22,7 @@ describe("ResultsMetricTile", () => {
   // AC-2: Sentiment colors
   it("applies green color for positive sentiment", () => {
     const { container } = render(
-      <ResultsMetricTile
-        label="Sharpe Ratio"
-        value="1.85"
-        sentiment="positive"
-      />
+      <ResultsMetricTile label="Sharpe Ratio" value="1.85" sentiment="positive" />,
     );
     const tile = container.querySelector("[data-sentiment='positive']");
     expect(tile).toBeInTheDocument();
@@ -43,11 +33,7 @@ describe("ResultsMetricTile", () => {
 
   it("applies red color for negative sentiment", () => {
     const { container } = render(
-      <ResultsMetricTile
-        label="Max Drawdown"
-        value="-15.2%"
-        sentiment="negative"
-      />
+      <ResultsMetricTile label="Max Drawdown" value="-15.2%" sentiment="negative" />,
     );
     const tile = container.querySelector("[data-sentiment='negative']");
     expect(tile).toBeInTheDocument();
@@ -57,11 +43,7 @@ describe("ResultsMetricTile", () => {
 
   it("applies default color for neutral sentiment", () => {
     const { container } = render(
-      <ResultsMetricTile
-        label="Trade Count"
-        value="42"
-        sentiment="neutral"
-      />
+      <ResultsMetricTile label="Trade Count" value="42" sentiment="neutral" />,
     );
     const tile = container.querySelector("[data-sentiment='neutral']");
     expect(tile).toBeInTheDocument();
@@ -71,11 +53,7 @@ describe("ResultsMetricTile", () => {
 
   it("applies amber color for warning sentiment", () => {
     const { container } = render(
-      <ResultsMetricTile
-        label="Win Rate"
-        value="45%"
-        sentiment="warning"
-      />
+      <ResultsMetricTile label="Win Rate" value="45%" sentiment="warning" />,
     );
     const tile = container.querySelector("[data-sentiment='warning']");
     expect(tile).toBeInTheDocument();
@@ -91,32 +69,21 @@ describe("ResultsMetricTile", () => {
         value="+12.5%"
         sentiment="positive"
         icon={TrendingUp}
-      />
+      />,
     );
     const icon = screen.getByTestId("metric-tile-icon");
     expect(icon).toBeInTheDocument();
   });
 
   it("does not render icon when omitted", () => {
-    render(
-      <ResultsMetricTile
-        label="Total Return"
-        value="+12.5%"
-        sentiment="positive"
-      />
-    );
+    render(<ResultsMetricTile label="Total Return" value="+12.5%" sentiment="positive" />);
     const icon = screen.queryByTestId("metric-tile-icon");
     expect(icon).not.toBeInTheDocument();
   });
 
   it("renders custom icon correctly", () => {
     const { container } = render(
-      <ResultsMetricTile
-        label="Decline"
-        value="-8.3%"
-        sentiment="negative"
-        icon={TrendingDown}
-      />
+      <ResultsMetricTile label="Decline" value="-8.3%" sentiment="negative" icon={TrendingDown} />,
     );
     const svgIcon = container.querySelector("svg");
     expect(svgIcon).toBeInTheDocument();

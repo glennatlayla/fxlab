@@ -42,10 +42,7 @@
 import React, { useState, useCallback } from "react";
 import { ChevronDown, ChevronUp, Loader } from "lucide-react";
 import { validateOptimizationForm } from "../optimisation.validation";
-import {
-  VALID_INTERVALS,
-  VALID_METRICS,
-} from "../optimisation.validation";
+import { VALID_INTERVALS, VALID_METRICS } from "../optimisation.validation";
 import { ParameterRangeEditor } from "./ParameterRangeEditor";
 import { TrialEstimator } from "./TrialEstimator";
 import type { OptimizationFormValues } from "../optimisation";
@@ -139,15 +136,12 @@ export function OptimizationForm({
     }));
   }, []);
 
-  const handleFieldChange = useCallback(
-    (field: keyof OptimizationFormValues, value: unknown) => {
-      setFormValues((prev) => ({
-        ...prev,
-        [field]: value,
-      }));
-    },
-    []
-  );
+  const handleFieldChange = useCallback((field: keyof OptimizationFormValues, value: unknown) => {
+    setFormValues((prev) => ({
+      ...prev,
+      [field]: value,
+    }));
+  }, []);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -163,7 +157,7 @@ export function OptimizationForm({
         console.error("Form submission failed:", error);
       }
     },
-    [formValues, validateForm, onSubmit]
+    [formValues, validateForm, onSubmit],
   );
 
   const parameters = formValues.parameters || [];
@@ -174,105 +168,78 @@ export function OptimizationForm({
   };
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className={`${className || ""} pb-32`}
-    >
+    <form onSubmit={handleSubmit} className={`${className || ""} pb-32`}>
       {/* Error summary */}
       {errorCount > 0 && (
-        <div className="mb-6 rounded-lg bg-red-50 border border-red-200 p-4">
+        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4">
           <p className="text-sm font-medium text-red-900">
-            {errorCount} error{errorCount !== 1 ? "s" : ""} in form. Please
-            review and correct before submitting.
+            {errorCount} error{errorCount !== 1 ? "s" : ""} in form. Please review and correct
+            before submitting.
           </p>
         </div>
       )}
 
       {/* Backtest section */}
-      <div className="space-y-5 mb-8">
-        <h2 className="text-lg font-semibold text-gray-900">
-          Backtest Configuration
-        </h2>
+      <div className="mb-8 space-y-5">
+        <h2 className="text-lg font-semibold text-gray-900">Backtest Configuration</h2>
 
         {/* Symbols */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Symbols
-          </label>
+          <label className="mb-2 block text-sm font-medium text-gray-700">Symbols</label>
           <input
             type="text"
             placeholder="AAPL, MSFT, GOOGL"
-            value={
-              Array.isArray(formValues.symbols)
-                ? formValues.symbols.join(", ")
-                : ""
-            }
+            value={Array.isArray(formValues.symbols) ? formValues.symbols.join(", ") : ""}
             onChange={(e) => handleSymbolsChange(e.target.value)}
-            className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+            className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
               getFieldError("symbols") ? "border-red-500" : "border-gray-300"
             }`}
           />
           {getFieldError("symbols") && (
-            <p className="text-xs text-red-600 mt-1">
-              {getFieldError("symbols")}
-            </p>
+            <p className="mt-1 text-xs text-red-600">{getFieldError("symbols")}</p>
           )}
         </div>
 
         {/* Date range */}
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Start Date
-            </label>
+            <label className="mb-2 block text-sm font-medium text-gray-700">Start Date</label>
             <input
               type="date"
               value={formValues.start_date || ""}
-              onChange={(e) =>
-                handleFieldChange("start_date", e.target.value)
-              }
-              className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                getFieldError("start_date")
-                  ? "border-red-500"
-                  : "border-gray-300"
+              onChange={(e) => handleFieldChange("start_date", e.target.value)}
+              className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                getFieldError("start_date") ? "border-red-500" : "border-gray-300"
               }`}
             />
             {getFieldError("start_date") && (
-              <p className="text-xs text-red-600 mt-1">
-                {getFieldError("start_date")}
-              </p>
+              <p className="mt-1 text-xs text-red-600">{getFieldError("start_date")}</p>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              End Date
-            </label>
+            <label className="mb-2 block text-sm font-medium text-gray-700">End Date</label>
             <input
               type="date"
               value={formValues.end_date || ""}
               onChange={(e) => handleFieldChange("end_date", e.target.value)}
-              className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+              className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                 getFieldError("end_date") ? "border-red-500" : "border-gray-300"
               }`}
             />
             {getFieldError("end_date") && (
-              <p className="text-xs text-red-600 mt-1">
-                {getFieldError("end_date")}
-              </p>
+              <p className="mt-1 text-xs text-red-600">{getFieldError("end_date")}</p>
             )}
           </div>
         </div>
 
         {/* Interval */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Interval
-          </label>
+          <label className="mb-2 block text-sm font-medium text-gray-700">Interval</label>
           <select
             value={formValues.interval || "1d"}
             onChange={(e) => handleFieldChange("interval", e.target.value)}
-            className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+            className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
               getFieldError("interval") ? "border-red-500" : "border-gray-300"
             }`}
           >
@@ -286,42 +253,32 @@ export function OptimizationForm({
 
         {/* Initial equity */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Initial Equity
-          </label>
+          <label className="mb-2 block text-sm font-medium text-gray-700">Initial Equity</label>
           <input
             type="number"
             value={formValues.initial_equity || ""}
-            onChange={(e) =>
-              handleFieldChange("initial_equity", parseFloat(e.target.value))
-            }
+            onChange={(e) => handleFieldChange("initial_equity", parseFloat(e.target.value))}
             step="100"
-            className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-              getFieldError("initial_equity")
-                ? "border-red-500"
-                : "border-gray-300"
+            className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+              getFieldError("initial_equity") ? "border-red-500" : "border-gray-300"
             }`}
           />
         </div>
       </div>
 
       {/* Optimization section */}
-      <div className="space-y-5 mb-8">
-        <h2 className="text-lg font-semibold text-gray-900">
-          Optimization Configuration
-        </h2>
+      <div className="mb-8 space-y-5">
+        <h2 className="text-lg font-semibold text-gray-900">Optimization Configuration</h2>
 
         {/* Optimization metric */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
+          <label className="mb-2 block text-sm font-medium text-gray-700">
             Optimization Metric
           </label>
           <select
             value={formValues.optimization_metric || "sharpe_ratio"}
-            onChange={(e) =>
-              handleFieldChange("optimization_metric", e.target.value)
-            }
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            onChange={(e) => handleFieldChange("optimization_metric", e.target.value)}
+            className="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             {VALID_METRICS.map((metric) => (
               <option key={metric} value={metric}>
@@ -333,26 +290,18 @@ export function OptimizationForm({
 
         {/* Parameter ranges */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-3">
-            Parameter Ranges
-          </label>
+          <label className="mb-3 block text-sm font-medium text-gray-700">Parameter Ranges</label>
           <ParameterRangeEditor
             parameters={parameters}
-            onChange={(updated) =>
-              handleFieldChange("parameters", updated)
-            }
+            onChange={(updated) => handleFieldChange("parameters", updated)}
           />
           {getFieldError("parameters") && (
-            <p className="text-xs text-red-600 mt-2">
-              {getFieldError("parameters")}
-            </p>
+            <p className="mt-2 text-xs text-red-600">{getFieldError("parameters")}</p>
           )}
         </div>
 
         {/* Trial estimator */}
-        {parameters.length > 0 && (
-          <TrialEstimator parameters={parameters} />
-        )}
+        {parameters.length > 0 && <TrialEstimator parameters={parameters} />}
       </div>
 
       {/* Walk-Forward section (collapsible) */}
@@ -360,23 +309,21 @@ export function OptimizationForm({
         <button
           type="button"
           onClick={() => setExpandWalkForward(!expandWalkForward)}
-          className="w-full flex items-center justify-between p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+          className="flex w-full items-center justify-between rounded-lg border border-gray-300 p-4 transition-colors hover:bg-gray-50"
         >
-          <h3 className="text-sm font-medium text-gray-900">
-            Walk-Forward Analysis (Optional)
-          </h3>
+          <h3 className="text-sm font-medium text-gray-900">Walk-Forward Analysis (Optional)</h3>
           {expandWalkForward ? (
-            <ChevronUp className="w-5 h-5 text-gray-600" />
+            <ChevronUp className="h-5 w-5 text-gray-600" />
           ) : (
-            <ChevronDown className="w-5 h-5 text-gray-600" />
+            <ChevronDown className="h-5 w-5 text-gray-600" />
           )}
         </button>
 
         {expandWalkForward && (
-          <div className="mt-4 p-4 border border-gray-300 rounded-lg bg-gray-50 space-y-4">
+          <div className="mt-4 space-y-4 rounded-lg border border-gray-300 bg-gray-50 p-4">
             {/* Walk-forward windows */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="mb-2 block text-sm font-medium text-gray-700">
                 Rolling Windows
               </label>
               <input
@@ -385,27 +332,23 @@ export function OptimizationForm({
                 onChange={(e) =>
                   handleFieldChange(
                     "walk_forward_windows",
-                    e.target.value ? parseInt(e.target.value) : undefined
+                    e.target.value ? parseInt(e.target.value) : undefined,
                   )
                 }
                 min="2"
                 max="20"
-                className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                  getFieldError("walk_forward_windows")
-                    ? "border-red-500"
-                    : "border-gray-300"
+                className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                  getFieldError("walk_forward_windows") ? "border-red-500" : "border-gray-300"
                 }`}
               />
               {getFieldError("walk_forward_windows") && (
-                <p className="text-xs text-red-600 mt-1">
-                  {getFieldError("walk_forward_windows")}
-                </p>
+                <p className="mt-1 text-xs text-red-600">{getFieldError("walk_forward_windows")}</p>
               )}
             </div>
 
             {/* Walk-forward train percentage */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="mb-2 block text-sm font-medium text-gray-700">
                 Training Percentage (%)
               </label>
               <input
@@ -414,20 +357,18 @@ export function OptimizationForm({
                 onChange={(e) =>
                   handleFieldChange(
                     "walk_forward_train_pct",
-                    e.target.value ? parseFloat(e.target.value) : undefined
+                    e.target.value ? parseFloat(e.target.value) : undefined,
                   )
                 }
                 min="50"
                 max="90"
                 step="5"
-                className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                  getFieldError("walk_forward_train_pct")
-                    ? "border-red-500"
-                    : "border-gray-300"
+                className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                  getFieldError("walk_forward_train_pct") ? "border-red-500" : "border-gray-300"
                 }`}
               />
               {getFieldError("walk_forward_train_pct") && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="mt-1 text-xs text-red-600">
                   {getFieldError("walk_forward_train_pct")}
                 </p>
               )}
@@ -441,45 +382,37 @@ export function OptimizationForm({
         <button
           type="button"
           onClick={() => setExpandMonteCarlo(!expandMonteCarlo)}
-          className="w-full flex items-center justify-between p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+          className="flex w-full items-center justify-between rounded-lg border border-gray-300 p-4 transition-colors hover:bg-gray-50"
         >
-          <h3 className="text-sm font-medium text-gray-900">
-            Monte Carlo Simulation (Optional)
-          </h3>
+          <h3 className="text-sm font-medium text-gray-900">Monte Carlo Simulation (Optional)</h3>
           {expandMonteCarlo ? (
-            <ChevronUp className="w-5 h-5 text-gray-600" />
+            <ChevronUp className="h-5 w-5 text-gray-600" />
           ) : (
-            <ChevronDown className="w-5 h-5 text-gray-600" />
+            <ChevronDown className="h-5 w-5 text-gray-600" />
           )}
         </button>
 
         {expandMonteCarlo && (
-          <div className="mt-4 p-4 border border-gray-300 rounded-lg bg-gray-50 space-y-4">
+          <div className="mt-4 space-y-4 rounded-lg border border-gray-300 bg-gray-50 p-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Number of Runs
-              </label>
+              <label className="mb-2 block text-sm font-medium text-gray-700">Number of Runs</label>
               <input
                 type="number"
                 value={formValues.monte_carlo_runs ?? ""}
                 onChange={(e) =>
                   handleFieldChange(
                     "monte_carlo_runs",
-                    e.target.value ? parseInt(e.target.value) : undefined
+                    e.target.value ? parseInt(e.target.value) : undefined,
                   )
                 }
                 min="100"
                 step="100"
-                className={`w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                  getFieldError("monte_carlo_runs")
-                    ? "border-red-500"
-                    : "border-gray-300"
+                className={`w-full rounded-lg border px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                  getFieldError("monte_carlo_runs") ? "border-red-500" : "border-gray-300"
                 }`}
               />
               {getFieldError("monte_carlo_runs") && (
-                <p className="text-xs text-red-600 mt-1">
-                  {getFieldError("monte_carlo_runs")}
-                </p>
+                <p className="mt-1 text-xs text-red-600">{getFieldError("monte_carlo_runs")}</p>
               )}
             </div>
           </div>
@@ -491,13 +424,11 @@ export function OptimizationForm({
         <button
           type="submit"
           disabled={isSubmitting}
-          className={`w-full py-3 px-4 rounded-lg font-medium text-white flex items-center justify-center gap-2 transition-colors ${
-            isSubmitting
-              ? "bg-gray-400 cursor-not-allowed"
-              : "bg-blue-600 hover:bg-blue-700"
+          className={`flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 font-medium text-white transition-colors ${
+            isSubmitting ? "cursor-not-allowed bg-gray-400" : "bg-blue-600 hover:bg-blue-700"
           }`}
         >
-          {isSubmitting && <Loader className="w-4 h-4 animate-spin" />}
+          {isSubmitting && <Loader className="h-4 w-4 animate-spin" />}
           {isSubmitting ? "Submitting..." : "Submit Optimization"}
         </button>
       </div>

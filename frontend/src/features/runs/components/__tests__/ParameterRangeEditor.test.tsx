@@ -35,15 +35,11 @@ describe("ParameterRangeEditor", () => {
       render(<ParameterRangeEditor {...defaultProps} />);
 
       expect(screen.getByText(/no parameters added/i)).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: /add parameter/i })
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /add parameter/i })).toBeInTheDocument();
     });
 
     it("renders_parameter_rows", () => {
-      const params: ParameterRange[] = [
-        { name: "ma_fast", min: 5, max: 20, step: 5 },
-      ];
+      const params: ParameterRange[] = [{ name: "ma_fast", min: 5, max: 20, step: 5 }];
 
       render(<ParameterRangeEditor {...defaultProps} parameters={params} />);
 
@@ -72,9 +68,7 @@ describe("ParameterRangeEditor", () => {
 
   describe("combination count badge", () => {
     it("shows_combination_count_for_parameter", () => {
-      const params: ParameterRange[] = [
-        { name: "ma_fast", min: 10, max: 30, step: 5 },
-      ];
+      const params: ParameterRange[] = [{ name: "ma_fast", min: 10, max: 30, step: 5 }];
 
       render(<ParameterRangeEditor {...defaultProps} parameters={params} />);
 
@@ -85,24 +79,18 @@ describe("ParameterRangeEditor", () => {
 
     it("updates_combination_count_on_value_change", () => {
       // Test with different parameter ranges to verify calculation
-      const params1: ParameterRange[] = [
-        { name: "ma_fast", min: 10, max: 30, step: 5 },
-      ];
+      const params1: ParameterRange[] = [{ name: "ma_fast", min: 10, max: 30, step: 5 }];
 
       const { rerender } = render(
-        <ParameterRangeEditor parameters={params1} onChange={mockOnChange} />
+        <ParameterRangeEditor parameters={params1} onChange={mockOnChange} />,
       );
 
       // ceil((30 - 10) / 5) + 1 = 5 combinations
       expect(screen.queryAllByText(/combination/i).length).toBeGreaterThan(0);
 
       // Re-render with different params
-      const params2: ParameterRange[] = [
-        { name: "ma_fast", min: 10, max: 50, step: 5 },
-      ];
-      rerender(
-        <ParameterRangeEditor parameters={params2} onChange={mockOnChange} />
-      );
+      const params2: ParameterRange[] = [{ name: "ma_fast", min: 10, max: 50, step: 5 }];
+      rerender(<ParameterRangeEditor parameters={params2} onChange={mockOnChange} />);
 
       // ceil((50 - 10) / 5) + 1 = 9 combinations
       expect(screen.queryAllByText(/combination/i).length).toBeGreaterThan(0);
@@ -112,9 +100,7 @@ describe("ParameterRangeEditor", () => {
   describe("validation", () => {
     it("validates_min_less_than_max", async () => {
       const user = userEvent.setup();
-      const params: ParameterRange[] = [
-        { name: "test", min: 10, max: 20, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "test", min: 10, max: 20, step: 1 }];
 
       render(<ParameterRangeEditor {...defaultProps} parameters={params} />);
 
@@ -129,15 +115,13 @@ describe("ParameterRangeEditor", () => {
             name: "test",
             min: 10,
           }),
-        ])
+        ]),
       );
     });
 
     it("validates_step_greater_than_zero", async () => {
       const user = userEvent.setup();
-      const params: ParameterRange[] = [
-        { name: "test", min: 10, max: 20, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "test", min: 10, max: 20, step: 1 }];
 
       render(<ParameterRangeEditor {...defaultProps} parameters={params} />);
 
@@ -152,15 +136,13 @@ describe("ParameterRangeEditor", () => {
           expect.objectContaining({
             step: 0,
           }),
-        ])
+        ]),
       );
     });
 
     it("does_not_validate_while_editing", async () => {
       const user = userEvent.setup();
-      const params: ParameterRange[] = [
-        { name: "test", min: 10, max: 20, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "test", min: 10, max: 20, step: 1 }];
 
       render(<ParameterRangeEditor {...defaultProps} parameters={params} />);
 
@@ -168,16 +150,12 @@ describe("ParameterRangeEditor", () => {
       await user.clear(maxInput);
 
       // Should not show error immediately while editing
-      expect(
-        screen.queryByText(/min must be less than max/i)
-      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/min must be less than max/i)).not.toBeInTheDocument();
     });
 
     it("validates_on_blur", async () => {
       const user = userEvent.setup();
-      const params: ParameterRange[] = [
-        { name: "test", min: 10, max: 20, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "test", min: 10, max: 20, step: 1 }];
 
       render(<ParameterRangeEditor {...defaultProps} parameters={params} />);
 
@@ -191,7 +169,7 @@ describe("ParameterRangeEditor", () => {
           expect.objectContaining({
             max: expect.any(Number),
           }),
-        ])
+        ]),
       );
     });
   });
@@ -212,7 +190,7 @@ describe("ParameterRangeEditor", () => {
             max: 10,
             step: 1,
           }),
-        ])
+        ]),
       );
     });
 
@@ -235,15 +213,13 @@ describe("ParameterRangeEditor", () => {
           expect.objectContaining({
             name: "param2",
           }),
-        ])
+        ]),
       );
     });
 
     it("updates_parameter_on_field_change", async () => {
       const user = userEvent.setup();
-      const params: ParameterRange[] = [
-        { name: "test", min: 10, max: 20, step: 1 },
-      ];
+      const params: ParameterRange[] = [{ name: "test", min: 10, max: 20, step: 1 }];
 
       render(<ParameterRangeEditor {...defaultProps} parameters={params} />);
 
@@ -253,7 +229,7 @@ describe("ParameterRangeEditor", () => {
 
       const hasCalled = mockOnChange.mock.calls.length > 0;
       const hasEmptyName = mockOnChange.mock.calls.some((call) =>
-        call[0]?.some((param: ParameterRange) => param.name === "")
+        call[0]?.some((param: ParameterRange) => param.name === ""),
       );
 
       expect(hasCalled).toBe(true);
@@ -287,7 +263,7 @@ describe("ParameterRangeEditor", () => {
               name: "slow",
               max: 100,
             }),
-          ])
+          ]),
         );
       });
     });

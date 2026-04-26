@@ -316,7 +316,7 @@ export const governanceApi = {
     } catch (err) {
       const durationMs = Math.round(performance.now() - startTime);
       const normalized = normalizeError(err, approvalId);
-      // eslint-disable-next-line no-console
+
       console.warn(
         `[governanceApi] getApprovalDetail ${approvalId} failed after ${durationMs}ms`,
         normalized,

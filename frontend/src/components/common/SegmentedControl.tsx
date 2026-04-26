@@ -112,7 +112,7 @@ export function SegmentedControl<T extends string = string>({
               }
             }}
             className={clsx(
-              "px-3 py-2 rounded-full font-medium text-sm transition-all duration-200 whitespace-nowrap",
+              "whitespace-nowrap rounded-full px-3 py-2 text-sm font-medium transition-all duration-200",
               isActive
                 ? "bg-brand-600 text-white shadow-sm"
                 : "bg-transparent text-surface-600 hover:text-surface-900 active:bg-surface-200",

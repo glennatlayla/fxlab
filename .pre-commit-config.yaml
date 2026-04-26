@@ -68,17 +68,33 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
-  # NOTE: mypy is intentionally NOT run in pre-commit.
-  #
-  # The local `make verify` gate runs format-check, lint, test-unit, and
-  # compose-check — it does NOT run mypy. Adding mypy to pre-commit would
-  # block every commit on 39 pre-existing type-check errors across
-  # services/ and libs/ (catalogued in deferred-issues — Tranche-N
-  # mypy debt remediation), missing type stubs (types-redis,
-  # types-PyYAML, types-requests), and a scripts/validate_migrations
-  # duplicate-module conflict.
-  #
-  # Mypy continues to run in CI's `quality` job (.github/workflows/ci.yml),
-  # where the operator can review it as aspirational tech debt without
-  # it gating individual commits on unrelated work. Restore the mypy
-  # hook here once Tranche-N is closed.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.20.1
+    # mypy was disabled here in M-prep #2 because services/+libs/ had
+    # 39 pre-existing type errors. M-prep #7 (sha 5dcb9a9) cleared
+    # those, today's buildout introduced 19 more, CI green-fix #3
+    # (a3accd9) cleared those too. Re-enabled in tech-debt #10.
+    hooks:
+      - id: mypy
+        args:
+          - --warn-unused-ignores
+          - --ignore-missing-imports
+          - --no-strict-optional
+        # Match CI's quality-job mypy invocation byte-for-byte so
+        # local pre-commit and the cloud gate stay in sync.
+        files: ^(services|libs)/.*\.py$
+        additional_dependencies:
+          - pydantic>=2.10
+          - sqlalchemy>=2.0
+          - types-PyYAML
+          - types-requests
+          # Runtime packages whose real type stubs are needed for the hook
+          # to see the same Result/attr types as CI's `make verify` mypy run.
+          # Without these, the hook would falsely flag `# type: ignore`
+          # comments as unused (because the imported modules become Any
+          # under --ignore-missing-imports), and removing those ignores
+          # would then break CI where the packages ARE installed.
+          - redis==5.0.1
+          - minio==7.2.20
+          - PyJWT[crypto]==2.12.1
+          - starlette==0.49.3

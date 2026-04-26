@@ -80,11 +80,7 @@ function createTestQueryClient() {
 
 function renderWithQueryClient(component: React.ReactElement) {
   const queryClient = createTestQueryClient();
-  return render(
-    <QueryClientProvider client={queryClient}>
-      {component}
-    </QueryClientProvider>,
-  );
+  return render(<QueryClientProvider client={queryClient}>{component}</QueryClientProvider>);
 }
 
 describe("AlertsPage", () => {
@@ -243,10 +239,13 @@ describe("AlertsPage", () => {
       renderWithQueryClient(<AlertsPage deploymentId="deploy-001" />);
 
       // Should show skeleton or loading indicator
-      await waitFor(() => {
-        const loadingElements = screen.queryAllByTestId(/skeleton|loading/i);
-        expect(loadingElements.length).toBeGreaterThan(0);
-      }, { timeout: 3000 }).catch(() => {
+      await waitFor(
+        () => {
+          const loadingElements = screen.queryAllByTestId(/skeleton|loading/i);
+          expect(loadingElements.length).toBeGreaterThan(0);
+        },
+        { timeout: 3000 },
+      ).catch(() => {
         // It's ok if skeleton doesn't appear immediately in some test environments
       });
     });

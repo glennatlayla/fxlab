@@ -72,53 +72,41 @@ export function PaperTradingReview({
   return (
     <div className="flex flex-col gap-6 p-4">
       {/* Error banner */}
-      {error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-          {error}
-        </div>
-      )}
+      {error && <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
       {/* Review card */}
       <div className="rounded-lg border border-surface-200 bg-surface-50 p-6">
-        <h2 className="mb-6 text-xl font-semibold text-surface-900">
-          Review Configuration
-        </h2>
+        <h2 className="mb-6 text-xl font-semibold text-surface-900">Review Configuration</h2>
 
         {/* Configuration details grid */}
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {/* Deployment */}
           <div>
-            <label className="block text-xs font-medium text-surface-500 uppercase mb-1">
+            <label className="mb-1 block text-xs font-medium uppercase text-surface-500">
               Deployment
             </label>
-            <p className="text-base font-medium text-surface-900">
-              {summary.deploymentName}
-            </p>
+            <p className="text-base font-medium text-surface-900">{summary.deploymentName}</p>
           </div>
 
           {/* Strategy */}
           <div>
-            <label className="block text-xs font-medium text-surface-500 uppercase mb-1">
+            <label className="mb-1 block text-xs font-medium uppercase text-surface-500">
               Strategy
             </label>
-            <p className="text-base font-medium text-surface-900">
-              {summary.strategyName}
-            </p>
+            <p className="text-base font-medium text-surface-900">{summary.strategyName}</p>
           </div>
 
           {/* Initial Equity */}
           <div>
-            <label className="block text-xs font-medium text-surface-500 uppercase mb-1">
+            <label className="mb-1 block text-xs font-medium uppercase text-surface-500">
               Initial Equity
             </label>
-            <p className="text-base font-medium text-surface-900">
-              {summary.initialEquityDisplay}
-            </p>
+            <p className="text-base font-medium text-surface-900">{summary.initialEquityDisplay}</p>
           </div>
 
           {/* Max Position Size */}
           <div>
-            <label className="block text-xs font-medium text-surface-500 uppercase mb-1">
+            <label className="mb-1 block text-xs font-medium uppercase text-surface-500">
               Max Position Size
             </label>
             <p className="text-base font-medium text-surface-900">
@@ -128,41 +116,35 @@ export function PaperTradingReview({
 
           {/* Max Daily Loss */}
           <div>
-            <label className="block text-xs font-medium text-surface-500 uppercase mb-1">
+            <label className="mb-1 block text-xs font-medium uppercase text-surface-500">
               Max Daily Loss
             </label>
-            <p className="text-base font-medium text-surface-900">
-              {summary.maxDailyLossDisplay}
-            </p>
+            <p className="text-base font-medium text-surface-900">{summary.maxDailyLossDisplay}</p>
           </div>
 
           {/* Max Leverage */}
           <div>
-            <label className="block text-xs font-medium text-surface-500 uppercase mb-1">
+            <label className="mb-1 block text-xs font-medium uppercase text-surface-500">
               Max Leverage
             </label>
-            <p className="text-base font-medium text-surface-900">
-              {summary.maxLeverageDisplay}
-            </p>
+            <p className="text-base font-medium text-surface-900">{summary.maxLeverageDisplay}</p>
           </div>
 
           {/* Trading Symbols */}
           <div className="md:col-span-2">
-            <label className="block text-xs font-medium text-surface-500 uppercase mb-1">
+            <label className="mb-1 block text-xs font-medium uppercase text-surface-500">
               Trading Symbols
             </label>
-            <p className="text-base font-medium text-surface-900">
-              {summary.symbolsDisplay}
-            </p>
+            <p className="text-base font-medium text-surface-900">{summary.symbolsDisplay}</p>
           </div>
         </div>
       </div>
 
       {/* Confirmation section */}
       <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4">
-        <p className="text-sm text-yellow-800 mb-4">
-          Paper trading uses simulated market data. Ensure all configuration matches your
-          strategy requirements before confirming.
+        <p className="mb-4 text-sm text-yellow-800">
+          Paper trading uses simulated market data. Ensure all configuration matches your strategy
+          requirements before confirming.
         </p>
 
         <SlideToConfirm

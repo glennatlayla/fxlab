@@ -172,7 +172,7 @@ describe("Emergency E2E", () => {
 
   describe("initial load and page structure", () => {
     it("renders_emergency_controls_page_with_title", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
       renderEmergency();
@@ -186,7 +186,7 @@ describe("Emergency E2E", () => {
     });
 
     it("displays_active_kill_switches_section", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
       renderEmergency();
@@ -200,7 +200,7 @@ describe("Emergency E2E", () => {
     });
 
     it("displays_activation_controls_section", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
       renderEmergency();
@@ -215,7 +215,7 @@ describe("Emergency E2E", () => {
     });
 
     it("calls_getStatus_on_component_mount", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
       renderEmergency();
@@ -235,7 +235,7 @@ describe("Emergency E2E", () => {
 
   describe("status display", () => {
     it("displays_active_switches_in_list", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockGlobalActive);
 
       renderEmergency();
@@ -249,7 +249,7 @@ describe("Emergency E2E", () => {
     });
 
     it("shows_switch_details_scope_and_reason", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockGlobalActive);
 
       renderEmergency();
@@ -266,7 +266,7 @@ describe("Emergency E2E", () => {
     });
 
     it("displays_multiple_active_switches", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockMultipleSwitches);
 
       renderEmergency();
@@ -290,7 +290,7 @@ describe("Emergency E2E", () => {
   describe("global activation flow", () => {
     it("opens_bottom_sheet_when_global_button_clicked", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
@@ -304,7 +304,8 @@ describe("Emergency E2E", () => {
       // Look for text input or text area
       await waitFor(
         () => {
-          const reasonInput = screen.queryByPlaceholderText(/reason/i) ||
+          const reasonInput =
+            screen.queryByPlaceholderText(/reason/i) ||
             screen.queryByDisplayValue("") || // Text input with empty value
             screen.queryByRole("textbox");
           expect(reasonInput).toBeInTheDocument();
@@ -315,7 +316,7 @@ describe("Emergency E2E", () => {
 
     it("activates_global_switch_with_valid_reason", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
       mockApi.activateGlobal.mockResolvedValue(mockHaltEvent);
@@ -355,7 +356,7 @@ describe("Emergency E2E", () => {
   describe("strategy activation flow", () => {
     it("opens_bottom_sheet_with_strategy_id_input", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
@@ -379,7 +380,7 @@ describe("Emergency E2E", () => {
 
     it("activates_strategy_switch_with_id_and_reason", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
       mockApi.activateStrategy.mockResolvedValue({
@@ -422,7 +423,7 @@ describe("Emergency E2E", () => {
   describe("symbol activation flow", () => {
     it("opens_bottom_sheet_with_symbol_input", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
@@ -446,7 +447,7 @@ describe("Emergency E2E", () => {
 
     it("activates_symbol_switch_with_symbol_and_reason", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
       mockApi.activateSymbol.mockResolvedValue({
@@ -493,7 +494,7 @@ describe("Emergency E2E", () => {
   describe("deactivation flow", () => {
     it("allows_deactivation_of_active_switch", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockGlobalActive);
       mockApi.deactivate.mockResolvedValue(mockHaltEvent);
@@ -532,7 +533,7 @@ describe("Emergency E2E", () => {
 
   describe("input validation", () => {
     it("validates_minimum_reason_length", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
       renderEmergency();
@@ -568,12 +569,13 @@ describe("Emergency E2E", () => {
   describe("error handling", () => {
     it("handles_activation_failure_gracefully", async () => {
       const user = userEvent.setup();
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
       // Simulate error on activation
       const error = new Error("Kill switch already active");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- attach-axios-style-response-shape
       (error as any).response = { status: 409 };
       mockApi.activateGlobal.mockRejectedValue(error);
 
@@ -604,7 +606,7 @@ describe("Emergency E2E", () => {
     });
 
     it("handles_status_fetch_failure", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
 
       // First call fails
       mockApi.getStatus.mockRejectedValueOnce(new Error("Network error"));
@@ -627,7 +629,7 @@ describe("Emergency E2E", () => {
 
   describe("multiple scope management", () => {
     it("displays_all_three_activation_buttons", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockEmptyStatus);
 
       renderEmergency();
@@ -647,7 +649,7 @@ describe("Emergency E2E", () => {
     });
 
     it("displays_multiple_different_scoped_switches", async () => {
-      const mockApi = emergencyApiModule.emergencyApi as any;
+      const mockApi = vi.mocked(emergencyApiModule.emergencyApi);
       mockApi.getStatus.mockResolvedValue(mockMultipleSwitches);
 
       renderEmergency();

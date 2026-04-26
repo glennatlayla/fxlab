@@ -41,14 +41,7 @@
 
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  TrendingUp,
-  TrendingDown,
-  BarChart3,
-  Target,
-  Package,
-  AlertCircle,
-} from "lucide-react";
+import { TrendingUp, TrendingDown, BarChart3, Target, Package, AlertCircle } from "lucide-react";
 import { resultsApi } from "../api";
 import { ResultsMetricTile } from "./ResultsMetricTile";
 
@@ -173,13 +166,7 @@ function ResultsSummarySkeleton() {
  *   error: Error object or message.
  *   onRetry: Callback to retry the query.
  */
-function ResultsSummaryError({
-  error,
-  onRetry,
-}: {
-  error: unknown;
-  onRetry: () => void;
-}) {
+function ResultsSummaryError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
   const errorMessage =
     error instanceof Error ? error.message : "Failed to load results. Please try again.";
 
@@ -238,11 +225,12 @@ export function ResultsSummaryCard({ runId, onViewFull }: ResultsSummaryCardProp
     const profitFactor = calculateProfitFactor(charts.trades);
 
     // Use best trial's Sharpe ratio, or 0 if no trials
-    const bestTrial = charts.trial_summaries.length > 0
-      ? charts.trial_summaries.reduce((prev, current) =>
-          prev.sharpe_ratio > current.sharpe_ratio ? prev : current,
-        )
-      : { sharpe_ratio: 0 };
+    const bestTrial =
+      charts.trial_summaries.length > 0
+        ? charts.trial_summaries.reduce((prev, current) =>
+            prev.sharpe_ratio > current.sharpe_ratio ? prev : current,
+          )
+        : { sharpe_ratio: 0 };
 
     return {
       totalReturn,
@@ -265,7 +253,8 @@ export function ResultsSummaryCard({ runId, onViewFull }: ResultsSummaryCardProp
   }
 
   // Determine sentiment for each metric
-  const totalReturnSentiment: "positive" | "negative" = metrics.totalReturn >= 0 ? "positive" : "negative";
+  const totalReturnSentiment: "positive" | "negative" =
+    metrics.totalReturn >= 0 ? "positive" : "negative";
   const sharpeSentiment = getSharpeRatioSentiment(metrics.sharpeRatio);
   const winRateSentiment: "positive" | "negative" = metrics.winRate > 50 ? "positive" : "negative";
   const profitFactorSentiment: "positive" | "negative" =
@@ -317,9 +306,7 @@ export function ResultsSummaryCard({ runId, onViewFull }: ResultsSummaryCardProp
 
         <ResultsMetricTile
           label="Profit Factor"
-          value={
-            metrics.profitFactor === Infinity ? "∞" : metrics.profitFactor.toFixed(2)
-          }
+          value={metrics.profitFactor === Infinity ? "∞" : metrics.profitFactor.toFixed(2)}
           sentiment={profitFactorSentiment}
           icon={metrics.profitFactor >= 1 ? TrendingUp : TrendingDown}
         />

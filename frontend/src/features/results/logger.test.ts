@@ -33,6 +33,7 @@ describe("resultsLogger", () => {
 
   it("fetchStart logs info with run_id", () => {
     resultsLogger.fetchStart("run-123");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining("Fetching run charts"),
       expect.objectContaining({ run_id: "run-123", operation: "results.fetch_run_charts" }),
@@ -52,6 +53,7 @@ describe("resultsLogger", () => {
 
   it("fetchStart propagates correlationId when provided", () => {
     resultsLogger.fetchStart("run-123", "corr-abc");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ correlation_id: "corr-abc" }),
@@ -91,6 +93,7 @@ describe("resultsLogger", () => {
 
   it("fetchSuccess logs info with duration and metadata", () => {
     resultsLogger.fetchSuccess("run-123", 150, { pointCount: 2000, tradeCount: 500 });
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining("fetched successfully"),
       expect.objectContaining({
@@ -105,6 +108,7 @@ describe("resultsLogger", () => {
 
   it("fetchSuccess propagates correlationId when provided", () => {
     resultsLogger.fetchSuccess("run-123", 150, { pointCount: 100, tradeCount: 10 }, "corr-def");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ correlation_id: "corr-def" }),
@@ -182,6 +186,7 @@ describe("resultsLogger", () => {
 
   it("downloadStart logs info", () => {
     resultsLogger.downloadStart("run-123");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining("Starting export"),
       expect.objectContaining({ run_id: "run-123" }),
@@ -190,6 +195,7 @@ describe("resultsLogger", () => {
 
   it("downloadSuccess logs info with size", () => {
     resultsLogger.downloadSuccess("run-123", 3000, 1_048_576);
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining("downloaded successfully"),
       expect.objectContaining({ size_bytes: 1_048_576 }),
@@ -210,6 +216,7 @@ describe("resultsLogger", () => {
 
   it("downloadAborted logs info with abort result", () => {
     resultsLogger.downloadAborted("run-123");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining("aborted"),
       expect.objectContaining({ result: "abort" }),
@@ -222,6 +229,7 @@ describe("resultsLogger", () => {
 
   it("pageMount logs info", () => {
     resultsLogger.pageMount("run-123");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining("mounted"),
       expect.objectContaining({ component: "RunResultsPage" }),
@@ -230,6 +238,7 @@ describe("resultsLogger", () => {
 
   it("pageUnmount logs debug", () => {
     resultsLogger.pageUnmount("run-123");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     expect(console.debug).toHaveBeenCalledWith(
       expect.stringContaining("unmounting"),
       expect.objectContaining({ component: "RunResultsPage" }),
@@ -270,6 +279,7 @@ describe("resultsLogger", () => {
 
   it("all emitted entries include a timestamp", () => {
     resultsLogger.fetchStart("run-ts");
+    // eslint-disable-next-line no-console -- asserting-on-logger-console-output
     const call = vi.mocked(console.info).mock.calls[0];
     const entry = call[1] as Record<string, unknown>;
     expect(entry.timestamp).toBeDefined();

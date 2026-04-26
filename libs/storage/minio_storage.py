@@ -229,7 +229,7 @@ class MinIOArtifactStorage(ArtifactStorageBase):
                 object_name=key,
                 data=data_stream,
                 length=len(data),
-                metadata=str_metadata,  # type: ignore[arg-type]
+                metadata=str_metadata,  # type: ignore[arg-type]  # Minio expects dict[str, str|list[str]|tuple[str]]; dict[str, str] is value-compatible but invariant
             )
 
             object_key = f"artifacts/{key}" if not key.startswith("artifacts/") else key

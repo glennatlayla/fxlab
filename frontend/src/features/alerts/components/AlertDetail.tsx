@@ -123,7 +123,7 @@ export function AlertDetail({ alert, onAcknowledge }: AlertDetailProps): React.R
       <div>
         <h2 className="text-xl font-bold text-surface-900">{alert.title}</h2>
         {alert.acknowledged && (
-          <div className="mt-2 flex items-center gap-2 rounded-full bg-green-50 px-3 py-1 w-fit">
+          <div className="mt-2 flex w-fit items-center gap-2 rounded-full bg-green-50 px-3 py-1">
             <Check className="h-4 w-4 text-green-600" />
             <span className="text-sm font-medium text-green-700">Acknowledged</span>
           </div>
@@ -140,11 +140,9 @@ export function AlertDetail({ alert, onAcknowledge }: AlertDetailProps): React.R
       <div className="space-y-3 rounded-lg bg-surface-50 p-4">
         {/* Created */}
         <div className="flex items-start gap-3">
-          <Clock className="h-4 w-4 flex-shrink-0 text-surface-500 pt-0.5" />
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium uppercase tracking-wide text-surface-600">
-              Created
-            </p>
+          <Clock className="h-4 w-4 flex-shrink-0 pt-0.5 text-surface-500" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium uppercase tracking-wide text-surface-600">Created</p>
             <p className="mt-1 text-sm text-surface-900">{formatDateTime(alert.created_at)}</p>
           </div>
         </div>
@@ -152,10 +150,8 @@ export function AlertDetail({ alert, onAcknowledge }: AlertDetailProps): React.R
         {/* Source */}
         <div className="flex items-start gap-3 border-t border-surface-200 pt-3">
           <div className="h-4 w-4 flex-shrink-0" />
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium uppercase tracking-wide text-surface-600">
-              Source
-            </p>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium uppercase tracking-wide text-surface-600">Source</p>
             <p className="mt-1 text-sm text-surface-900">{alert.source}</p>
           </div>
         </div>
@@ -163,8 +159,8 @@ export function AlertDetail({ alert, onAcknowledge }: AlertDetailProps): React.R
         {/* Acknowledged By (if acknowledged) */}
         {alert.acknowledged && alert.acknowledged_by && (
           <div className="flex items-start gap-3 border-t border-surface-200 pt-3">
-            <User className="h-4 w-4 flex-shrink-0 text-surface-500 pt-0.5" />
-            <div className="flex-1 min-w-0">
+            <User className="h-4 w-4 flex-shrink-0 pt-0.5 text-surface-500" />
+            <div className="min-w-0 flex-1">
               <p className="text-xs font-medium uppercase tracking-wide text-surface-600">
                 Acknowledged By
               </p>

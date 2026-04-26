@@ -22,7 +22,16 @@ describe("getConfig", () => {
 
   it("apiBaseUrl is a valid URL", () => {
     const config = getConfig();
-    expect(() => new URL(config.apiBaseUrl)).not.toThrow();
+    // apiBaseUrl may be either an absolute URL (e.g. "https://api.example.com")
+    // or a relative path (e.g. "/api") — the latter is the recommended default
+    // for Docker deployments behind an nginx proxy. Validate both shapes by
+    // resolving against an arbitrary base when the value starts with "/".
+    const isRelative = config.apiBaseUrl.startsWith("/");
+    if (isRelative) {
+      expect(() => new URL(config.apiBaseUrl, "http://localhost")).not.toThrow();
+    } else {
+      expect(() => new URL(config.apiBaseUrl)).not.toThrow();
+    }
   });
 
   it("has auth configuration", () => {

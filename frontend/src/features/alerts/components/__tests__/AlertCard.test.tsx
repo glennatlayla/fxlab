@@ -11,7 +11,7 @@
 
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { AlertCard } from "../AlertCard";
 import type { Alert } from "../../types";
 
@@ -27,6 +27,21 @@ describe("AlertCard", () => {
   };
 
   describe("rendering", () => {
+    // The "renders formatted timestamp" test below depends on the relative-time
+    // formatter producing an "ago" / "just now" string. Without a fixed clock,
+    // mockAlert.created_at drifts past the formatter's 7-day window as system
+    // time advances and falls back to "Apr 13", failing the assertion. Pin the
+    // clock to a deterministic instant 6 hours after the alert's created_at so
+    // the formatter consistently emits "6 hours ago".
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-04-13T18:00:00Z"));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("renders alert title", () => {
       render(<AlertCard alert={mockAlert} onClick={vi.fn()} />);
       expect(screen.getByText("VaR Breach")).toBeInTheDocument();
@@ -44,8 +59,8 @@ describe("AlertCard", () => {
 
     it("renders formatted timestamp", () => {
       render(<AlertCard alert={mockAlert} onClick={vi.fn()} />);
-      // Timestamp should be displayed in relative or formatted form
-      // It will show "just now", "minutes ago", "hours ago", etc. depending on current time
+      // With the clock pinned in beforeEach, mockAlert.created_at is exactly
+      // 6 hours in the past, so the formatter returns "6 hours ago".
       const timeText = screen.getByText(/ago|just now/i);
       expect(timeText).toBeInTheDocument();
     });
@@ -53,9 +68,7 @@ describe("AlertCard", () => {
 
   describe("severity styling", () => {
     it("critical severity has red left border", () => {
-      const { container } = render(
-        <AlertCard alert={mockAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={mockAlert} onClick={vi.fn()} />);
       const card = container.querySelector("[data-testid=alert-card]");
       expect(card).toHaveClass("border-l-red-600");
     });
@@ -65,9 +78,7 @@ describe("AlertCard", () => {
         ...mockAlert,
         severity: "warning",
       };
-      const { container } = render(
-        <AlertCard alert={warningAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={warningAlert} onClick={vi.fn()} />);
       const card = container.querySelector("[data-testid=alert-card]");
       expect(card).toHaveClass("border-l-amber-600");
     });
@@ -77,17 +88,13 @@ describe("AlertCard", () => {
         ...mockAlert,
         severity: "info",
       };
-      const { container } = render(
-        <AlertCard alert={infoAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={infoAlert} onClick={vi.fn()} />);
       const card = container.querySelector("[data-testid=alert-card]");
       expect(card).toHaveClass("border-l-blue-600");
     });
 
     it("critical severity has AlertTriangle icon", () => {
-      const { container } = render(
-        <AlertCard alert={mockAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={mockAlert} onClick={vi.fn()} />);
       const icon = container.querySelector("[data-testid=alert-icon]");
       expect(icon).toBeInTheDocument();
       expect(icon?.querySelector("svg")).toBeInTheDocument();
@@ -96,9 +103,7 @@ describe("AlertCard", () => {
 
   describe("acknowledged state", () => {
     it("unacknowledged alert is fully visible", () => {
-      const { container } = render(
-        <AlertCard alert={mockAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={mockAlert} onClick={vi.fn()} />);
       const card = container.querySelector("[data-testid=alert-card]");
       expect(card).not.toHaveClass("opacity-60");
     });
@@ -108,9 +113,7 @@ describe("AlertCard", () => {
         ...mockAlert,
         acknowledged: true,
       };
-      const { container } = render(
-        <AlertCard alert={acknowledgedAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={acknowledgedAlert} onClick={vi.fn()} />);
       const card = container.querySelector("[data-testid=alert-card]");
       expect(card).toHaveClass("opacity-60");
     });
@@ -120,9 +123,7 @@ describe("AlertCard", () => {
         ...mockAlert,
         acknowledged: true,
       };
-      const { container } = render(
-        <AlertCard alert={acknowledgedAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={acknowledgedAlert} onClick={vi.fn()} />);
       const badge = container.querySelector("[data-testid=acknowledged-badge]");
       expect(badge).toBeInTheDocument();
     });
@@ -147,9 +148,7 @@ describe("AlertCard", () => {
           "This is a very long message that should be truncated to two lines. " +
           "It continues on and on to demonstrate the text truncation behavior.",
       };
-      const { container } = render(
-        <AlertCard alert={longAlert} onClick={vi.fn()} />,
-      );
+      const { container } = render(<AlertCard alert={longAlert} onClick={vi.fn()} />);
       const message = container.querySelector("[data-testid=alert-message]");
       expect(message).toHaveClass("line-clamp-2");
     });

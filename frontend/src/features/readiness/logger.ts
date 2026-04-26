@@ -63,11 +63,9 @@ function emit(level: "debug" | "info" | "warn" | "error", message: string, extra
       console.info(`[Readiness] ${message}`, entry);
       break;
     case "warn":
-      // eslint-disable-next-line no-console
       console.warn(`[Readiness] ${message}`, entry);
       break;
     case "error":
-      // eslint-disable-next-line no-console
       console.error(`[Readiness] ${message}`, entry);
       break;
   }

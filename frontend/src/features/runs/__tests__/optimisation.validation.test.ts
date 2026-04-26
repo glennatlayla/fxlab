@@ -107,7 +107,7 @@ describe("optimizationFormSchema", () => {
       if (!result.success) {
         expect(
           result.error.flatten().fieldErrors.start_date ||
-            result.error.flatten().fieldErrors.end_date
+            result.error.flatten().fieldErrors.end_date,
         ).toBeDefined();
       }
     });
@@ -137,17 +137,12 @@ describe("optimizationFormSchema", () => {
 
   describe("optimization metric validation", () => {
     it("accepts_valid_metrics", () => {
-      const metrics = [
-        "sharpe_ratio",
-        "total_return",
-        "max_drawdown",
-        "win_rate",
-        "profit_factor",
-      ];
+      const metrics = ["sharpe_ratio", "total_return", "max_drawdown", "win_rate", "profit_factor"];
 
       metrics.forEach((metric) => {
         const form = {
           ...validBaseForm,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- iterating-over-string-list
           optimization_metric: metric as any,
         };
 
@@ -160,6 +155,7 @@ describe("optimizationFormSchema", () => {
     it("rejects_invalid_metric", () => {
       const form = {
         ...validBaseForm,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- intentionally-invalid-metric-for-test
         optimization_metric: "invalid_metric" as any,
       };
 
@@ -180,9 +176,7 @@ describe("optimizationFormSchema", () => {
 
       expect(result.success).toBe(false);
       if (!result.success) {
-        expect(
-          result.error.flatten().fieldErrors.parameters
-        ).toBeDefined();
+        expect(result.error.flatten().fieldErrors.parameters).toBeDefined();
       }
     });
 

@@ -63,9 +63,7 @@ describe("DeploymentCard", () => {
       total_pnl: -500,
       equity: 9500,
     };
-    render(
-      <DeploymentCard deployment={negativeDeploy} onClick={vi.fn()} />
-    );
+    render(<DeploymentCard deployment={negativeDeploy} onClick={vi.fn()} />);
     const pnlElements = screen.getAllByText(/-\$500/);
     expect(pnlElements.length).toBeGreaterThan(0);
     const container = pnlElements[0].closest("div");
@@ -89,18 +87,26 @@ describe("DeploymentCard", () => {
   });
 
   it("test_renders_last_trade_timestamp", () => {
-    render(<DeploymentCard deployment={mockDeployment} onClick={vi.fn()} />);
-    // The timestamp is rendered as relative time (e.g., "8h ago")
-    // Just check that some time text is present
-    const container = screen.getByTestId("deployment-card");
-    expect(container.textContent).toMatch(/ago|never/i);
+    // Pin the system clock so the relative-time formatter consistently emits
+    // an "ago" suffix instead of falling back to "Apr 13" once the real wall
+    // clock advances past the formatter's 7-day window. Restore real timers
+    // immediately after the assertion so neighbouring tests (especially the
+    // userEvent-based click test) are unaffected.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-04-13T18:30:00Z"));
+      render(<DeploymentCard deployment={mockDeployment} onClick={vi.fn()} />);
+      // last_trade_at is 4 hours before the pinned now → formatter emits "4h ago".
+      const container = screen.getByTestId("deployment-card");
+      expect(container.textContent).toMatch(/ago|never/i);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("test_click_calls_onClick_with_deployment_id", async () => {
     const onClick = vi.fn();
-    const { container } = render(
-      <DeploymentCard deployment={mockDeployment} onClick={onClick} />
-    );
+    const { container } = render(<DeploymentCard deployment={mockDeployment} onClick={onClick} />);
     const card = container.querySelector("[data-testid='deployment-card']");
     expect(card).toBeInTheDocument();
 
@@ -115,9 +121,7 @@ describe("DeploymentCard", () => {
       ...mockDeployment,
       status: PAPER_DEPLOYMENT_STATUS.FROZEN,
     };
-    render(
-      <DeploymentCard deployment={frozenDeploy} onClick={vi.fn()} />
-    );
+    render(<DeploymentCard deployment={frozenDeploy} onClick={vi.fn()} />);
     const badge = screen.getByRole("status");
     expect(badge).toHaveTextContent("frozen");
   });
@@ -130,9 +134,7 @@ describe("DeploymentCard", () => {
       realized_pnl: 0,
       equity: mockDeployment.initial_equity,
     };
-    render(
-      <DeploymentCard deployment={zeroPnlDeploy} onClick={vi.fn()} />
-    );
+    render(<DeploymentCard deployment={zeroPnlDeploy} onClick={vi.fn()} />);
     // Check that Total P&L shows $0.00
     const pnlElements = screen.getAllByText(/\$0.00/);
     expect(pnlElements.length).toBeGreaterThan(0);
@@ -143,9 +145,7 @@ describe("DeploymentCard", () => {
       ...mockDeployment,
       last_trade_at: null,
     };
-    render(
-      <DeploymentCard deployment={noTradesDeploy} onClick={vi.fn()} />
-    );
+    render(<DeploymentCard deployment={noTradesDeploy} onClick={vi.fn()} />);
     expect(screen.queryByText(/never/i)).toBeInTheDocument();
   });
 
@@ -159,10 +159,7 @@ describe("DeploymentCard", () => {
 
     statuses.forEach((status) => {
       const { unmount } = render(
-        <DeploymentCard
-          deployment={{ ...mockDeployment, status }}
-          onClick={vi.fn()}
-        />
+        <DeploymentCard deployment={{ ...mockDeployment, status }} onClick={vi.fn()} />,
       );
       const badge = screen.getByRole("status");
       expect(badge).toBeInTheDocument();

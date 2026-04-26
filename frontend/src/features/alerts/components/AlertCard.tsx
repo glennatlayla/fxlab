@@ -141,7 +141,7 @@ export function AlertCard({ alert, onClick }: AlertCardProps): React.ReactElemen
       data-testid="alert-card"
       onClick={() => onClick(alert)}
       className={clsx(
-        "w-full rounded-lg border-l-4 border-r border-t border-b border-surface-200 bg-white p-4 text-left transition-all hover:bg-surface-50 active:bg-surface-100",
+        "w-full rounded-lg border-b border-l-4 border-r border-t border-surface-200 bg-white p-4 text-left transition-all hover:bg-surface-50 active:bg-surface-100",
         borderColor,
         alert.acknowledged && "opacity-60",
       )}
@@ -149,10 +149,7 @@ export function AlertCard({ alert, onClick }: AlertCardProps): React.ReactElemen
     >
       <div className="flex gap-3">
         {/* Severity Icon */}
-        <div
-          data-testid="alert-icon"
-          className="flex-shrink-0 pt-1"
-        >
+        <div data-testid="alert-icon" className="flex-shrink-0 pt-1">
           <Icon className={clsx("h-5 w-5", iconColor)} />
         </div>
 
@@ -167,10 +164,7 @@ export function AlertCard({ alert, onClick }: AlertCardProps): React.ReactElemen
           </div>
 
           {/* Message */}
-          <p
-            data-testid="alert-message"
-            className="line-clamp-2 mt-1 text-sm text-surface-600"
-          >
+          <p data-testid="alert-message" className="mt-1 line-clamp-2 text-sm text-surface-600">
             {alert.message}
           </p>
 
@@ -182,7 +176,7 @@ export function AlertCard({ alert, onClick }: AlertCardProps): React.ReactElemen
         {alert.acknowledged && (
           <div
             data-testid="acknowledged-badge"
-            className="flex-shrink-0 flex items-center justify-center rounded-full bg-green-100 h-6 w-6"
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-green-100"
           >
             <Check className="h-4 w-4 text-green-600" />
           </div>

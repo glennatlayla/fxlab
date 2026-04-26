@@ -611,7 +611,7 @@ def _try_decode_with_keys(token: str, keys: list[str]) -> dict:
                 algorithms=_ALGORITHMS_ALLOWED,
                 audience=audience,
                 issuer=issuer,
-                options=decode_options,  # type: ignore[arg-type]
+                options=decode_options,  # type: ignore[arg-type]  # PyJWT 2.x typed Options as TypedDict, dict[str, object] is structurally compatible
             )
         except jwt.InvalidSignatureError:
             # Signature mismatch — try the next key in the rotation list

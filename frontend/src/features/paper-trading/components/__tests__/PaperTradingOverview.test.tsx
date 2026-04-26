@@ -71,9 +71,7 @@ describe("PaperTradingOverview", () => {
   it("test_shows_empty_state_when_no_deployments", () => {
     render(<PaperTradingOverview />);
     // Should show empty state message since mock returns empty array
-    expect(
-      screen.getByText(/no paper trading deployments yet/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/no paper trading deployments yet/i)).toBeInTheDocument();
   });
 
   it("test_create_one_button_visible_in_empty_state", () => {

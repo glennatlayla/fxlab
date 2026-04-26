@@ -179,6 +179,7 @@ describe("MobileApprovalDetail", () => {
       requested_by: "alice@example.com",
       created_at: new Date().toISOString(),
       // ... other fields
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- partial-fixture-for-test
     } as any);
 
     render(
@@ -211,6 +212,7 @@ describe("MobileApprovalDetail", () => {
       status: "pending",
       requested_by: "alice@example.com",
       created_at: new Date().toISOString(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- partial-fixture-for-test
     } as any);
 
     render(
@@ -241,6 +243,7 @@ describe("MobileApprovalDetail", () => {
       status: "pending",
       requested_by: "alice@example.com",
       created_at: new Date().toISOString(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- partial-fixture-for-test
     } as any);
 
     render(

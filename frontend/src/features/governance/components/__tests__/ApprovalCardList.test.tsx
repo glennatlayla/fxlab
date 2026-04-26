@@ -40,9 +40,7 @@ describe("ApprovalCardList", () => {
     ];
     const onApprovalClick = vi.fn();
 
-    render(
-      <ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />);
 
     expect(screen.getByTestId("approval-card-list")).toBeInTheDocument();
     // All three cards should be rendered
@@ -58,9 +56,7 @@ describe("ApprovalCardList", () => {
     const onApprovalClick = vi.fn();
     const user = userEvent.setup();
 
-    render(
-      <ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />);
 
     // Click the "Pending" filter chip (must be specific to avoid ambiguity)
     const chips = screen.getAllByRole("button");
@@ -83,9 +79,7 @@ describe("ApprovalCardList", () => {
     const onApprovalClick = vi.fn();
     const user = userEvent.setup();
 
-    render(
-      <ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />);
 
     // Click the "Approved" filter chip
     const chips = screen.getAllByRole("button");
@@ -108,9 +102,7 @@ describe("ApprovalCardList", () => {
     const onApprovalClick = vi.fn();
     const user = userEvent.setup();
 
-    render(
-      <ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />);
 
     // Click the "Rejected" filter chip
     const chips = screen.getAllByRole("button");
@@ -133,9 +125,7 @@ describe("ApprovalCardList", () => {
     const onApprovalClick = vi.fn();
     const user = userEvent.setup();
 
-    render(
-      <ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />);
 
     // First filter to pending
     const chips = screen.getAllByRole("button");
@@ -158,15 +148,11 @@ describe("ApprovalCardList", () => {
   });
 
   it("shows empty state when no approvals match filter", async () => {
-    const approvals = [
-      createMockApproval({ id: "a1", status: "pending" }),
-    ];
+    const approvals = [createMockApproval({ id: "a1", status: "pending" })];
     const onApprovalClick = vi.fn();
     const user = userEvent.setup();
 
-    render(
-      <ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />);
 
     // Filter to approved (but only pending exists)
     const approvedChip = screen.getByRole("button", { name: /approved/i });
@@ -179,27 +165,17 @@ describe("ApprovalCardList", () => {
   it("shows loading skeleton when isLoading is true", () => {
     const onApprovalClick = vi.fn();
 
-    render(
-      <ApprovalCardList
-        approvals={[]}
-        onApprovalClick={onApprovalClick}
-        isLoading={true}
-      />,
-    );
+    render(<ApprovalCardList approvals={[]} onApprovalClick={onApprovalClick} isLoading={true} />);
 
     expect(screen.getByTestId("approval-card-list-loading")).toBeInTheDocument();
   });
 
   it("calls onApprovalClick when a card is clicked", async () => {
-    const approvals = [
-      createMockApproval({ id: "approval-xyz" }),
-    ];
+    const approvals = [createMockApproval({ id: "approval-xyz" })];
     const onApprovalClick = vi.fn();
     const user = userEvent.setup();
 
-    render(
-      <ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={approvals} onApprovalClick={onApprovalClick} />);
 
     const card = screen.getByTestId("approval-card");
     await user.click(card);
@@ -210,9 +186,7 @@ describe("ApprovalCardList", () => {
   it("renders filter chips with correct labels", () => {
     const onApprovalClick = vi.fn();
 
-    render(
-      <ApprovalCardList approvals={[]} onApprovalClick={onApprovalClick} />,
-    );
+    render(<ApprovalCardList approvals={[]} onApprovalClick={onApprovalClick} />);
 
     const chips = screen.getAllByRole("button");
     const chipTexts = chips.map((c) => c.textContent);

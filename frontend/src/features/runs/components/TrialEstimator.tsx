@@ -66,19 +66,10 @@ export interface TrialEstimatorProps {
  *     className="mt-4"
  *   />
  */
-export function TrialEstimator({
-  parameters,
-  className,
-}: TrialEstimatorProps): React.ReactElement {
-  const trialCount = useMemo(
-    () => estimateTrialCount(parameters),
-    [parameters]
-  );
+export function TrialEstimator({ parameters, className }: TrialEstimatorProps): React.ReactElement {
+  const trialCount = useMemo(() => estimateTrialCount(parameters), [parameters]);
 
-  const severity = useMemo(
-    () => getTrialCountSeverity(trialCount),
-    [trialCount]
-  );
+  const severity = useMemo(() => getTrialCountSeverity(trialCount), [trialCount]);
 
   const severityLabel = getSeverityLabel(severity);
   const bgClass = getSeverityBgClass(severity);
@@ -86,34 +77,24 @@ export function TrialEstimator({
 
   if (parameters.length === 0) {
     return (
-      <div
-        className={`rounded-lg border border-gray-200 bg-gray-50 p-4 ${className || ""}`}
-      >
-        <p className="text-sm text-gray-600">
-          Add parameters to estimate trial count
-        </p>
+      <div className={`rounded-lg border border-gray-200 bg-gray-50 p-4 ${className || ""}`}>
+        <p className="text-sm text-gray-600">Add parameters to estimate trial count</p>
       </div>
     );
   }
 
   return (
-    <div
-      className={`rounded-lg border border-gray-200 bg-white p-4 ${className || ""}`}
-    >
+    <div className={`rounded-lg border border-gray-200 bg-white p-4 ${className || ""}`}>
       {/* Header with count and severity badge */}
-      <div className="flex items-center justify-between gap-4 mb-3">
+      <div className="mb-3 flex items-center justify-between gap-4">
         <div>
-          <p className="text-xs font-medium text-gray-600">
-            Estimated trials
-          </p>
-          <p className="text-2xl font-bold text-gray-900 mt-1">
-            {trialCount.toLocaleString()}
-          </p>
+          <p className="text-xs font-medium text-gray-600">Estimated trials</p>
+          <p className="mt-1 text-2xl font-bold text-gray-900">{trialCount.toLocaleString()}</p>
         </div>
 
         {/* Severity badge */}
         <div
-          className={`${bgClass} text-white rounded-full px-4 py-2 text-sm font-semibold min-w-fit`}
+          className={`${bgClass} min-w-fit rounded-full px-4 py-2 text-sm font-semibold text-white`}
         >
           {severityLabel}
         </div>
@@ -121,11 +102,11 @@ export function TrialEstimator({
 
       {/* Warning for extreme counts */}
       {showWarning && (
-        <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 flex gap-3 items-start">
-          <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+        <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600" />
           <p className="text-sm text-amber-900">
-            Optimization with {trialCount.toLocaleString()} trials may take
-            considerable time. Consider reducing parameter ranges or step sizes.
+            Optimization with {trialCount.toLocaleString()} trials may take considerable time.
+            Consider reducing parameter ranges or step sizes.
           </p>
         </div>
       )}

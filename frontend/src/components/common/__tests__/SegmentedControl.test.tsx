@@ -126,9 +126,7 @@ describe("SegmentedControl", () => {
   });
 
   it("applies correct styling classes to active and inactive buttons", () => {
-    render(
-      <SegmentedControl options={defaultOptions} value="5m" onChange={() => {}} />,
-    );
+    render(<SegmentedControl options={defaultOptions} value="5m" onChange={() => {}} />);
 
     const activeButton = screen.getByRole("radio", { name: "5m" });
     const inactiveButton = screen.getByRole("radio", { name: "1m" });

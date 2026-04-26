@@ -237,10 +237,7 @@ export const MobileApprovalDetail = memo(function MobileApprovalDetail({
 
         {/* Action controls (only for pending approvals where current user is not submitter) */}
         {isPending && (
-          <SeparationGuard
-            currentUserId={currentUserId}
-            submitterId={approval.requested_by}
-          >
+          <SeparationGuard currentUserId={currentUserId} submitterId={approval.requested_by}>
             <div className="space-y-3 pt-2">
               {/* Approve slide */}
               <SlideToConfirm
@@ -274,7 +271,8 @@ export const MobileApprovalDetail = memo(function MobileApprovalDetail({
                       className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500 disabled:opacity-50"
                     />
                     <p className="text-xs text-slate-500">
-                      {rejectRationale.trim().length}/{APPROVAL_RATIONALE_MIN_LENGTH} characters minimum
+                      {rejectRationale.trim().length}/{APPROVAL_RATIONALE_MIN_LENGTH} characters
+                      minimum
                     </p>
 
                     {isRejectValid && (

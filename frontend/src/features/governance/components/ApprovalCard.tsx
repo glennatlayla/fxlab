@@ -57,10 +57,7 @@ export interface ApprovalCardProps {
  *     onClick={(id) => setSelectedId(id)}
  *   />
  */
-export const ApprovalCard = memo(function ApprovalCard({
-  approval,
-  onClick,
-}: ApprovalCardProps) {
+export const ApprovalCard = memo(function ApprovalCard({ approval, onClick }: ApprovalCardProps) {
   const handleClick = () => {
     onClick(approval.id);
   };
@@ -110,7 +107,7 @@ export const ApprovalCard = memo(function ApprovalCard({
         <div className="mb-2 rounded bg-slate-50 px-2 py-1">
           <p
             data-testid="approval-card-decision-reason"
-            className="text-xs text-slate-700 line-clamp-2"
+            className="line-clamp-2 text-xs text-slate-700"
           >
             {approval.decision_reason}
           </p>
@@ -119,10 +116,7 @@ export const ApprovalCard = memo(function ApprovalCard({
 
       {/* Chevron on the right to indicate tappability */}
       <div className="flex justify-end">
-        <ChevronRight
-          data-testid="approval-card-chevron"
-          className="h-4 w-4 text-slate-400"
-        />
+        <ChevronRight data-testid="approval-card-chevron" className="h-4 w-4 text-slate-400" />
       </div>
     </button>
   );

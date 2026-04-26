@@ -15,10 +15,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import {
-  paperTradingConfigSchema,
-  type PaperTradingConfigInput,
-} from "../validation";
+import { paperTradingConfigSchema, type PaperTradingConfigInput } from "../validation";
 
 describe("paperTradingConfigSchema", () => {
   /**
@@ -221,9 +218,7 @@ describe("paperTradingConfigSchema", () => {
     const result = paperTradingConfigSchema.safeParse(config);
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(
-        result.error.flatten().fieldErrors.max_position_size,
-      ).toBeDefined();
+      expect(result.error.flatten().fieldErrors.max_position_size).toBeDefined();
     }
   });
 

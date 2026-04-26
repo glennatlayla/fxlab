@@ -85,9 +85,9 @@ describe("OptimizationForm", () => {
 
       // Use getAllByRole to get all selects, then filter for optimization metric
       const selects = screen.getAllByRole("combobox");
-      const metricSelect = selects.find(s =>
-        s.parentElement?.textContent?.includes("Optimization Metric")
-      ) || screen.getByDisplayValue(/sharpe_ratio/i);
+      const metricSelect =
+        selects.find((s) => s.parentElement?.textContent?.includes("Optimization Metric")) ||
+        screen.getByDisplayValue(/sharpe_ratio/i);
       await user.click(metricSelect);
 
       const sharpeOption = screen.getByRole("option", { name: /sharpe/i });
@@ -406,9 +406,7 @@ describe("OptimizationForm", () => {
       await user.click(submitButton);
 
       await waitFor(() => {
-        expect(
-          screen.getByText(/at least one parameter required/i)
-        ).toBeInTheDocument();
+        expect(screen.getByText(/at least one parameter required/i)).toBeInTheDocument();
       });
     });
 
@@ -499,9 +497,7 @@ describe("OptimizationForm", () => {
       // Fill in form
       const submitButton = screen.getByRole("button", { name: /submit/i });
 
-      rerender(
-        <OptimizationForm {...defaultProps} isSubmitting={true} />
-      );
+      rerender(<OptimizationForm {...defaultProps} isSubmitting={true} />);
 
       await waitFor(() => {
         expect(submitButton).toBeDisabled();

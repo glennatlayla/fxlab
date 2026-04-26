@@ -84,7 +84,7 @@ export const ApprovalCardList = memo(function ApprovalCardList({
         {[1, 2, 3].map((i) => (
           <div
             key={i}
-            className="h-24 rounded-lg border border-slate-200 bg-slate-100 animate-pulse"
+            className="h-24 animate-pulse rounded-lg border border-slate-200 bg-slate-100"
           />
         ))}
       </div>
@@ -128,11 +128,7 @@ export const ApprovalCardList = memo(function ApprovalCardList({
       ) : (
         <div className="space-y-3">
           {filteredApprovals.map((approval) => (
-            <ApprovalCard
-              key={approval.id}
-              approval={approval}
-              onClick={onApprovalClick}
-            />
+            <ApprovalCard key={approval.id} approval={approval} onClick={onApprovalClick} />
           ))}
         </div>
       )}

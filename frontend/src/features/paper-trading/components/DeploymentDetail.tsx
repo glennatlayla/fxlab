@@ -36,11 +36,7 @@
  */
 
 import { Loader2 } from "lucide-react";
-import type {
-  PaperDeploymentSummary,
-  PaperPosition,
-  PaperOrder,
-} from "../types";
+import type { PaperDeploymentSummary, PaperPosition, PaperOrder } from "../types";
 import { PAPER_DEPLOYMENT_STATUS } from "../types";
 
 interface DeploymentDetailProps {
@@ -88,14 +84,10 @@ export function DeploymentDetail({
   const isActive = deployment.status === PAPER_DEPLOYMENT_STATUS.ACTIVE;
 
   return (
-    <div
-      className={`flex flex-col gap-4 rounded-lg bg-gray-800 p-4 ${className}`.trim()}
-    >
+    <div className={`flex flex-col gap-4 rounded-lg bg-gray-800 p-4 ${className}`.trim()}>
       {/* Header: Strategy name and status */}
       <div className="border-b border-gray-700 pb-3">
-        <h2 className="text-lg font-semibold text-gray-100">
-          {deployment.strategy_name}
-        </h2>
+        <h2 className="text-lg font-semibold text-gray-100">{deployment.strategy_name}</h2>
         <p className="text-xs text-gray-500">
           Status: <span className="text-gray-400">{deployment.status}</span>
         </p>
@@ -103,9 +95,7 @@ export function DeploymentDetail({
 
       {/* Account Summary Card */}
       <div className="rounded-lg bg-gray-700 p-3">
-        <h3 className="mb-2 text-sm font-semibold text-gray-100">
-          Account Summary
-        </h3>
+        <h3 className="mb-2 text-sm font-semibold text-gray-100">Account Summary</h3>
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div>
             <span className="text-gray-500">Current Equity</span>
@@ -123,9 +113,7 @@ export function DeploymentDetail({
             <span className="text-gray-500">Total P&L</span>
             <div
               className={`text-sm font-semibold ${
-                deployment.total_pnl >= 0
-                  ? "text-green-400"
-                  : "text-red-400"
+                deployment.total_pnl >= 0 ? "text-green-400" : "text-red-400"
               }`}
             >
               {formatCurrency(deployment.total_pnl)}
@@ -135,9 +123,7 @@ export function DeploymentDetail({
             <span className="text-gray-500">Unrealized P&L</span>
             <div
               className={`text-sm font-semibold ${
-                deployment.unrealized_pnl >= 0
-                  ? "text-green-400"
-                  : "text-red-400"
+                deployment.unrealized_pnl >= 0 ? "text-green-400" : "text-red-400"
               }`}
             >
               {formatCurrency(deployment.unrealized_pnl)}
@@ -148,24 +134,15 @@ export function DeploymentDetail({
 
       {/* Positions Section */}
       <div>
-        <h3 className="mb-2 text-sm font-semibold text-gray-100">
-          Positions ({positions.length})
-        </h3>
+        <h3 className="mb-2 text-sm font-semibold text-gray-100">Positions ({positions.length})</h3>
         {positions.length === 0 ? (
-          <div className="rounded bg-gray-700 p-2 text-xs text-gray-400">
-            No open positions
-          </div>
+          <div className="rounded bg-gray-700 p-2 text-xs text-gray-400">No open positions</div>
         ) : (
           <div className="space-y-2">
             {positions.map((position) => (
-              <div
-                key={position.symbol}
-                className="rounded bg-gray-700 p-2 text-xs"
-              >
+              <div key={position.symbol} className="rounded bg-gray-700 p-2 text-xs">
                 <div className="mb-1 flex items-center justify-between">
-                  <span className="font-semibold text-gray-100">
-                    {position.symbol}
-                  </span>
+                  <span className="font-semibold text-gray-100">{position.symbol}</span>
                   <span
                     className={`rounded px-1.5 py-0.5 text-xs font-semibold ${
                       position.side === "long"
@@ -182,13 +159,10 @@ export function DeploymentDetail({
                   <span>Current: {formatCurrency(position.current_price)}</span>
                   <span
                     className={`font-semibold ${
-                      position.unrealized_pnl >= 0
-                        ? "text-green-400"
-                        : "text-red-400"
+                      position.unrealized_pnl >= 0 ? "text-green-400" : "text-red-400"
                     }`}
                   >
-                    P&L: {formatCurrency(position.unrealized_pnl)} (
-                    {position.pnl_pct.toFixed(2)}%)
+                    P&L: {formatCurrency(position.unrealized_pnl)} ({position.pnl_pct.toFixed(2)}%)
                   </span>
                 </div>
               </div>
@@ -199,27 +173,18 @@ export function DeploymentDetail({
 
       {/* Orders Section */}
       <div>
-        <h3 className="mb-2 text-sm font-semibold text-gray-100">
-          Orders ({orders.length})
-        </h3>
+        <h3 className="mb-2 text-sm font-semibold text-gray-100">Orders ({orders.length})</h3>
         {orders.length === 0 ? (
-          <div className="rounded bg-gray-700 p-2 text-xs text-gray-400">
-            No orders
-          </div>
+          <div className="rounded bg-gray-700 p-2 text-xs text-gray-400">No orders</div>
         ) : (
           <div className="space-y-2">
             {orders.map((order) => (
-              <div
-                key={order.id}
-                className="rounded bg-gray-700 p-2 text-xs"
-              >
+              <div key={order.id} className="rounded bg-gray-700 p-2 text-xs">
                 <div className="mb-1 flex items-center justify-between">
-                  <span className="font-semibold text-gray-100">
-                    {order.symbol}
-                  </span>
+                  <span className="font-semibold text-gray-100">{order.symbol}</span>
                   <span
                     className={`rounded px-1.5 py-0.5 text-xs font-semibold ${getOrderStatusBadgeColor(
-                      order.status
+                      order.status,
                     )}`}
                   >
                     {order.status}
@@ -229,9 +194,7 @@ export function DeploymentDetail({
                   <span>
                     {order.side} {order.quantity} @ {order.type}
                   </span>
-                  {order.price && (
-                    <span>{formatCurrency(order.price)}</span>
-                  )}
+                  {order.price && <span>{formatCurrency(order.price)}</span>}
                 </div>
               </div>
             ))}

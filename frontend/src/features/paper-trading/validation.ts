@@ -49,16 +49,9 @@ export const paperTradingConfigSchema = z.object({
     .int("Initial equity must be a whole number")
     .min(1000, "Minimum initial equity is $1,000")
     .max(1000000, "Maximum initial equity is $1,000,000"),
-  max_position_size: z
-    .number()
-    .positive("Max position size must be greater than 0"),
-  max_daily_loss: z
-    .number()
-    .positive("Max daily loss must be greater than 0"),
-  max_leverage: z
-    .number()
-    .min(1, "Minimum leverage is 1x")
-    .max(10, "Maximum leverage is 10x"),
+  max_position_size: z.number().positive("Max position size must be greater than 0"),
+  max_daily_loss: z.number().positive("Max daily loss must be greater than 0"),
+  max_leverage: z.number().min(1, "Minimum leverage is 1x").max(10, "Maximum leverage is 10x"),
   symbols: z
     .array(z.string().min(1, "Symbol cannot be empty"))
     .min(1, "At least one symbol is required"),

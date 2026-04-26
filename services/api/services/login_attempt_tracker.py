@@ -394,7 +394,7 @@ class RedisLoginAttemptTracker:
             # Prune expired entries before counting
             self._redis.zremrangebyscore(key, "-inf", cutoff)
             count = self._redis.zcard(key)
-            return count >= self._max_attempts  # type: ignore[operator]
+            return count >= self._max_attempts  # type: ignore[operator]  # redis sync stubs partial-typed: zcard returns Awaitable|Any
         except Exception:
             # Fail-closed: deny login attempts when Redis is down
             logger.warning(
@@ -432,7 +432,7 @@ class RedisLoginAttemptTracker:
         try:
             self._redis.zremrangebyscore(key, "-inf", cutoff)
             count = self._redis.zcard(key)
-            if count < self._max_attempts:  # type: ignore[operator]
+            if count < self._max_attempts:  # type: ignore[operator]  # redis sync stubs partial-typed: zcard returns Awaitable|Any
                 return 0
 
             # Get the oldest entry to calculate remaining lockout time
@@ -440,7 +440,7 @@ class RedisLoginAttemptTracker:
             if not oldest_entries:
                 return 0
 
-            oldest_score = oldest_entries[0][1]  # type: ignore[index]
+            oldest_score = oldest_entries[0][1]  # type: ignore[index]  # redis sync stubs partial-typed: zrange returns Awaitable|Any
             now = time.time()
             remaining = self._window_seconds - (now - oldest_score)
             return max(1, int(remaining) + 1)
@@ -511,7 +511,7 @@ def _create_login_tracker() -> LoginAttemptTracker | RedisLoginAttemptTracker:
             import redis  # noqa: F811 — lazy import to avoid hard dependency
 
             client = redis.Redis.from_url(redis_url, decode_responses=False)
-            client.ping()  # type: ignore[attr-defined]
+            client.ping()  # type: ignore[attr-defined]  # redis.Redis.from_url stub returns None-typed in some versions
             logger.info(
                 "login_tracker.redis_connected",
                 redis_url=redis_url.split("@")[-1],

@@ -331,7 +331,7 @@ def _create_backend() -> RateLimitBackend:
 
             client = redis.Redis.from_url(redis_url, decode_responses=True)
             # Test connectivity
-            client.ping()  # type: ignore[attr-defined]
+            client.ping()  # type: ignore[attr-defined]  # redis.Redis.from_url stub returns None-typed in some versions
             logger.info(
                 "rate_limit.backend_initialized",
                 backend="redis",

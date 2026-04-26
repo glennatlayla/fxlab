@@ -489,7 +489,7 @@ def _create_idempotency_store() -> IdempotencyStore | RedisIdempotencyStore:
             import redis as redis_lib
 
             client = redis_lib.Redis.from_url(redis_url, decode_responses=False)
-            client.ping()  # type: ignore[attr-defined]
+            client.ping()  # type: ignore[attr-defined]  # redis.Redis.from_url stub returns None-typed in some versions
             logger.info(
                 "idempotency.redis_backend_initialized",
                 redis_url=redis_url.split("@")[-1] if "@" in redis_url else redis_url,

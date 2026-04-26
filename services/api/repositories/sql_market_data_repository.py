@@ -363,7 +363,12 @@ class SqlMarketDataRepository(MarketDataRepositoryInterface):
         result = self._db.execute(stmt)
         self._db.flush()
 
-        deleted = result.rowcount
+        # SQLAlchemy 2.0: execute(delete()) returns a CursorResult exposing
+        # rowcount, but the static return type is Result[Any] (which lacks the
+        # attribute on stricter mypy + SQLAlchemy plugin versions). The runtime
+        # type is always CursorResult for DML statements, so we read rowcount
+        # via getattr with a typed fallback.
+        deleted = getattr(result, "rowcount", 0)
         logger.debug(
             "market_data.delete_complete symbol=%s interval=%s deleted=%d",
             symbol,

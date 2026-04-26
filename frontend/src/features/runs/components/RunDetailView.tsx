@@ -253,10 +253,7 @@ export function RunDetailView({ runId }: RunDetailViewProps) {
 
       {/* Mobile results summary card — shown prominently for completed runs on mobile */}
       {isMobile && isRunTerminal && (
-        <ResultsSummaryCard
-          runId={runId}
-          onViewFull={() => navigate(`/results/${runId}`)}
-        />
+        <ResultsSummaryCard runId={runId} onViewFull={() => navigate(`/results/${runId}`)} />
       )}
 
       {/* Terminal state — validates result_uri scheme before rendering link */}

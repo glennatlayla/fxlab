@@ -100,6 +100,7 @@ describe("backtestFormSchema", () => {
     });
 
     it("rejects missing strategy_build_id", () => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructure-to-omit
       const { strategy_build_id, ...form } = validFormValues;
       const result = backtestFormSchema.safeParse(form);
       expect(result.success).toBe(false);
@@ -117,6 +118,7 @@ describe("backtestFormSchema", () => {
     });
 
     it("rejects missing symbols", () => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructure-to-omit
       const { symbols, ...form } = validFormValues;
       const result = backtestFormSchema.safeParse(form);
       expect(result.success).toBe(false);
@@ -193,6 +195,7 @@ describe("backtestFormSchema", () => {
 
   describe("interval validation", () => {
     it("rejects invalid interval", () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- intentionally-invalid-interval-for-test
       const form = { ...validFormValues, interval: "2h" as any };
       const result = backtestFormSchema.safeParse(form);
       expect(result.success).toBe(false);
@@ -338,6 +341,7 @@ describe("validateBacktestForm helper", () => {
       symbols: [],
       start_date: "invalid",
       end_date: "2024-01-01",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- intentionally-invalid-interval-for-test
       interval: "2h" as any,
       initial_equity: -100,
     };

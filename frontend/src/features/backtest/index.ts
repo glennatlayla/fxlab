@@ -19,16 +19,8 @@ export { BacktestForm } from "./components/BacktestForm";
 export type { BacktestFormProps } from "./components/BacktestForm";
 
 // Types
-export type {
-  BacktestFormValues,
-  TimeInterval,
-  TimeIntervalOption,
-} from "./types";
-export {
-  TIME_INTERVALS,
-  DEFAULT_BACKTEST_FORM,
-  BACKTEST_CONSTRAINTS,
-} from "./types";
+export type { BacktestFormValues, TimeInterval, TimeIntervalOption } from "./types";
+export { TIME_INTERVALS, DEFAULT_BACKTEST_FORM, BACKTEST_CONSTRAINTS } from "./types";
 
 // Validation
 export { backtestFormSchema, validateBacktestForm } from "./validation";

@@ -105,14 +105,17 @@ export const backtestFormSchema = z
       .describe("Optional slippage in basis points (0–100)"),
   })
   // Cross-field validation: end_date must be after start_date.
-  .refine((data) => {
-    const start = new Date(data.start_date);
-    const end = new Date(data.end_date);
-    return end > start;
-  }, {
-    message: "End date must be after start date",
-    path: ["end_date"],
-  });
+  .refine(
+    (data) => {
+      const start = new Date(data.start_date);
+      const end = new Date(data.end_date);
+      return end > start;
+    },
+    {
+      message: "End date must be after start date",
+      path: ["end_date"],
+    },
+  );
 
 /**
  * Inferred TypeScript type from the schema.

@@ -152,9 +152,7 @@ export function estimateTrialCount(params: ParameterRange[]): number {
  *   getTrialCountSeverity(5000) // 'high'
  *   getTrialCountSeverity(50000) // 'extreme'
  */
-export function getTrialCountSeverity(
-  count: number
-): "low" | "moderate" | "high" | "extreme" {
+export function getTrialCountSeverity(count: number): "low" | "moderate" | "high" | "extreme" {
   if (count < 100) return "low";
   if (count < 1000) return "moderate";
   if (count < 10000) return "high";
@@ -174,9 +172,7 @@ export function getTrialCountSeverity(
  *   getSeverityLabel('low') // 'Fast'
  *   getSeverityLabel('extreme') // 'Very Long'
  */
-export function getSeverityLabel(
-  severity: "low" | "moderate" | "high" | "extreme"
-): string {
+export function getSeverityLabel(severity: "low" | "moderate" | "high" | "extreme"): string {
   switch (severity) {
     case "low":
       return "Fast";
@@ -204,9 +200,7 @@ export function getSeverityLabel(
  *   getSeverityBgClass('low') // 'bg-green-500'
  *   getSeverityBgClass('extreme') // 'bg-red-500'
  */
-export function getSeverityBgClass(
-  severity: "low" | "moderate" | "high" | "extreme"
-): string {
+export function getSeverityBgClass(severity: "low" | "moderate" | "high" | "extreme"): string {
   switch (severity) {
     case "low":
       return "bg-green-500";
