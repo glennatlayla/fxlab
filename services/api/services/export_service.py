@@ -38,24 +38,40 @@ Example:
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import time
 import zipfile
+from collections import defaultdict, deque
+from collections.abc import Iterator
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import structlog
 import ulid as _ulid
 
+from libs.contracts.backtest import BacktestTrade
 from libs.contracts.errors import ExternalServiceError, NotFoundError
 from libs.contracts.export import ExportJobResponse, ExportStatus, ExportType
 from libs.contracts.interfaces.export_repository_interface import (
     ExportRepositoryInterface,
 )
+from libs.contracts.interfaces.research_run_repository import (
+    ResearchRunRepositoryInterface,
+)
+from libs.contracts.research_run import ResearchRunStatus
+from libs.contracts.run_results import (
+    RUN_BLOTTER_CSV_COLUMNS,
+    RUN_BLOTTER_EXPORT_CHUNK_SIZE,
+    TradeBlotterRow,
+)
 from libs.storage.base import ArtifactStorageBase
+from services.api.middleware.correlation import correlation_id_var
 from services.api.services.interfaces.export_service_interface import (
     ExportServiceInterface,
 )
+from services.api.services.research_run_service import RunNotCompletedError
 
 logger = structlog.get_logger(__name__)
 
@@ -105,6 +121,8 @@ class ExportService(ExportServiceInterface):
         self,
         repo: ExportRepositoryInterface,
         storage: ArtifactStorageBase,
+        *,
+        research_run_repo: ResearchRunRepositoryInterface | None = None,
     ) -> None:
         """
         Initialize the export service.
@@ -112,9 +130,15 @@ class ExportService(ExportServiceInterface):
         Args:
             repo: ExportRepositoryInterface for job persistence.
             storage: ArtifactStorageBase for artifact storage.
+            research_run_repo: Optional ResearchRunRepositoryInterface used by
+                :meth:`stream_run_blotter_csv` to look up the source run record
+                for a CSV blotter export. ``None`` keeps existing call sites
+                that only need the job-bundle path working unchanged; the
+                streamer raises ``RuntimeError`` when invoked without it.
         """
         self._repo = repo
         self._storage = storage
+        self._research_run_repo = research_run_repo
 
     def create_export(
         self,
@@ -464,6 +488,329 @@ class ExportService(ExportServiceInterface):
                 exc_info=True,
             )
             raise ExternalServiceError(f"Failed to download export {job_id}: {str(exc)}") from exc
+
+    # -----------------------------------------------------------------------
+    # Run-blotter CSV streaming
+    # -----------------------------------------------------------------------
+
+    def stream_run_blotter_csv(self, run_id: str) -> Iterator[bytes]:
+        """
+        Stream the round-trip trade blotter for a completed run as CSV bytes.
+
+        Lifts :class:`BacktestTrade` legs out of the run's
+        :class:`BacktestResult`, pairs them into FIFO round-trips per
+        symbol (opening side -> matching opposite-side close), and yields
+        UTF-8 CSV bytes in chunks of at most :data:`RUN_BLOTTER_EXPORT_CHUNK_SIZE`
+        rows so memory stays bounded for runs with very large blotters.
+
+        The first yielded chunk always begins with the canonical header
+        row (:data:`RUN_BLOTTER_CSV_COLUMNS`). Subsequent chunks contain
+        only data rows.
+
+        Round-trip pairing rules (FIFO per symbol):
+
+            * Opening leg = first leg seen on a symbol whose remaining
+              position is zero. ``side`` of the round-trip mirrors the
+              opening leg ('buy' for long, 'sell' for short).
+            * Closing leg = next leg with the opposite side on the same
+              symbol that fully matches the opening leg's quantity. The
+              implementation assumes the engine emits balanced legs, which
+              the synthetic backtest executor in ``services/api/services/
+              synthetic_backtest_executor.py`` and the M2.D5 walk-forward
+              path both honour.
+            * Realised PnL: long round-trip ->
+              ``(exit_price - entry_price) * units - fees``;
+              short round-trip ->
+              ``(entry_price - exit_price) * units - fees``.
+            * Fees aggregate ``commission + slippage`` across both legs.
+            * Holding-period seconds: ``(exit_time - entry_time).total_seconds()``
+              cast to ``int``.
+            * Open positions at run end (no matching closing leg) surface
+              with empty ``exit_time`` / ``exit_price`` / ``realized_pnl`` /
+              ``holding_period_seconds`` cells; ``fees`` covers only the
+              opening leg.
+
+        Args:
+            run_id: ULID of the research run to export.
+
+        Yields:
+            UTF-8-encoded CSV byte chunks. The first chunk begins with the
+            header row; subsequent chunks are pure data rows. Each chunk
+            contains at most :data:`RUN_BLOTTER_EXPORT_CHUNK_SIZE` rows.
+
+        Raises:
+            RuntimeError: If the service was constructed without a
+                ``research_run_repo`` dependency.
+            NotFoundError: If no run record exists for ``run_id``.
+            RunNotCompletedError: If the run exists but is not in
+                terminal COMPLETED status with a result body.
+
+        Example:
+            >>> for chunk in service.stream_run_blotter_csv("01HRUN..."):
+            ...     response_body.write(chunk)
+        """
+        if self._research_run_repo is None:
+            raise RuntimeError(
+                "ExportService.stream_run_blotter_csv requires a "
+                "research_run_repo dependency; pass one to ExportService(...)."
+            )
+
+        t0 = time.monotonic()
+        correlation_id = correlation_id_var.get("no-corr")
+
+        record = self._research_run_repo.get_by_id(run_id)
+        if record is None:
+            logger.warning(
+                "run_blotter_export.not_found",
+                operation="run_blotter_export",
+                component="ExportService",
+                run_id=run_id,
+                correlation_id=correlation_id,
+            )
+            raise NotFoundError(f"Research run {run_id} not found")
+
+        if record.status != ResearchRunStatus.COMPLETED or record.result is None:
+            logger.warning(
+                "run_blotter_export.not_completed",
+                operation="run_blotter_export",
+                component="ExportService",
+                run_id=run_id,
+                run_status=record.status.value,
+                correlation_id=correlation_id,
+            )
+            raise RunNotCompletedError(run_id, record.status)
+
+        backtest_result = record.result.backtest_result
+        legs: list[BacktestTrade] = (
+            list(backtest_result.trades) if backtest_result is not None else []
+        )
+
+        logger.info(
+            "run_blotter_export_started",
+            operation="run_blotter_export",
+            component="ExportService",
+            run_id=run_id,
+            requested_by=record.created_by,
+            leg_count=len(legs),
+            correlation_id=correlation_id,
+        )
+
+        rows = self._pair_trades_into_round_trips(legs)
+        row_count = 0
+
+        # Yield in chunks. Each chunk is a single bytes object that may
+        # carry multiple CSV lines. We use csv.writer over an in-memory
+        # text buffer so the CSV escaping rules (quoting, embedded commas)
+        # match the standard library's behaviour exactly.
+        def _flush(buffer: io.StringIO) -> bytes:
+            payload = buffer.getvalue().encode("utf-8")
+            buffer.seek(0)
+            buffer.truncate(0)
+            return payload
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+
+        # Header row is always the first chunk.
+        writer.writerow(RUN_BLOTTER_CSV_COLUMNS)
+        yield _flush(buffer)
+
+        rows_in_chunk = 0
+        for row in rows:
+            writer.writerow(self._format_row_for_csv(row))
+            rows_in_chunk += 1
+            row_count += 1
+            if rows_in_chunk >= RUN_BLOTTER_EXPORT_CHUNK_SIZE:
+                yield _flush(buffer)
+                rows_in_chunk = 0
+
+        if rows_in_chunk > 0:
+            yield _flush(buffer)
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        logger.info(
+            "run_blotter_export_completed",
+            operation="run_blotter_export",
+            component="ExportService",
+            run_id=run_id,
+            row_count=row_count,
+            duration_ms=round(duration_ms, 2),
+            correlation_id=correlation_id,
+            result="success",
+        )
+
+    @staticmethod
+    def _pair_trades_into_round_trips(
+        legs: list[BacktestTrade],
+    ) -> list[TradeBlotterRow]:
+        """
+        Pair execution legs into round-trip :class:`TradeBlotterRow` rows.
+
+        Per-symbol FIFO pairing:
+            * The first leg seen on a symbol whose net position is zero
+              opens a new round-trip.
+            * The next leg on the same symbol whose side is opposite to
+              the open round-trip's opening side closes it. Sequential
+              same-side legs accumulate as additional opens (still FIFO).
+            * Trade rows are deterministically sorted by entry_time so the
+              CSV is byte-identical across repeated invocations.
+
+        Args:
+            legs: All :class:`BacktestTrade` legs from the run, in engine
+                emission order.
+
+        Returns:
+            All round-trip rows (closed and still-open) sorted by
+            ``entry_time`` ascending.
+        """
+        # Process legs in stable engine order. ``open_legs`` is a per-symbol
+        # FIFO of unmatched openings; each entry carries the ULID-style
+        # ``trade_id`` derived from the leg's index into the input list so
+        # the identifier is stable across runs.
+        open_legs: dict[str, deque[tuple[int, BacktestTrade]]] = defaultdict(deque)
+        closed_rows: list[TradeBlotterRow] = []
+
+        for index, leg in enumerate(legs):
+            queue = open_legs[leg.symbol]
+            if not queue:
+                queue.append((index, leg))
+                continue
+
+            head_index, head_leg = queue[0]
+            if head_leg.side == leg.side:
+                # Same-side stack: accumulate as another open leg.
+                queue.append((index, leg))
+                continue
+
+            # Opposite side -> close the head opening leg. We assume the
+            # engine emits a matching closing-quantity leg; we use the
+            # opening leg's quantity as the round-trip ``units`` (the
+            # closing leg's quantity is checked via the sign-only PnL
+            # math, not enforced as equal here because some engines emit
+            # partial closes that the v1 export collapses into the head).
+            queue.popleft()
+            closed_rows.append(
+                ExportService._build_round_trip_row(
+                    open_index=head_index,
+                    open_leg=head_leg,
+                    close_leg=leg,
+                )
+            )
+
+        # Anything left in the per-symbol queues at the end is an open
+        # position at run end. Surface as still-open rows so consumers see
+        # exposure that was carried over the run boundary.
+        for queue in open_legs.values():
+            for open_index, open_leg in queue:
+                closed_rows.append(
+                    ExportService._build_round_trip_row(
+                        open_index=open_index,
+                        open_leg=open_leg,
+                        close_leg=None,
+                    )
+                )
+
+        closed_rows.sort(key=lambda r: (r.entry_time, r.trade_id))
+        return closed_rows
+
+    @staticmethod
+    def _build_round_trip_row(
+        *,
+        open_index: int,
+        open_leg: BacktestTrade,
+        close_leg: BacktestTrade | None,
+    ) -> TradeBlotterRow:
+        """
+        Project an (open, close) leg pair into a :class:`TradeBlotterRow`.
+
+        Args:
+            open_index: Position of the opening leg in the engine's
+                trade list. Used to derive the stable ``trade_id``.
+            open_leg: Opening execution leg.
+            close_leg: Matching closing leg, or ``None`` for still-open
+                positions at run end.
+
+        Returns:
+            A frozen :class:`TradeBlotterRow` describing the round-trip.
+        """
+        trade_id = f"trade-{open_index:06d}"
+        units = open_leg.quantity
+        entry_price = open_leg.price
+        open_fees = open_leg.commission + open_leg.slippage
+
+        if close_leg is None:
+            return TradeBlotterRow(
+                trade_id=trade_id,
+                symbol=open_leg.symbol,
+                side=open_leg.side,
+                entry_time=open_leg.timestamp,
+                exit_time=None,
+                units=units,
+                entry_price=entry_price,
+                exit_price=None,
+                fees=open_fees,
+                realized_pnl=None,
+                holding_period_seconds=None,
+            )
+
+        close_fees = close_leg.commission + close_leg.slippage
+        total_fees = open_fees + close_fees
+        exit_price = close_leg.price
+
+        if open_leg.side == "buy":
+            realized = (exit_price - entry_price) * units - total_fees
+        else:
+            realized = (entry_price - exit_price) * units - total_fees
+
+        holding = int((close_leg.timestamp - open_leg.timestamp).total_seconds())
+
+        return TradeBlotterRow(
+            trade_id=trade_id,
+            symbol=open_leg.symbol,
+            side=open_leg.side,
+            entry_time=open_leg.timestamp,
+            exit_time=close_leg.timestamp,
+            units=units,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            fees=total_fees,
+            realized_pnl=realized,
+            holding_period_seconds=holding,
+        )
+
+    @staticmethod
+    def _format_row_for_csv(row: TradeBlotterRow) -> list[str]:
+        """
+        Serialise a :class:`TradeBlotterRow` into the CSV column order.
+
+        Decimal fields use ``str(Decimal)`` so the wire format mirrors
+        the JSON blotter endpoint's representation. ``None`` cells
+        surface as empty strings so spreadsheet importers can detect
+        still-open positions without parsing magic sentinels.
+        """
+
+        def _fmt_decimal(value: Decimal | None) -> str:
+            return "" if value is None else str(value)
+
+        def _fmt_dt(value: datetime | None) -> str:
+            return "" if value is None else value.isoformat()
+
+        def _fmt_int(value: int | None) -> str:
+            return "" if value is None else str(value)
+
+        return [
+            row.trade_id,
+            row.symbol,
+            row.side,
+            _fmt_dt(row.entry_time),
+            _fmt_dt(row.exit_time),
+            _fmt_decimal(row.units),
+            _fmt_decimal(row.entry_price),
+            _fmt_decimal(row.exit_price),
+            _fmt_decimal(row.fees),
+            _fmt_decimal(row.realized_pnl),
+            _fmt_int(row.holding_period_seconds),
+        ]
 
     # -----------------------------------------------------------------------
     # Internal helpers

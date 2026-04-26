@@ -200,6 +200,103 @@ class TradeBlotterPage(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Trade-blotter CSV export row (round-trip / closed position view)
+# ---------------------------------------------------------------------------
+
+#: Streaming chunk size for the CSV blotter export. Picked at 1000 to keep
+#: memory bounded for large blotters while still amortising per-yield Python
+#: overhead. The route layer streams each chunk via ``StreamingResponse``.
+RUN_BLOTTER_EXPORT_CHUNK_SIZE: int = 1000
+
+
+#: Canonical CSV column order. The export route surfaces this as the first
+#: yielded row (header) and consumers (operator spreadsheets) rely on the
+#: order as much as the names. Keep in sync with :class:`TradeBlotterRow`.
+RUN_BLOTTER_CSV_COLUMNS: tuple[str, ...] = (
+    "trade_id",
+    "symbol",
+    "side",
+    "entry_time",
+    "exit_time",
+    "units",
+    "entry_price",
+    "exit_price",
+    "fees",
+    "realized_pnl",
+    "holding_period_seconds",
+)
+
+
+class TradeBlotterRow(BaseModel):
+    """
+    A single closed (round-trip) position row in the CSV export.
+
+    Differs from :class:`TradeBlotterEntry` (single execution leg) by
+    pairing an opening leg with its closing leg into one row that
+    spreadsheet users can analyse directly. The row carries both
+    timestamps, both prices, the aggregate fees (commission + slippage
+    across both legs), and the realised PnL for the round-trip.
+
+    Open positions at the end of the run (no matching closing leg)
+    surface with ``exit_time``, ``exit_price``, ``realized_pnl``, and
+    ``holding_period_seconds`` set to ``None`` so consumers can tell
+    "still open" apart from "closed at zero PnL".
+
+    Attributes:
+        trade_id: Stable identifier for the round-trip
+            (``trade-{open_index:06d}`` keyed off the opening leg).
+        symbol: Instrument symbol (must match across both legs).
+        side: Side of the OPENING leg ('buy' for long round-trip,
+            'sell' for short round-trip).
+        entry_time: UTC timestamp when the position was opened.
+        exit_time: UTC timestamp when the position was closed; ``None``
+            if the position was still open at run end.
+        units: Position size as Decimal (matches the opening leg's
+            quantity).
+        entry_price: Execution price of the opening leg.
+        exit_price: Execution price of the closing leg; ``None`` for
+            still-open positions.
+        fees: Sum of commission + slippage across both legs (or just
+            the opening leg for still-open positions).
+        realized_pnl: Realised P&L of the round-trip; ``None`` for
+            still-open positions. For 'buy' opens:
+            ``(exit_price - entry_price) * units - fees``. For 'sell'
+            opens: ``(entry_price - exit_price) * units - fees``.
+        holding_period_seconds: ``(exit_time - entry_time).total_seconds()``
+            for closed round-trips; ``None`` for still-open positions.
+
+    Example:
+        row = TradeBlotterRow(
+            trade_id="trade-000000",
+            symbol="EURUSD",
+            side="buy",
+            entry_time=datetime(2025, 1, 1, 9, 30, tzinfo=timezone.utc),
+            exit_time=datetime(2025, 1, 1, 10, 30, tzinfo=timezone.utc),
+            units=Decimal("100"),
+            entry_price=Decimal("1.1000"),
+            exit_price=Decimal("1.1050"),
+            fees=Decimal("1.20"),
+            realized_pnl=Decimal("0.30"),
+            holding_period_seconds=3600,
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trade_id: str = Field(..., min_length=1, description="Round-trip identifier.")
+    symbol: str = Field(..., min_length=1)
+    side: str = Field(..., pattern=r"^(buy|sell)$")
+    entry_time: datetime
+    exit_time: datetime | None = None
+    units: Decimal = Field(..., gt=0)
+    entry_price: Decimal = Field(..., gt=0)
+    exit_price: Decimal | None = None
+    fees: Decimal = Field(default=Decimal("0"), ge=0)
+    realized_pnl: Decimal | None = None
+    holding_period_seconds: int | None = Field(default=None, ge=0)
+
+
+# ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
 
