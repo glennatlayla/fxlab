@@ -102,6 +102,8 @@ from libs.contracts.signal import (
 )
 from libs.contracts.strategy_ir import (
     AtrMultipleStop,
+    BasketAtrMultipleStop,
+    BasketOpenLossPctStop,
     BollingerLowerIndicator,
     BollingerUpperIndicator,
     CalendarExitStop,
@@ -216,6 +218,12 @@ class _EvalContext:
     open_trade: _OpenTradeContext | None = None
     bar_counter: int = 0
     cross_tf: _CrossTimeframeAggregator | None = None
+    # Aggregate basket state for the current bar. Always populated --
+    # ``IRStrategy.evaluate`` calls the registered provider (or builds
+    # the default ``_BasketState()`` when none is registered) before
+    # the exit evaluators run, so basket evaluators can dict-lookup
+    # the snapshot without a None-check on the hot path.
+    basket_state: _BasketState | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +292,58 @@ class _OpenTradeContext:
 
 
 @dataclass(frozen=True)
+class _BasketState:
+    """
+    Per-bar aggregate of basket-level state read by basket exit evaluators.
+
+    The strategy itself is per-symbol (one ``IRStrategy`` instance is
+    driven once per (symbol, bar) pair), but a basket exit (e.g.
+    ``basket_atr_multiple`` or ``basket_open_loss_pct``) needs the
+    aggregate across every symbol the strategy is currently holding.
+    The driver (the synthetic backtest executor for this tranche;
+    BacktestEngine for production) supplies a callable that returns
+    this snapshot, and the strategy plumbs it through ``_EvalContext``
+    so the basket evaluator's closure can read it without knowing
+    anything about the broker.
+
+    Attributes:
+        open_loss: TOTAL unrealised loss across every open position in
+            the basket, expressed as a positive float in the broker's
+            account currency. ``0.0`` when no positions are open or
+            when the basket is in net profit (the basket stop fires on
+            LOSS, never on profit).
+        equity: Account equity at this bar (realised balance plus
+            net unrealised PnL across every open position). Used by
+            ``basket_open_loss_pct`` to compute ``loss_pct = open_loss /
+            equity * 100``. Always strictly positive when basket
+            evaluators are consulted; ``NaN`` is treated as "no data --
+            do not fire" so a missing equity feed cannot cause a stop
+            to fire spuriously.
+        latest_atr: Most-recent value of the ATR indicator named in the
+            ``basket_atr_multiple`` stop, sampled from THIS bar's
+            indicator window for the symbol whose evaluate() call is
+            in flight. The basket ATR stop tests
+            ``open_loss > multiple * latest_atr * units_factor`` (see
+            ``_build_basket_atr_evaluator`` for the exact formulation).
+            ``NaN`` when the ATR is still warming up; the evaluator
+            short-circuits to False in that case.
+    """
+
+    open_loss: float = 0.0
+    equity: float = float("nan")
+    latest_atr: float = float("nan")
+
+
+#: Callable returning a :class:`_BasketState` snapshot when invoked.
+#: The driver injects one of these onto :class:`IRStrategy` via
+#: :meth:`IRStrategy.set_basket_state_provider`. The provider is called
+#: once per :meth:`IRStrategy.evaluate` invocation, immediately before
+#: the exit evaluators run, so basket evaluators always see fresh
+#: aggregates that include the just-submitted bar's mark-to-market.
+BasketStateProvider = Callable[[], _BasketState]
+
+
+@dataclass(frozen=True)
 class _ExitWiring:
     """
     Compile-time descriptor of the indicator ids each exit kind needs
@@ -323,6 +383,12 @@ class _ExitWiring:
     bb_lower_inner_id: str | None = None
     bb_mid_id: str | None = None
     time_exit_max_bars: int | None = None
+    # Basket-level wiring (M3.X2.5). Populated when the IR's
+    # initial_stop is a BasketAtrMultipleStop; otherwise None / NaN so
+    # the basket-state provider can short-circuit without touching the
+    # broker's per-symbol ATR samples.
+    basket_atr_indicator_id: str | None = None
+    basket_atr_multiple: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -923,6 +989,19 @@ class IRStrategy(SignalStrategyInterface):
         # path. Empty tuple is the no-op fast path for IRs that
         # declare no derived_fields.
         self._derived_field_specs: tuple[_DerivedFieldSpec, ...] = derived_field_specs
+        # Optional callable returning a fresh _BasketState snapshot per
+        # evaluate() invocation. Wired by the driver (synthetic backtest
+        # executor or BacktestEngine) when the IR declares a
+        # basket-level exit; ``None`` for single-symbol strategies, in
+        # which case basket evaluators see a default-constructed
+        # _BasketState (open_loss=0, equity=NaN) and short-circuit to
+        # False.
+        self._basket_state_provider: BasketStateProvider | None = None
+        # Compile-time flag: True when at least one basket-level exit
+        # variant (BasketAtrMultipleStop / BasketOpenLossPctStop) is
+        # present anywhere in exit_logic. Drivers check ``has_basket_exits``
+        # to decide whether to wire a basket-state provider.
+        self._has_basket_exits: bool = self._detect_basket_exits(ir)
 
     # ---------- SignalStrategyInterface metadata ----------
 
@@ -974,6 +1053,82 @@ class IRStrategy(SignalStrategyInterface):
             unambiguous mapping for the engine to honour.
         """
         return [IndicatorRequest(indicator_name=ir_id, params={}) for ir_id in self._indicator_ids]
+
+    # ---------- basket-state wiring ----------
+
+    def set_basket_state_provider(self, provider: BasketStateProvider | None) -> None:
+        """
+        Register (or clear) the basket-state provider.
+
+        The driver -- the synthetic backtest executor in this tranche,
+        BacktestEngine in production -- supplies a callable returning a
+        fresh :class:`_BasketState` each time it is invoked. The
+        strategy calls the provider once per :meth:`evaluate` invocation
+        (immediately before exit checks run) and exposes the resulting
+        snapshot to basket exit evaluators via
+        :attr:`_EvalContext.basket_state`.
+
+        For single-symbol strategies the IR has no basket exits and the
+        provider is never registered; basket evaluators (if any are
+        compiled defensively) see ``_BasketState()`` defaults
+        (``open_loss=0``, ``equity=NaN``) and short-circuit to False.
+
+        Args:
+            provider: callable returning a :class:`_BasketState`, or
+                ``None`` to clear a previously-registered provider.
+        """
+        self._basket_state_provider = provider
+
+    @property
+    def has_basket_exits(self) -> bool:
+        """
+        True when the compiled strategy contains at least one basket
+        exit check (``basket_atr_multiple`` or ``basket_open_loss_pct``).
+
+        Drivers consult this to decide whether they need to wire a
+        basket-state provider; strategies without basket exits do not
+        need the (cheap-but-not-free) per-bar aggregation that the
+        provider performs.
+        """
+        return self._has_basket_exits
+
+    @property
+    def basket_atr_indicator_id(self) -> str | None:
+        """
+        The IR id of the per-symbol ATR indicator a basket_atr_multiple
+        stop reads (None when no such stop is configured).
+
+        Drivers (synthetic backtest executor or BacktestEngine) consult
+        this to know which indicator to sample per (symbol, bar) when
+        aggregating ``_BasketState.latest_atr``.
+        """
+        return self._exit_wiring.basket_atr_indicator_id
+
+    @staticmethod
+    def _detect_basket_exits(ir: StrategyIR) -> bool:
+        """Walk the IR's exit_logic stop slots and return True iff any
+        is a basket-level variant.
+
+        Catalogue of slots that may hold an :class:`ExitStop`: each
+        attribute on :class:`ExitLogic` that is typed as ``ExitStop |
+        None``. The list is short and stable enough to enumerate
+        explicitly here -- mirroring the ordering used by
+        :meth:`_compile_exit_logic` keeps the two methods auditable
+        side-by-side.
+        """
+        exit_logic = ir.exit_logic
+        for attr_name in (
+            "primary_exit",
+            "initial_stop",
+            "take_profit",
+            "trailing_exit",
+            "scheduled_exit",
+            "equity_stop",
+        ):
+            stop = getattr(exit_logic, attr_name, None)
+            if isinstance(stop, (BasketAtrMultipleStop, BasketOpenLossPctStop)):
+                return True
+        return False
 
     # ---------- core evaluate() ----------
 
@@ -1037,6 +1192,19 @@ class IRStrategy(SignalStrategyInterface):
             indicator_values=indicator_values,
         )
 
+        # Pull a fresh basket-state snapshot when the strategy has any
+        # basket exits AND a provider is registered. Otherwise pass a
+        # default-constructed _BasketState so the evaluator's None-check
+        # still passes but its conservative guards (open_loss <= 0,
+        # equity NaN) short-circuit to False. We deliberately do NOT
+        # call the provider for strategies without basket exits to
+        # avoid paying for the per-bar aggregation when nothing reads
+        # it.
+        if self._has_basket_exits and self._basket_state_provider is not None:
+            basket_state = self._basket_state_provider()
+        else:
+            basket_state = _BasketState()
+
         ctx = _EvalContext(
             candle=candle,
             indicator_values=indicator_values,
@@ -1045,6 +1213,7 @@ class IRStrategy(SignalStrategyInterface):
             open_trade=open_trade,
             bar_counter=self._bar_counter,
             cross_tf=self._cross_tf,
+            basket_state=basket_state,
         )
 
         # ``_prev_N`` references must read PRIOR-bar values during this
@@ -1528,6 +1697,32 @@ class StrategyIRCompiler:
                 else None
             )
 
+            # Basket-template entries (FX_TurnOfMonth shape). When the IR
+            # uses ``basket_templates`` instead of per-direction
+            # long/short blocks, build per-direction evaluators that:
+            #   - check every template's ``active_when`` leaf,
+            #   - look up the current symbol in the active template's
+            #     legs, and
+            #   - return True for the leg's side.
+            # The optional ``entry_filters`` ConditionTree is AND'd in
+            # so the basket cannot fire when (e.g.) the per-symbol ATR
+            # is below the IR's volatility floor.
+            if ir.entry_logic.basket_templates:
+                basket_long, basket_short = self._compile_basket_templates(
+                    ir.entry_logic.basket_templates,
+                    ir.entry_logic.entry_filters,
+                    indicator_ids,
+                )
+                # ``long_eval`` and ``short_eval`` are None for the
+                # production basket IR; if a future IR mixes both
+                # shapes the basket evaluators take precedence (they
+                # reference the per-symbol routing rules the
+                # directional shape cannot express).
+                if basket_long is not None:
+                    long_eval = basket_long
+                if basket_short is not None:
+                    short_eval = basket_short
+
             # 6. Compile exit checks and freeze in priority order.
             compiled_exits = self._compile_exit_logic(ir.exit_logic, indicator_ids, exit_wiring)
             ordered_exits = self._freeze_exit_priority(compiled_exits, ir.exit_logic)
@@ -1723,6 +1918,102 @@ class StrategyIRCompiler:
         return self._compile_condition_tree(
             entry.logic, indicator_ids, location=f"entry_logic.{side}.logic"
         )
+
+    def _compile_basket_templates(
+        self,
+        templates: list[Any],  # list[BasketTemplate]
+        entry_filters: ConditionTree | None,
+        indicator_ids: frozenset[str],
+    ) -> tuple[LeafEvaluator | None, LeafEvaluator | None]:
+        """
+        Compile basket_templates into per-direction evaluators.
+
+        Each template carries:
+          * ``active_when`` -- a leaf condition that gates basket
+            activation (e.g. ``business_day_of_month >= 28``).
+          * ``legs`` -- list of (symbol, side, weight) entries naming
+            the symbols the basket opens when active.
+
+        We compile one ``active_when`` evaluator per template (closure
+        capturing the leaf), then build a per-direction evaluator that:
+
+          1. Iterates every template, in declaration order.
+          2. For each template whose ``active_when`` is true on the
+             current bar, checks whether the current symbol
+             (``ctx.candle.symbol``) appears in the template's legs
+             with the matching side.
+          3. Returns True on the first match; False otherwise.
+
+        ``entry_filters`` (optional) is AND'd around every basket-fire
+        decision so a basket cannot trigger when (e.g.) the symbol's
+        volatility floor is breached. The filter is compiled ONCE and
+        evaluated cheaply at runtime.
+
+        Returns:
+            ``(long_eval, short_eval)`` -- either may be ``None`` when
+            no template has any leg of that side.
+        """
+        # Compile every active_when leaf and snapshot the per-template
+        # (long_symbols, short_symbols) routing tables. Tuples (immutable)
+        # so the closure can never accidentally mutate the routing.
+        compiled: list[tuple[LeafEvaluator, frozenset[str], frozenset[str]]] = []
+        any_long_leg = False
+        any_short_leg = False
+        for index, template in enumerate(templates):
+            location = f"entry_logic.basket_templates[{index}]"
+            active_eval = self._compile_leaf(
+                template.active_when, indicator_ids, f"{location}.active_when"
+            )
+            long_syms: set[str] = set()
+            short_syms: set[str] = set()
+            for leg_index, leg in enumerate(template.legs):
+                side = leg.side.lower()
+                if side == "buy":
+                    long_syms.add(leg.symbol)
+                    any_long_leg = True
+                elif side == "sell":
+                    short_syms.add(leg.symbol)
+                    any_short_leg = True
+                else:
+                    raise ValueError(
+                        f"basket leg at {location}.legs[{leg_index}] has "
+                        f"unsupported side {leg.side!r}; expected 'buy' or 'sell'"
+                    )
+            compiled.append((active_eval, frozenset(long_syms), frozenset(short_syms)))
+
+        # Optional entry_filters AND-gate. Compiled once and reused
+        # for both long and short closures.
+        filter_eval: LeafEvaluator | None = None
+        if entry_filters is not None:
+            filter_eval = self._compile_condition_tree(
+                entry_filters, indicator_ids, location="entry_logic.entry_filters"
+            )
+
+        compiled_tuple = tuple(compiled)
+
+        def _make_side_eval(want_long: bool) -> LeafEvaluator:
+            def _basket_side(ctx: _EvalContext) -> bool:
+                # entry_filters AND-gate. Short-circuit when present;
+                # nothing else fires if the gate is False.
+                if filter_eval is not None and not filter_eval(ctx):
+                    return False
+                symbol = ctx.candle.symbol
+                for active_eval, long_syms, short_syms in compiled_tuple:
+                    if not active_eval(ctx):
+                        continue
+                    if want_long:
+                        if symbol in long_syms:
+                            return True
+                    else:
+                        if symbol in short_syms:
+                            return True
+                return False
+
+            return _basket_side
+
+        long_eval = _make_side_eval(want_long=True) if any_long_leg else None
+        short_eval = _make_side_eval(want_long=False) if any_short_leg else None
+        return long_eval, short_eval
 
     def _compile_condition_tree(
         self,
@@ -2164,6 +2455,27 @@ class StrategyIRCompiler:
             atr_indicator_id = stop.indicator
             atr_multiple = float(stop.multiple)
 
+        # BASKET-level ATR wiring. The basket variant lives in
+        # ``initial_stop`` for the production IRs (FX_TurnOfMonth) and
+        # is mutually exclusive with the per-symbol AtrMultipleStop
+        # above (the IR's discriminated union ensures the slot holds
+        # exactly one variant). The basket evaluator reads the
+        # pre-aggregated money-ATR off ``_BasketState.latest_atr``;
+        # the wiring fields below tell the driver WHICH per-symbol
+        # indicator to sample for that aggregation.
+        basket_atr_indicator_id: str | None = None
+        basket_atr_multiple = math.nan
+        if isinstance(exit_logic.initial_stop, BasketAtrMultipleStop):
+            basket_stop = exit_logic.initial_stop
+            if basket_stop.indicator not in indicator_ids:
+                raise IRReferenceError(
+                    f"basket_atr_multiple stop at exit_logic.initial_stop references "
+                    f"unknown indicator {basket_stop.indicator!r}; declare it in the "
+                    "IR's indicators block"
+                )
+            basket_atr_indicator_id = basket_stop.indicator
+            basket_atr_multiple = float(basket_stop.multiple)
+
         rr_multiple = math.nan
         if isinstance(exit_logic.take_profit, RiskRewardMultipleStop):
             rr_multiple = float(exit_logic.take_profit.multiple)
@@ -2189,6 +2501,8 @@ class StrategyIRCompiler:
             bb_lower_inner_id=bb_lower_inner_id,
             bb_mid_id=bb_mid_id,
             time_exit_max_bars=time_exit_max_bars,
+            basket_atr_indicator_id=basket_atr_indicator_id,
+            basket_atr_multiple=basket_atr_multiple,
         )
 
     def _resolve_inner_bollinger_ids(self, ir: StrategyIR) -> tuple[str | None, str | None]:
@@ -2364,15 +2678,20 @@ class StrategyIRCompiler:
         if isinstance(stop, MiddleBandCloseViolationStop):
             return self._build_middle_band_close_evaluator(wiring, location)
 
-        # The remaining ExitStop variants (basket-level stops) are out
-        # of scope for M1.A3 (basket execution is M3.X2.5). Fail loudly
-        # rather than silently accept them.
-        # DEFERRED to a future tranche: BasketAtrMultipleStop and
-        # BasketOpenLossPctStop need basket-aware position tracking
-        # which the M1.A3 single-symbol IRStrategy does not model.
+        if isinstance(stop, BasketAtrMultipleStop):
+            return self._build_basket_atr_evaluator(stop, indicator_ids, location)
+
+        if isinstance(stop, BasketOpenLossPctStop):
+            return self._build_basket_open_loss_pct_evaluator(stop, location)
+
+        # Defensive: every variant in the ExitStop discriminated union
+        # has an explicit branch above. Adding a new variant without
+        # extending this method must fail loudly rather than silently
+        # accept the stop and never fire.
         raise ValueError(
             f"unsupported ExitStop variant {type(stop).__name__} at {location}; "
-            f"basket-level stops ship with the basket execution tranche"
+            "extend libs.strategy_ir.compiler._compile_exit_stop with a new "
+            "branch for this variant"
         )
 
     # ---------- per-kind exit evaluator builders ----------
@@ -2541,6 +2860,123 @@ class StrategyIRCompiler:
             return close > mid
 
         return _middle_band
+
+    def _build_basket_atr_evaluator(
+        self,
+        stop: BasketAtrMultipleStop,
+        indicator_ids: frozenset[str],
+        location: str,
+    ) -> ExitEvaluator:
+        """
+        Compile a basket_atr_multiple stop.
+
+        Semantics (per Workplan §M3.X2.5 + task brief 2026-04-25):
+            The stop fires when the basket-level OPEN LOSS exceeds
+            ``multiple * basket_atr_money``, where:
+
+            - ``open_loss`` (from :attr:`_BasketState.open_loss`) is the
+              sum of unrealised LOSS across every open position in the
+              basket -- a positive float in account currency. Zero when
+              the basket is in net profit; the stop never fires on a
+              winning basket.
+            - ``basket_atr_money`` (from :attr:`_BasketState.latest_atr`)
+              is the basket-aggregate ATR translated into money terms:
+              ``sum(per_symbol_ATR * |units|)`` across open positions,
+              i.e. the dollar value of a 1-ATR adverse move across the
+              basket. The driver (executor) is responsible for sampling
+              each symbol's ATR from THIS bar's indicator window and
+              summing the products.
+            - ``multiple`` (from ``stop.multiple``) is the IR-supplied
+              N-ATR threshold (e.g. 2.0 = "fire when basket loses 2x
+              the basket's 1-bar typical move").
+
+            Concretely the evaluator returns True when:
+                ``open_loss >= multiple * basket_atr_money``
+
+            (NaN / non-positive ATR or a zero/NaN open_loss short-circuit
+            to False so a warming-up indicator cannot fire the stop
+            spuriously.)
+
+        The evaluator fires for the per-symbol position the strategy is
+        currently driving when triggered -- the synthetic backtest
+        executor walks every (symbol, bar) pair in chronological order
+        and the basket stop fires for each held symbol on the same
+        timestamp, producing a basket-flat by the next bar's open.
+
+        ``stop.indicator`` is recorded in the wiring so the executor's
+        basket-state provider knows which indicator id to sample per
+        symbol; the evaluator itself does not read the per-symbol
+        indicator (it reads the pre-aggregated money-ATR off the
+        basket state).
+        """
+        if stop.indicator not in indicator_ids:
+            raise IRReferenceError(
+                f"basket_atr_multiple stop at {location} references "
+                f"unknown indicator {stop.indicator!r}; declare it in the "
+                "IR's indicators block"
+            )
+        multiple = float(stop.multiple)
+
+        def _basket_atr(ctx: _EvalContext, _m: float = multiple) -> bool:
+            basket = ctx.basket_state
+            if basket is None:
+                return False
+            if basket.open_loss <= 0.0:
+                # No basket-level loss to gate on. Common case
+                # (positions are profitable or the basket is flat).
+                return False
+            atr_money = basket.latest_atr
+            if math.isnan(atr_money) or atr_money <= 0.0:
+                # ATR warming up across the basket, or no positions
+                # have an ATR yet. Do not fire.
+                return False
+            threshold = _m * atr_money
+            return basket.open_loss >= threshold
+
+        return _basket_atr
+
+    def _build_basket_open_loss_pct_evaluator(
+        self,
+        stop: BasketOpenLossPctStop,
+        location: str,
+    ) -> ExitEvaluator:
+        """
+        Compile a basket_open_loss_pct stop.
+
+        Semantics (per Workplan §M3.X2.5):
+            The stop fires when the basket-level OPEN LOSS exceeds
+            ``threshold_pct`` percent of equity. ``threshold_pct`` is
+            denominated in PERCENT (e.g. ``1.25`` => 1.25%); the
+            evaluator returns True when:
+                ``open_loss / equity * 100 >= threshold_pct``
+            NaN / non-positive equity short-circuits to False so a
+            missing equity feed cannot fire the stop.
+        """
+        threshold_pct = float(stop.threshold_pct)
+        if threshold_pct <= 0.0:
+            # Pydantic already enforces gt=0; defensive guard so a
+            # downstream IR mutation cannot produce a stop that fires
+            # on every bar (open_loss=0 / equity = 0/anything is False
+            # via the NaN guard, but a 0 threshold would fire the moment
+            # a single pip moves against the basket).
+            raise ValueError(
+                f"basket_open_loss_pct stop at {location} has non-positive "
+                f"threshold_pct={threshold_pct!r}; must be > 0"
+            )
+
+        def _basket_pct(ctx: _EvalContext, _t: float = threshold_pct) -> bool:
+            basket = ctx.basket_state
+            if basket is None:
+                return False
+            if basket.open_loss <= 0.0:
+                return False
+            equity = basket.equity
+            if math.isnan(equity) or equity <= 0.0:
+                return False
+            loss_pct = (basket.open_loss / equity) * 100.0
+            return loss_pct >= _t
+
+        return _basket_pct
 
     def _compile_trailing_stop_rule(
         self,

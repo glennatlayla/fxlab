@@ -1,11 +1,12 @@
 """
 Smoke tests for ``services.cli.backtest_all_strategies``.
 
-The single end-to-end smoke test runs the multi-strategy CLI against a
-SUBSET of the production IRs (two files) over a SHORT window (14 days)
-to keep runtime under 30 seconds. The full 5-IR / 60-day production
-sweep is what ``make backtest-all`` invokes; the unit test is the
-gating CI shape check, not the production sweep.
+The single end-to-end smoke test runs the multi-strategy CLI against
+ALL five production IRs over a 45-day window. After the M3.X2.5
+basket-execution + zscore-source wire-up tranche every production IR
+runs through the executor end-to-end, so the smoke set is the full
+production sweep with a shorter window than ``make backtest-all``'s
+default (which is the 60-90 day production sweep).
 
 Asserts:
 
@@ -19,9 +20,9 @@ Asserts:
        contract) and the per-strategy blotter SHA-256s match across
        the two runs.
 
-The test must finish in <30s -- this is a hard budget so the unit-test
-suite stays fast. Two IRs over 14 days at H4 / H1 timeframes gives
-~80 + ~336 bars per pair; well within budget on the dev Mac.
+Budget: the test must finish in <60s. The window was sized so that
+the basket strategies traverse at least one month-end calendar event
+(needed for FX_TurnOfMonth to produce trades) without exceeding budget.
 
 Dependencies:
     - :mod:`services.cli.backtest_all_strategies` -- module under test.
@@ -53,18 +54,29 @@ from services.cli import backtest_all_strategies as cli
 #: tests/unit/services/cli/<file>.py so parents[4] is the repo root.
 _PROJECT_ROOT: Path = Path(__file__).resolve().parents[4]
 
-#: Two IRs chosen for the smoke set. Both use indicator types the
-#: executor's :class:`_IRIndicatorComputer` natively dispatches (sma,
-#: ema, atr, bollinger_upper/lower, rolling_max, rolling_min) so the
-#: smoke path stays focused on the multi-strategy comparison shape
-#: rather than on individual indicator capability gaps. We deliberately
-#: skip the SingleAsset_MeanReversion_H1 IR (which requires the
-#: zscore-with-explicit-source params not yet wired through the
-#: executor's indicator path) and the D1 strategies (which need a
-#: longer window than 14 days to produce meaningful trades). The first
-#: IR is the canonical M3.X1 smoke fixture so a regression here
-#: mirrors a regression in the single-strategy CLI.
+#: All five production IRs. After the M3.X2.5 basket-execution wire-up
+#: (and the M1.B2-zscore parameter fix shipped in the same tranche),
+#: every production IR runs through the executor end-to-end. The smoke
+#: test exercises all five so a regression in any one indicator
+#: capability or basket-exit evaluator surfaces in CI.
+#:
+#: Window is widened to 45 days so the D1 IRs (TurnOfMonth +
+#: TimeSeriesMomentum) traverse at least one month-end calendar event;
+#: the H1/H4 IRs run within the same window without exceeding the
+#: 60s budget called out in the M3.X2.5 task brief.
 _SMOKE_IR_PATHS: tuple[Path, ...] = (
+    _PROJECT_ROOT
+    / "Strategy Repo"
+    / "fxlab_chan_next3_strategy_pack"
+    / "FX_SingleAsset_MeanReversion_H1.strategy_ir.json",
+    _PROJECT_ROOT
+    / "Strategy Repo"
+    / "fxlab_chan_next3_strategy_pack"
+    / "FX_TimeSeriesMomentum_Breakout_D1.strategy_ir.json",
+    _PROJECT_ROOT
+    / "Strategy Repo"
+    / "fxlab_chan_next3_strategy_pack"
+    / "FX_TurnOfMonth_USDSeasonality_D1.strategy_ir.json",
     _PROJECT_ROOT
     / "Strategy Repo"
     / "fxlab_kathy_lien_public_strategy_pack"
@@ -75,11 +87,11 @@ _SMOKE_IR_PATHS: tuple[Path, ...] = (
     / "FX_MTF_DailyTrend_H1Pullback.strategy_ir.json",
 )
 
-#: 14-day window keeps the test under the 30s budget while still
-#: exercising warm-up, indicator computation, and at least a few bars
-#: of strategy evaluation.
+#: 45-day window keeps the test under the 60s budget while exercising
+#: warm-up, indicator computation, basket entries (TurnOfMonth needs
+#: at least one month-end), and several bars of strategy evaluation.
 _START_DATE: str = "2026-01-01"
-_END_DATE: str = "2026-01-15"
+_END_DATE: str = "2026-02-15"
 _SEED: int = 42
 
 

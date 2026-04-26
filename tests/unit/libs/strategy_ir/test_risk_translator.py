@@ -378,14 +378,35 @@ def test_drawdown_does_not_halt_when_well_above_floor() -> None:
 
 @pytest.mark.parametrize("method", sorted(DEFERRED_SIZING_METHODS))
 def test_deferred_sizing_methods_raise(method: str) -> None:
-    """Basket sizing methods must raise UnsupportedRiskMethodError
-    with an explicit M3.X2.5 deferral message."""
+    """Sizing methods still flagged as deferred must raise
+    UnsupportedRiskMethodError with an explicit deferral message.
+
+    NB: ``fixed_basket_risk`` shipped with M3.X2.5 (basket execution)
+    so it is no longer in :data:`DEFERRED_SIZING_METHODS`; only the
+    remaining variants (e.g. ``inverse_volatility_by_leg``) appear in
+    this parametrise.
+    """
     ir = _build_ir(method=method)
     with pytest.raises(UnsupportedRiskMethodError) as excinfo:
         RiskModelTranslator(ir).translate()
     msg = str(excinfo.value)
     assert method in msg
-    assert "M3.X2.5" in msg
+    assert "deferred" in msg
+
+
+def test_fixed_basket_risk_method_now_supported() -> None:
+    """``fixed_basket_risk`` shipped with M3.X2.5 and uses the same
+    fixed-fractional-risk closure as ``fixed_fractional_risk``. The
+    translator must produce a CompiledRiskModel without raising."""
+    ir = _build_ir(method="fixed_basket_risk")
+    bundle = RiskModelTranslator(ir).translate()
+    assert bundle.method == "fixed_basket_risk"
+    # The sizer follows the same fixed-fractional formula -- a 0.5%
+    # risk budget on 100k equity with a 0.005 stop distance produces
+    # 100,000 units (mirrors test_compiled_risk_model_position_sizer
+    # for ``fixed_fractional_risk``).
+    size = bundle.position_sizer(1.10, 1.095, 100_000.0)
+    assert abs(size - 100_000.0) < 1e-6
 
 
 def test_unknown_sizing_method_raises() -> None:
@@ -398,10 +419,13 @@ def test_unknown_sizing_method_raises() -> None:
 def test_assert_supported_sizing_method_helper() -> None:
     """The convenience helper short-circuits without building the bundle."""
     ir = _build_ir()
-    # Allowed: no exception.
+    # Allowed: fixed_fractional_risk (default).
     assert_supported_sizing_method(ir.risk_model)
-    # Disallowed: raises.
-    bad_ir = _build_ir(method="fixed_basket_risk")
+    # Allowed: fixed_basket_risk (M3.X2.5).
+    basket_ir = _build_ir(method="fixed_basket_risk")
+    assert_supported_sizing_method(basket_ir.risk_model)
+    # Disallowed: still-deferred methods raise.
+    bad_ir = _build_ir(method="inverse_volatility_by_leg")
     with pytest.raises(UnsupportedRiskMethodError):
         assert_supported_sizing_method(bad_ir.risk_model)
 

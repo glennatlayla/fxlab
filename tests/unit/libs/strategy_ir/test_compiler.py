@@ -2024,3 +2024,377 @@ def test_derived_field_topological_order_respects_dependency_chain() -> None:
     # a defence-in-depth check that no exception was raised mid-bar
     # (which would be the symptom if topological order were wrong).
     assert isinstance(long_entries, list)  # walk completed without raising
+
+
+# ---------------------------------------------------------------------------
+# M3.X2.5 -- basket exit firing tests
+#
+# These tests exercise the BasketAtrMultipleStop and
+# BasketOpenLossPctStop evaluators added by the basket-execution
+# tranche. Each fixture builds a minimal IR with one basket exit slot
+# in ``initial_stop`` (basket_atr_multiple) or ``equity_stop``
+# (basket_open_loss_pct), wires a fake basket-state provider, and
+# asserts the EXIT signal fires (or doesn't) on the expected bar.
+# ---------------------------------------------------------------------------
+
+
+def _build_basket_atr_stop_ir() -> StrategyIR:
+    """IR with a single basket_atr_multiple initial_stop."""
+    body = {
+        "schema_version": "0.1-inferred",
+        "artifact_type": "strategy_ir",
+        "metadata": {
+            "strategy_name": "BasketAtr_Fixture",
+            "strategy_version": "0.0.1-test",
+            "author": "M3.X2.5 basket-firing test",
+            "created_utc": "2026-04-25T00:00:00Z",
+            "objective": "Single basket_atr_multiple stop fixture.",
+            "status": "test_fixture",
+        },
+        "universe": {
+            "asset_class": "spot_fx",
+            "symbols": [_SYMBOL],
+            "direction": "long",
+        },
+        "data_requirements": {
+            "primary_timeframe": "1h",
+            "required_fields": ["open", "high", "low", "close"],
+            "timezone": "UTC",
+            "session_rules": {"allowed_entry_days": [], "blocked_entry_windows": []},
+            "warmup_bars": 1,
+            "missing_bar_policy": "reject_run",
+        },
+        "indicators": [
+            {"id": "sma_fast", "type": "sma", "source": "close", "length": 1, "timeframe": "1h"},
+            {"id": "atr_14", "type": "atr", "length": 14, "timeframe": "1h"},
+        ],
+        "entry_logic": {
+            "evaluation_timing": "on_bar_close",
+            "execution_timing": "next_bar_open",
+            "long": {
+                "logic": {
+                    "op": "and",
+                    "conditions": [{"lhs": "close", "operator": ">", "rhs": "sma_fast"}],
+                },
+                "order_type": "market",
+            },
+        },
+        "exit_logic": {
+            "initial_stop": {
+                "type": "basket_atr_multiple",
+                "indicator": "atr_14",
+                "multiple": 2.0,
+            },
+            "same_bar_priority": ["initial_stop"],
+        },
+        "risk_model": {
+            "position_sizing": {"method": "fixed_basket_risk", "risk_pct_of_equity": 0.5},
+            "max_open_positions": 1,
+            "daily_loss_limit_pct": 2.0,
+            "max_drawdown_halt_pct": 10.0,
+            "pyramiding": False,
+        },
+        "execution_model": {
+            "fill_model": "next_bar_open",
+            "slippage_model_ref": "test_slippage_v1",
+            "spread_model_ref": "test_spread_v1",
+            "commission_model_ref": "test_commission_v1",
+            "swap_model_ref": "test_swap_v1",
+            "partial_fill_policy": "not_applicable_for_market_orders",
+            "reject_policy": "log_and_skip_signal",
+        },
+    }
+    return StrategyIR.model_validate(body)
+
+
+def _build_basket_open_loss_pct_ir() -> StrategyIR:
+    """IR with a single basket_open_loss_pct equity_stop."""
+    body = {
+        "schema_version": "0.1-inferred",
+        "artifact_type": "strategy_ir",
+        "metadata": {
+            "strategy_name": "BasketLossPct_Fixture",
+            "strategy_version": "0.0.1-test",
+            "author": "M3.X2.5 basket-firing test",
+            "created_utc": "2026-04-25T00:00:00Z",
+            "objective": "Single basket_open_loss_pct equity stop fixture.",
+            "status": "test_fixture",
+        },
+        "universe": {
+            "asset_class": "spot_fx",
+            "symbols": [_SYMBOL],
+            "direction": "long",
+        },
+        "data_requirements": {
+            "primary_timeframe": "1h",
+            "required_fields": ["open", "high", "low", "close"],
+            "timezone": "UTC",
+            "session_rules": {"allowed_entry_days": [], "blocked_entry_windows": []},
+            "warmup_bars": 1,
+            "missing_bar_policy": "reject_run",
+        },
+        "indicators": [
+            {"id": "sma_fast", "type": "sma", "source": "close", "length": 1, "timeframe": "1h"},
+        ],
+        "entry_logic": {
+            "evaluation_timing": "on_bar_close",
+            "execution_timing": "next_bar_open",
+            "long": {
+                "logic": {
+                    "op": "and",
+                    "conditions": [{"lhs": "close", "operator": ">", "rhs": "sma_fast"}],
+                },
+                "order_type": "market",
+            },
+        },
+        "exit_logic": {
+            "equity_stop": {
+                "type": "basket_open_loss_pct",
+                "threshold_pct": 1.25,
+            },
+            "same_bar_priority": ["equity_stop"],
+        },
+        "risk_model": {
+            "position_sizing": {"method": "fixed_basket_risk", "risk_pct_of_equity": 0.5},
+            "max_open_positions": 1,
+            "daily_loss_limit_pct": 2.0,
+            "max_drawdown_halt_pct": 10.0,
+            "pyramiding": False,
+        },
+        "execution_model": {
+            "fill_model": "next_bar_open",
+            "slippage_model_ref": "test_slippage_v1",
+            "spread_model_ref": "test_spread_v1",
+            "commission_model_ref": "test_commission_v1",
+            "swap_model_ref": "test_swap_v1",
+            "partial_fill_policy": "not_applicable_for_market_orders",
+            "reject_policy": "log_and_skip_signal",
+        },
+    }
+    return StrategyIR.model_validate(body)
+
+
+def test_basket_atr_multiple_stop_fires_when_basket_loss_exceeds_threshold() -> None:
+    """basket_atr_multiple: open_loss=300 > 2.0 * basket_atr_money=100 -> fires.
+
+    Threshold formula (per Workplan §M3.X2.5):
+        open_loss >= multiple * basket_atr_money
+    """
+    from libs.strategy_ir.compiler import _BasketState
+
+    ir = _build_basket_atr_stop_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    assert strategy.has_basket_exits, (
+        "compiler must flag the IR as having basket exits when initial_stop is basket_atr_multiple"
+    )
+    assert strategy.basket_atr_indicator_id == "atr_14"
+
+    # Wire a fake provider that returns open_loss=300, basket ATR=50,
+    # equity=100k. Threshold = 2.0 * 50 = 100. open_loss(300) >= 100 -> fire.
+    strategy.set_basket_state_provider(
+        lambda: _BasketState(open_loss=300.0, equity=100_000.0, latest_atr=50.0)
+    )
+
+    candle = _make_candle_ohlc(0, open_=1.10, high=1.11, low=1.09, close=1.10)
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    indicator_arrays = {"sma_fast": [1.05], "atr_14": [50.0]}
+    signals = _run_strategy(
+        strategy,
+        [candle],
+        indicator_arrays,
+        position_after_index={0: long_position},
+    )
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 1, f"expected 1 exit, got {len(exits)}: {exits}"
+    assert exits[0].metadata.get("exit_reason") == "initial_stop"
+
+
+def test_basket_atr_multiple_stop_holds_when_loss_below_threshold() -> None:
+    """basket_atr_multiple: open_loss=50 < 2.0 * basket_atr_money=200 -> no fire."""
+    from libs.strategy_ir.compiler import _BasketState
+
+    ir = _build_basket_atr_stop_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    # Threshold = 2.0 * 100 = 200. open_loss(50) < 200 -> hold.
+    strategy.set_basket_state_provider(
+        lambda: _BasketState(open_loss=50.0, equity=100_000.0, latest_atr=100.0)
+    )
+
+    candle = _make_candle_ohlc(0, open_=1.10, high=1.11, low=1.09, close=1.10)
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    indicator_arrays = {"sma_fast": [1.05], "atr_14": [100.0]}
+    signals = _run_strategy(
+        strategy,
+        [candle],
+        indicator_arrays,
+        position_after_index={0: long_position},
+    )
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 0, f"expected no exits, got {len(exits)}: {exits}"
+
+
+def test_basket_atr_multiple_stop_holds_when_atr_warming_up() -> None:
+    """basket_atr_multiple: NaN basket ATR -> short-circuit to False."""
+    from libs.strategy_ir.compiler import _BasketState
+
+    ir = _build_basket_atr_stop_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    # NaN ATR -> can't fire; missing-data gate is conservative (no fire).
+    strategy.set_basket_state_provider(
+        lambda: _BasketState(open_loss=10_000.0, equity=100_000.0, latest_atr=float("nan"))
+    )
+
+    candle = _make_candle_ohlc(0, open_=1.10, high=1.11, low=1.09, close=1.10)
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    indicator_arrays = {"sma_fast": [1.05], "atr_14": [float("nan")]}
+    signals = _run_strategy(
+        strategy,
+        [candle],
+        indicator_arrays,
+        position_after_index={0: long_position},
+    )
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 0, f"expected no exits during ATR warmup, got {exits}"
+
+
+def test_basket_open_loss_pct_stop_fires_when_loss_exceeds_threshold() -> None:
+    """basket_open_loss_pct: 1.5% open loss > 1.25% threshold -> fires."""
+    from libs.strategy_ir.compiler import _BasketState
+
+    ir = _build_basket_open_loss_pct_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    assert strategy.has_basket_exits
+
+    # Open loss 1500 of 100k equity = 1.5%; threshold is 1.25% -> fires.
+    strategy.set_basket_state_provider(lambda: _BasketState(open_loss=1500.0, equity=100_000.0))
+
+    candle = _make_candle_ohlc(0, open_=1.10, high=1.11, low=1.09, close=1.10)
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    indicator_arrays = {"sma_fast": [1.05]}
+    signals = _run_strategy(
+        strategy,
+        [candle],
+        indicator_arrays,
+        position_after_index={0: long_position},
+    )
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 1, f"expected 1 exit, got {len(exits)}: {exits}"
+    assert exits[0].metadata.get("exit_reason") == "equity_stop"
+
+
+def test_basket_open_loss_pct_stop_holds_when_loss_below_threshold() -> None:
+    """basket_open_loss_pct: 1.0% open loss < 1.25% threshold -> hold."""
+    from libs.strategy_ir.compiler import _BasketState
+
+    ir = _build_basket_open_loss_pct_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    strategy.set_basket_state_provider(lambda: _BasketState(open_loss=1000.0, equity=100_000.0))
+
+    candle = _make_candle_ohlc(0, open_=1.10, high=1.11, low=1.09, close=1.10)
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    indicator_arrays = {"sma_fast": [1.05]}
+    signals = _run_strategy(
+        strategy,
+        [candle],
+        indicator_arrays,
+        position_after_index={0: long_position},
+    )
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 0, f"expected no exits, got {exits}"
+
+
+def test_basket_open_loss_pct_stop_holds_when_basket_in_profit() -> None:
+    """basket_open_loss_pct: zero open_loss (profit) -> never fires."""
+    from libs.strategy_ir.compiler import _BasketState
+
+    ir = _build_basket_open_loss_pct_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    # Basket in profit -> open_loss is zero -> stop never fires.
+    strategy.set_basket_state_provider(lambda: _BasketState(open_loss=0.0, equity=110_000.0))
+
+    candle = _make_candle_ohlc(0, open_=1.10, high=1.11, low=1.09, close=1.10)
+    long_position = PositionSnapshot(
+        symbol=_SYMBOL,
+        quantity=Decimal("1000"),
+        average_entry_price=Decimal("1.10"),
+        market_price=Decimal("1.10"),
+        market_value=Decimal("1100"),
+        unrealized_pnl=Decimal("0"),
+        cost_basis=Decimal("1100"),
+        updated_at=_BASE_TIMESTAMP,
+    )
+    indicator_arrays = {"sma_fast": [1.05]}
+    signals = _run_strategy(
+        strategy,
+        [candle],
+        indicator_arrays,
+        position_after_index={0: long_position},
+    )
+    exits = [s for s in signals if s.signal_type == SignalType.EXIT]
+    assert len(exits) == 0, f"basket_open_loss_pct must not fire on a winning basket; got {exits}"
+
+
+def test_compiler_does_not_set_has_basket_exits_for_per_symbol_strategies() -> None:
+    """Compiler's basket-exit detection must NOT flag a per-symbol IR."""
+    ir = _build_atr_stop_ir()  # per-symbol AtrMultipleStop, not basket variant
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+    assert not strategy.has_basket_exits
+    assert strategy.basket_atr_indicator_id is None

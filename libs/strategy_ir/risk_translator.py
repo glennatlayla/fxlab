@@ -108,10 +108,26 @@ from libs.contracts.strategy_ir import RiskModel, StrategyIR
 #: The only sizing method M1.A5 supports end-to-end.
 SUPPORTED_SIZING_METHOD = "fixed_fractional_risk"
 
-#: Sizing methods explicitly deferred to M3.X2.5 (basket execution).
+#: Sizing methods supported via the same fixed-fractional-risk closure.
+#: ``fixed_basket_risk`` (FX_TurnOfMonth) shipped with M3.X2.5 once the
+#: basket execution path was wired -- the sizer treats the IR's
+#: ``risk_pct_of_equity`` as the basket-level budget and returns the
+#: per-leg unit count via the same risk_budget / stop_distance formula.
+#: The synthetic backtest path does not actually call the sizer for
+#: basket strategies (the executor places fixed-unit market orders, see
+#: ``services.cli.run_synthetic_backtest._PAPER_ORDER_UNITS``); the
+#: sizer is retained so the production BacktestEngine path still gets
+#: a valid CompiledRiskModel.
+SUPPORTED_SIZING_METHODS = frozenset(
+    {
+        SUPPORTED_SIZING_METHOD,
+        "fixed_basket_risk",
+    }
+)
+
+#: Sizing methods explicitly deferred to a future tranche.
 DEFERRED_SIZING_METHODS = frozenset(
     {
-        "fixed_basket_risk",
         "inverse_volatility_by_leg",
     }
 )
@@ -425,14 +441,14 @@ class RiskModelTranslator:
 
         if method in DEFERRED_SIZING_METHODS:
             raise UnsupportedRiskMethodError(
-                f"sizing method {method!r} is deferred to M3.X2.5 "
-                f"(basket execution); M1.A5 supports {SUPPORTED_SIZING_METHOD!r} only"
+                f"sizing method {method!r} is deferred to a future tranche; "
+                f"current support: {sorted(SUPPORTED_SIZING_METHODS)}"
             )
-        if method != SUPPORTED_SIZING_METHOD:
+        if method not in SUPPORTED_SIZING_METHODS:
             raise UnsupportedRiskMethodError(
-                f"unsupported sizing method {method!r}; M1.A5 supports "
-                f"{SUPPORTED_SIZING_METHOD!r} only "
-                f"(deferred to M3.X2.5: {sorted(DEFERRED_SIZING_METHODS)})"
+                f"unsupported sizing method {method!r}; supported: "
+                f"{sorted(SUPPORTED_SIZING_METHODS)} "
+                f"(deferred: {sorted(DEFERRED_SIZING_METHODS)})"
             )
 
         risk_pct = float(risk_model.position_sizing.risk_pct_of_equity)
@@ -625,17 +641,17 @@ def assert_supported_sizing_method(risk_model: RiskModel) -> None:
         risk_model: the IR's ``risk_model`` block.
     """
     method = risk_model.position_sizing.method
-    if method == SUPPORTED_SIZING_METHOD:
+    if method in SUPPORTED_SIZING_METHODS:
         return
     if method in DEFERRED_SIZING_METHODS:
         raise UnsupportedRiskMethodError(
-            f"sizing method {method!r} is deferred to M3.X2.5 "
-            f"(basket execution); M1.A5 supports {SUPPORTED_SIZING_METHOD!r} only"
+            f"sizing method {method!r} is deferred to a future tranche; "
+            f"current support: {sorted(SUPPORTED_SIZING_METHODS)}"
         )
     raise UnsupportedRiskMethodError(
-        f"unsupported sizing method {method!r}; M1.A5 supports "
-        f"{SUPPORTED_SIZING_METHOD!r} only "
-        f"(deferred to M3.X2.5: {sorted(DEFERRED_SIZING_METHODS)})"
+        f"unsupported sizing method {method!r}; supported: "
+        f"{sorted(SUPPORTED_SIZING_METHODS)} "
+        f"(deferred: {sorted(DEFERRED_SIZING_METHODS)})"
     )
 
 
@@ -653,6 +669,7 @@ __all__ = [
     "RiskModelTranslator",
     "RiskTranslatorError",
     "SUPPORTED_SIZING_METHOD",
+    "SUPPORTED_SIZING_METHODS",
     "UnsupportedRiskMethodError",
     "assert_supported_sizing_method",
 ]

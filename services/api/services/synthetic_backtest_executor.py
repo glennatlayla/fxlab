@@ -343,6 +343,77 @@ class SyntheticBacktestExecutor:
         correlation_id = f"m2d3-executor-{request.seed}"
         bars_processed = 0
 
+        # Per-symbol mark-to-market state used by the basket-state
+        # provider (see below). ``last_close`` is updated every bar so
+        # the provider can compute unrealised loss without re-walking
+        # broker internals; ``last_atr`` is sampled from the per-symbol
+        # ATR indicator the IR's basket_atr_multiple stop names. Both
+        # default to NaN until the first bar populates them.
+        last_close: dict[str, float] = {}
+        last_atr: dict[str, float] = {}
+        basket_atr_id = compiled.basket_atr_indicator_id
+
+        # Wire the basket-state provider when the IR uses any
+        # basket-level exit. The closure captures ``broker``,
+        # ``last_close``, and ``last_atr`` so it produces a fresh
+        # snapshot on each call without re-allocating any per-bar
+        # buffers. For strategies without basket exits (the M3.X1
+        # default) the provider is never registered and the strategy
+        # falls back to a default _BasketState() that short-circuits
+        # every basket evaluator to False.
+        if compiled.has_basket_exits:
+            from libs.strategy_ir.compiler import (
+                _BasketState,  # noqa: PLC0415  (intentional inline import)
+            )
+
+            broker_ref = broker
+            symbols_ref = symbols
+
+            def _basket_state_provider() -> _BasketState:
+                """Aggregate basket-level state across every symbol with
+                an open position.
+
+                ``open_loss`` is the sum of (positive) unrealised LOSS;
+                positions in profit contribute zero (only losses gate
+                the basket stop).
+
+                ``latest_atr`` is the money-denominated basket ATR:
+                ``sum(per_symbol_ATR * |units|)`` across symbols with
+                open positions and a known ATR. NaN when no positions
+                are open or when no ATR has been sampled yet.
+                """
+                total_loss = 0.0
+                total_atr_money = 0.0
+                atr_money_seen = False
+                realized = float(broker_ref.realized_balance())
+                net_unrealised = 0.0
+                for sym in symbols_ref:
+                    pos = broker_ref.get_position(sym)
+                    if pos is None or pos.units == 0:
+                        continue
+                    close = last_close.get(sym, float("nan"))
+                    if math.isnan(close):
+                        continue
+                    avg = float(pos.average_price)
+                    units = float(pos.units)
+                    pnl = (close - avg) * units
+                    net_unrealised += pnl
+                    if pnl < 0.0:
+                        total_loss += -pnl
+                    if basket_atr_id is not None:
+                        atr_value = last_atr.get(sym, float("nan"))
+                        if not math.isnan(atr_value) and atr_value > 0.0:
+                            total_atr_money += atr_value * abs(units)
+                            atr_money_seen = True
+                equity = realized + net_unrealised
+                return _BasketState(
+                    open_loss=total_loss,
+                    equity=equity if equity > 0.0 else float("nan"),
+                    latest_atr=total_atr_money if atr_money_seen else float("nan"),
+                )
+
+            compiled.set_basket_state_provider(_basket_state_provider)
+
         for candle in all_candles:
             symbol = candle.symbol
             buf = per_symbol_buf[symbol]
@@ -361,6 +432,21 @@ class SyntheticBacktestExecutor:
 
             indicators = indicator_computer.compute(buf)
             position_snapshot = _position_snapshot(broker, symbol, candle)
+
+            # Update per-symbol mark-to-market state BEFORE evaluating
+            # so the basket-state provider's per-symbol unrealised PnL
+            # uses this bar's close, and so the basket-ATR aggregation
+            # picks up THIS bar's per-symbol ATR sample. Done here
+            # (rather than at the end of the loop) because evaluate()
+            # invokes the provider synchronously during exit-check
+            # walking.
+            last_close[symbol] = float(candle.close)
+            if basket_atr_id is not None and basket_atr_id in indicators:
+                values = indicators[basket_atr_id].values
+                if values is not None and len(values) > 0:
+                    latest_value = float(values[-1])
+                    if not math.isnan(latest_value):
+                        last_atr[symbol] = latest_value
 
             signal = compiled.evaluate(
                 symbol,

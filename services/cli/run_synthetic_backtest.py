@@ -99,7 +99,9 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
+
+import numpy as np
 
 from libs.contracts.execution import PositionSnapshot
 from libs.contracts.indicator import IndicatorResult
@@ -269,13 +271,14 @@ class _IRPreprocessor:
     """
 
     #: Identifier names whose presence on either side of a leaf
-    #: condition would trigger a drop. Currently empty: every price
-    #: field the production IRs reference (open/high/low/close/volume,
-    #: spread, and the cross-timeframe ``close_1d``-style suffixes)
-    #: is supported by the compiler. Retained as a frozenset so a
-    #: future capability gap can be plugged in without changing the
-    #: leaf-walk shape.
-    _UNSUPPORTED_PRICE_FIELDS: frozenset[str] = frozenset()
+    #: condition would trigger a drop. ``spread_basket_average`` is a
+    #: synthetic basket-aware identifier the FX_TurnOfMonth IR uses in
+    #: its ``entry_filters`` block; the compiler has no per-bar way to
+    #: read a basket-aggregate spread (the synthetic provider's spread
+    #: model is per-symbol), so we drop the leaf at preprocess time.
+    #: The basket entry still fires; the only constraint lost is the
+    #: spread quality gate, which is a synthetic-only-mode trade-off.
+    _UNSUPPORTED_PRICE_FIELDS: frozenset[str] = frozenset({"spread_basket_average"})
 
     #: Aliases mirrored from
     #: :attr:`libs.strategy_ir.compiler.StrategyIRCompiler._PRIORITY_NAME_ALIASES`.
@@ -314,6 +317,29 @@ class _IRPreprocessor:
             entry["logic"] = self._strip_tree(
                 tree, location_prefix=f"entry_logic.{side}.logic", drop_log=dropped_conditions
             )
+
+        # 1a. Strip unsupported leaves from entry_filters (basket
+        #     entry shape -- FX_TurnOfMonth uses ``entry_filters`` to
+        #     gate the basket fire on a basket-aggregate spread which
+        #     the synthetic provider does not model). When the strip
+        #     leaves the filter tree empty, drop the whole filter so
+        #     the compiler does not raise on a zero-condition tree.
+        entry_logic = out.get("entry_logic", {})
+        filters = entry_logic.get("entry_filters")
+        if isinstance(filters, dict) and filters.get("conditions"):
+            stripped = self._strip_tree(
+                filters,
+                location_prefix="entry_logic.entry_filters",
+                drop_log=dropped_conditions,
+            )
+            if stripped.get("conditions"):
+                entry_logic["entry_filters"] = stripped
+            else:
+                # Every filter leaf was unsupported; remove the filter
+                # entirely so basket entries are gated only by their
+                # ``active_when`` clauses (the compiler treats a None
+                # filter as "no filter applied").
+                entry_logic.pop("entry_filters", None)
 
         # 2. Strip unsupported entries from data_requirements.required_fields
         #    so the resolver does not allow them through into compile.
@@ -521,7 +547,14 @@ class _IRIndicatorComputer:
             return out
         for ind in self._indicators:
             try:
-                result = self._compute_one(ind, candles)
+                # ``out`` is passed through so dependent indicators
+                # (currently only zscore, which references upstream
+                # ``mean_source`` / ``std_source`` ids) can read the
+                # already-computed arrays for THIS bar window. The
+                # IR's reference resolver guarantees indicators are
+                # listed in topological order, so any id zscore reads
+                # has already been populated in ``out``.
+                result = self._compute_one(ind, candles, out)
             except SyntheticBacktestError:
                 raise
             except Exception as exc:  # pragma: no cover -- defensive
@@ -535,7 +568,12 @@ class _IRIndicatorComputer:
             out[ind.id] = result
         return out
 
-    def _compute_one(self, ind: Indicator, candles: list[Candle]) -> IndicatorResult:
+    def _compute_one(
+        self,
+        ind: Indicator,
+        candles: list[Candle],
+        already_computed: dict[str, IndicatorResult],
+    ) -> IndicatorResult:
         """
         Dispatch one indicator to the default registry's calculator
         and return a single-component :class:`IndicatorResult` keyed
@@ -592,7 +630,37 @@ class _IRIndicatorComputer:
             )
             return self._rekey(ind.id, raw)
         if isinstance(ind, ZscoreIndicator):
-            raw = default_engine.compute("ZSCORE", candles)
+            # ZSCORE is a *dependent* indicator: it consumes three
+            # already-computed series via kwargs --
+            #   ``value``       <- the IR's ``source`` field. For the
+            #                       price-series sources (close/open/
+            #                       high/low) we pull the column from the
+            #                       candle buffer directly; for any
+            #                       indicator id we pull its ``values``
+            #                       array out of ``already_computed``.
+            #   ``mean_source`` <- the IR's ``mean_source`` indicator id;
+            #                       must be in ``already_computed``.
+            #   ``std_source``  <- the IR's ``std_source`` indicator id;
+            #                       must be in ``already_computed``.
+            #
+            # The reference resolver guarantees mean_source / std_source
+            # ids exist (it raises IRReferenceError otherwise), and the
+            # IR is required to list dependent indicators AFTER their
+            # dependencies, so the dict-lookup path below is safe.
+            value_arr = self._resolve_source_array(ind.id, ind.source, candles, already_computed)
+            mean_arr = self._lookup_indicator_array(
+                ind.id, "mean_source", ind.mean_source, already_computed
+            )
+            std_arr = self._lookup_indicator_array(
+                ind.id, "std_source", ind.std_source, already_computed
+            )
+            raw = default_engine.compute(
+                "ZSCORE",
+                candles,
+                value=value_arr,
+                mean_source=mean_arr,
+                std_source=std_arr,
+            )
             return self._rekey(ind.id, raw)
         if isinstance(ind, (CalendarBusinessDayIndexIndicator, CalendarDaysToMonthEndIndicator)):
             # Calendar indicators are computed via the default engine's
@@ -645,6 +713,89 @@ class _IRIndicatorComputer:
             timestamps=raw.timestamps,
             metadata=dict(raw.metadata),
         )
+
+    # ------------------------------------------------------------------
+    # Helpers for dependent indicators (zscore today)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_source_array(
+        ir_id: str,
+        source: str,
+        candles: list[Candle],
+        already_computed: dict[str, IndicatorResult],
+    ) -> np.ndarray:
+        """
+        Resolve a ZSCORE ``source`` reference into a numpy array.
+
+        ``source`` may be either a price-field name (``open``, ``high``,
+        ``low``, ``close``) or the id of an upstream indicator already
+        computed in this same compute() loop. Anything else is a caller
+        bug: the IR validation should have caught it, so we surface a
+        :class:`SyntheticBacktestError` rather than letting the calculator
+        fail with a less-helpful KeyError.
+        """
+        price_fields: dict[str, Callable[[Candle], float]] = {
+            "open": lambda c: float(c.open),
+            "high": lambda c: float(c.high),
+            "low": lambda c: float(c.low),
+            "close": lambda c: float(c.close),
+        }
+        if source in price_fields:
+            getter = price_fields[source]
+            return np.fromiter((getter(c) for c in candles), dtype=np.float64, count=len(candles))
+        if source in already_computed:
+            return _IRIndicatorComputer._array_from_result(already_computed[source])
+        raise SyntheticBacktestError(
+            f"indicator {ir_id!r} (zscore): source {source!r} is neither a "
+            "price field (open/high/low/close) nor an already-computed "
+            "indicator id; declare it in the IR's indicators block before "
+            "this zscore entry"
+        )
+
+    @staticmethod
+    def _lookup_indicator_array(
+        ir_id: str,
+        slot: str,
+        ref_id: str,
+        already_computed: dict[str, IndicatorResult],
+    ) -> np.ndarray:
+        """
+        Look up an upstream indicator's ``values`` array by id.
+
+        Raises :class:`SyntheticBacktestError` when the id is not present
+        in ``already_computed`` -- this is a topological-order bug in
+        the IR (mean_source / std_source must be declared BEFORE the
+        zscore that consumes them) and the operator should fix the IR.
+        """
+        if ref_id not in already_computed:
+            raise SyntheticBacktestError(
+                f"indicator {ir_id!r} (zscore): {slot}={ref_id!r} has not "
+                "been computed yet; declare the referenced indicator BEFORE "
+                "the zscore entry in the IR's indicators block"
+            )
+        return _IRIndicatorComputer._array_from_result(already_computed[ref_id])
+
+    @staticmethod
+    def _array_from_result(result: IndicatorResult) -> np.ndarray:
+        """
+        Pull the canonical 1-D float array out of an IndicatorResult.
+
+        Multi-component results (Bollinger upper / lower / middle) have
+        been re-keyed by :meth:`_extract_component` so their ``values``
+        is already populated with the chosen series; this helper just
+        wraps that array as a float64 ndarray for the calculator.
+        """
+        values = result.values
+        if values is None:
+            # Should be unreachable: every dispatch above re-keys into
+            # ``values``. Defensive wrap so a future multi-component
+            # indicator doesn't break zscore silently.
+            raise SyntheticBacktestError(
+                f"upstream indicator {result.indicator_name!r} produced no "
+                "single-output values array; cannot feed it into a zscore"
+            )
+        return np.asarray(values, dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
