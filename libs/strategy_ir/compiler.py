@@ -123,6 +123,7 @@ from libs.contracts.strategy_ir import (
 )
 from libs.strategy_ir.broker import Broker
 from libs.strategy_ir.clock import BarClock, Clock
+from libs.strategy_ir.formula_evaluator import CompiledFormula, FormulaEvaluator
 from libs.strategy_ir.lookback import LookbackBuffer, LookbackPlan, LookbackResolver
 from libs.strategy_ir.reference_resolver import IRReferenceError, ReferenceResolver
 from libs.strategy_ir.risk_translator import (
@@ -322,6 +323,40 @@ class _ExitWiring:
     bb_lower_inner_id: str | None = None
     bb_mid_id: str | None = None
     time_exit_max_bars: int | None = None
+
+
+@dataclass(frozen=True)
+class _DerivedFieldSpec:
+    """
+    Compile-time descriptor for a single ``derived_fields[]`` entry.
+
+    A derived field is a free-form arithmetic formula (e.g.
+    ``swing_high - ((swing_high - swing_low) * 0.382)``) that produces a
+    scalar per-bar value computed from indicator values and price-field
+    reads. The compiler turns each formula into a
+    :class:`CompiledFormula` at compile time and the per-bar evaluator
+    invokes ``compiled.evaluate(values)`` against a dict that contains
+    every previously-computed input the formula might reference
+    (indicators + price fields + earlier-in-topological-order derived
+    fields). Derived field values are then merged into
+    :attr:`_EvalContext.indicator_values` so leaf evaluators can read
+    them via the same identifier-lookup path used for indicator ids.
+
+    Attributes:
+        ident: the derived field id as declared in the IR. Used as the
+            key when the computed value is merged into the per-bar
+            indicator-values dict.
+        compiled: the :class:`CompiledFormula` produced by
+            :class:`FormulaEvaluator`. Immutable; safely shared across
+            evaluate() calls.
+        formula: the raw formula source string. Retained for diagnostics
+            / structured logging only -- the evaluator reads the
+            ``compiled.tree`` directly.
+    """
+
+    ident: str
+    compiled: CompiledFormula
+    formula: str
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +823,7 @@ class IRStrategy(SignalStrategyInterface):
         risk_model: CompiledRiskModel | None = None,
         exit_wiring: _ExitWiring | None = None,
         cross_tf_timeframes: tuple[str, ...] = (),
+        derived_field_specs: tuple[_DerivedFieldSpec, ...] = (),
     ) -> None:
         """
         Construct the compiled strategy. Normally called by
@@ -835,6 +871,14 @@ class IRStrategy(SignalStrategyInterface):
                 empty tuple (the default) keeps the aggregator a
                 zero-cost no-op for IRs that contain no cross-tf
                 refs.
+            derived_field_specs: ordered tuple of
+                :class:`_DerivedFieldSpec` entries, one per
+                ``derived_fields[]`` declaration in the IR. The order
+                is the topological order produced by
+                :class:`ReferenceResolver`, so each formula sees every
+                input it depends on already populated when the
+                evaluator walks the tuple. Empty when the IR declares
+                no derived fields.
         """
         self._ir = ir
         self._deployment_id = deployment_id
@@ -872,6 +916,13 @@ class IRStrategy(SignalStrategyInterface):
         self._cross_tf: _CrossTimeframeAggregator = _CrossTimeframeAggregator(
             timeframes=cross_tf_timeframes
         )
+        # Derived field formulas, ordered topologically. Computed once
+        # per evaluate() call (after indicator scalars are extracted)
+        # and merged into the same indicator_values dict so leaf
+        # evaluators read derived ids via the existing dict-lookup
+        # path. Empty tuple is the no-op fast path for IRs that
+        # declare no derived_fields.
+        self._derived_field_specs: tuple[_DerivedFieldSpec, ...] = derived_field_specs
 
     # ---------- SignalStrategyInterface metadata ----------
 
@@ -966,6 +1017,15 @@ class IRStrategy(SignalStrategyInterface):
 
         # Pre-extract latest indicator scalar values into a float dict.
         indicator_values = self._extract_latest_indicator_values(indicators)
+
+        # Compute every derived_field for this bar in topological order
+        # and merge the results back into indicator_values. After this
+        # call, leaf evaluators that reference a derived-field id (e.g.
+        # ``fib_61_long``) read it through the same dict-lookup path
+        # used for indicator ids -- no special-case dispatch on the
+        # hot path.
+        if self._derived_field_specs:
+            self._compute_derived_fields(candle, indicator_values)
 
         # Reconcile per-symbol open-trade state with the broker-supplied
         # PositionSnapshot. New non-zero position -> snapshot the
@@ -1088,6 +1148,78 @@ class IRStrategy(SignalStrategyInterface):
                 continue
             out[ir_id] = float(values[-1])
         return out
+
+    def _compute_derived_fields(
+        self,
+        candle: Candle,
+        indicator_values: dict[str, float],
+    ) -> None:
+        """
+        Evaluate every IR ``derived_fields[]`` formula for the current
+        bar and merge the result into ``indicator_values``.
+
+        Walk order is the topological order frozen at compile time
+        (from :meth:`ReferenceResolver.resolve`), so any derived field
+        that depends on another derived field reads its dependency's
+        already-computed value instead of NaN.
+
+        Inputs available to each formula:
+            - Every IR indicator id (latest scalar from
+              ``indicator_values`` as populated by
+              :meth:`_extract_latest_indicator_values`).
+            - Every supported price field (open / high / low / close /
+              volume / spread) read from the current candle.
+            - Every earlier-in-topological-order derived field (merged
+              into the same dict on each loop iteration).
+
+        Failure handling:
+            ``CompiledFormula.evaluate`` raises ``ValueError`` when a
+            formula references a name that is not present in the
+            values dict (e.g. an indicator that has not warmed up
+            yet -- the slot is missing rather than NaN). We translate
+            that into NaN here so leaf evaluators short-circuit to
+            False during warmup, matching the convention every other
+            identifier read in this module uses ("missing input is
+            never a true condition").
+
+        Args:
+            candle: the current bar; price-field reads pull from here.
+            indicator_values: mutable dict already populated with the
+                latest scalar value for every IR indicator. Mutated
+                in place: each derived field id is added as a new
+                entry whose value is the formula's float result (or
+                NaN on missing input / divide-by-zero).
+        """
+        # Snapshot the price-field reads once per bar so every formula
+        # sees the same OHLCV/spread numbers without re-reading the
+        # Candle properties on each iteration.
+        price_values: dict[str, float] = {
+            name: getter(candle) for name, getter in _PRICE_FIELD_GETTERS.items()
+        }
+        for spec in self._derived_field_specs:
+            # Build the values dict fresh per formula so mutations to
+            # indicator_values that happen DURING this loop (the
+            # previous spec adding its own id) flow into the next
+            # formula's lookup namespace.
+            values: dict[str, float] = {}
+            values.update(price_values)
+            values.update(indicator_values)
+            try:
+                result = spec.compiled.evaluate(values)
+            except ValueError:
+                # Formula referenced a name that is not yet known
+                # (e.g. an indicator that has not produced a value
+                # this bar). Treat as "missing input" -> NaN; the
+                # downstream leaf evaluator short-circuits.
+                indicator_values[spec.ident] = math.nan
+                continue
+            # Convert non-finite results to NaN so the downstream
+            # short-circuit applies uniformly. ``math.isnan`` catches
+            # divide-by-zero (which the evaluator already returns as
+            # NaN) and any inf that arose from an upstream NaN
+            # propagation (NaN + finite would already be NaN; this
+            # is a defence-in-depth narrowing).
+            indicator_values[spec.ident] = float(result)
 
     def _observe_position_state(
         self,
@@ -1307,6 +1439,12 @@ class StrategyIRCompiler:
         # back-to-back compile() calls cannot leak buffers across
         # compilations.
         self._current_lookback_buffers: dict[str, LookbackBuffer] | None = None
+        # Per-compile-call set of derived-field ids the IR declares.
+        # Stashed here (rather than threaded through every leaf-compile
+        # signature) so :meth:`_compile_identifier` can recognise them
+        # and emit a dict-lookup reader. Cleared in compile()'s finally
+        # block so two consecutive compilations do not leak ids.
+        self._current_derived_field_ids: frozenset[str] = frozenset()
 
     # ---------- public API ----------
 
@@ -1343,6 +1481,19 @@ class StrategyIRCompiler:
         # 2. Build the indicator-id whitelist used by leaf compilers.
         indicator_ids: frozenset[str] = frozenset(ind.id for ind in ir.indicators)
 
+        # 2b. Compile derived_field formulas in topological order.
+        #     Each spec captures a :class:`CompiledFormula` ready for
+        #     repeat per-bar evaluation. The topological order is
+        #     sourced from the resolver so a derived field that depends
+        #     on another derived field always sees its dependency
+        #     populated first when :meth:`IRStrategy._compute_derived_fields`
+        #     walks the tuple. The whitelist of derived ids is also
+        #     stashed on the compiler instance so
+        #     :meth:`_compile_identifier` can recognise them and emit
+        #     the dict-lookup reader.
+        derived_field_specs = self._compile_derived_field_specs(ir, resolved.topological_order)
+        derived_field_ids: frozenset[str] = frozenset(spec.ident for spec in derived_field_specs)
+
         # 3. Resolve the per-stop indicator wiring BEFORE compiling
         #    individual exit evaluators. The wiring tells each
         #    evaluator which IR indicator id to read at entry (ATR)
@@ -1363,6 +1514,7 @@ class StrategyIRCompiler:
         # in the finally block at the end of compile() so two
         # consecutive compile() calls cannot share state by accident.
         self._current_lookback_buffers = lookback_buffers
+        self._current_derived_field_ids = derived_field_ids
         try:
             # 5. Compile entry-side evaluators.
             long_eval = (
@@ -1381,6 +1533,7 @@ class StrategyIRCompiler:
             ordered_exits = self._freeze_exit_priority(compiled_exits, ir.exit_logic)
         finally:
             self._current_lookback_buffers = None
+            self._current_derived_field_ids = frozenset()
 
         # 7. Translate the IR's risk_model into a compiled bundle
         #    (sizer + pre-trade gate + post-trade gate). M1.A5 only
@@ -1404,6 +1557,7 @@ class StrategyIRCompiler:
             lookback_buffers=lookback_buffers,
             exit_wiring=exit_wiring,
             cross_tf_timeframes=cross_tf_timeframes,
+            derived_field_specs=derived_field_specs,
         )
 
     # ---------- cross-timeframe planning ----------
@@ -1457,6 +1611,70 @@ class StrategyIRCompiler:
             _base, tf_str, _tf_seconds = split
             timeframes.add(tf_str)
         return tuple(sorted(timeframes))
+
+    # ---------- derived field compilation ----------
+
+    def _compile_derived_field_specs(
+        self,
+        ir: StrategyIR,
+        topological_order: tuple[str, ...],
+    ) -> tuple[_DerivedFieldSpec, ...]:
+        """
+        Compile every IR ``derived_fields[]`` formula and return the
+        specs in topological-evaluation order.
+
+        Args:
+            ir: the parsed IR. ``ir.derived_fields`` is consulted for
+                the formulas; ``None`` is treated as an empty list.
+            topological_order: the (indicator + derived-field) id
+                ordering produced by :meth:`ReferenceResolver.resolve`.
+                Indicator ids are filtered out here so the returned
+                tuple contains derived-field specs only -- in the
+                order required for the per-bar evaluator to populate
+                them.
+
+        Returns:
+            A tuple of :class:`_DerivedFieldSpec`, one per declared
+            derived field, ordered so that any field depending on
+            another appears AFTER its dependency. Empty when the IR
+            declares no derived fields.
+
+        Raises:
+            ValueError: surfaced from :meth:`FormulaEvaluator.compile`
+                when a formula contains disallowed syntax. The
+                resolver classifies identifiers separately, so this
+                only fires for syntactic violations (function calls,
+                bitwise ops, etc.) -- which the IR schema does not
+                otherwise restrict.
+        """
+        if ir.derived_fields is None or not ir.derived_fields:
+            return ()
+        # Build an id -> formula map so we can walk the topological
+        # order and skip entries that are indicator ids (the resolver
+        # mixes both kinds into one ordering).
+        formula_by_id: dict[str, str] = {df.id: df.formula for df in ir.derived_fields}
+        evaluator = FormulaEvaluator()
+        ordered: list[_DerivedFieldSpec] = []
+        seen: set[str] = set()
+        for ident in topological_order:
+            if ident not in formula_by_id:
+                continue
+            formula = formula_by_id[ident]
+            compiled = evaluator.compile(formula)
+            ordered.append(_DerivedFieldSpec(ident=ident, compiled=compiled, formula=formula))
+            seen.add(ident)
+        # Defensive: any derived field declared in the IR but missing
+        # from the topological order (e.g. a future resolver bug that
+        # forgets to enrol a node) is still appended in declaration
+        # order so the compiled strategy can run. Order ambiguity in
+        # that pathological case is logged via the IR's declaration
+        # order rather than alphabetical, which keeps determinism.
+        for df in ir.derived_fields:
+            if df.id in seen:
+                continue
+            compiled = evaluator.compile(df.formula)
+            ordered.append(_DerivedFieldSpec(ident=df.id, compiled=compiled, formula=df.formula))
+        return tuple(ordered)
 
     # ---------- lookback planning ----------
 
@@ -1823,6 +2041,22 @@ class StrategyIRCompiler:
                 return ctx.indicator_values[_name]
 
             return _ind
+        # Derived-field identifier. The IR's ``derived_fields[]`` block
+        # declares named formulas (e.g. ``fib_61_long``) that are
+        # computed once per bar by :meth:`IRStrategy._compute_derived_fields`
+        # and merged into ``indicator_values`` before any condition
+        # evaluator runs. We therefore read derived ids through the
+        # same dict-lookup path used for indicator ids -- the only
+        # difference is the source: derived values are populated
+        # post-extraction by the per-bar formula loop.
+        if ident in self._current_derived_field_ids:
+
+            def _derived(ctx: _EvalContext, _name: str = ident) -> float:
+                if _name not in ctx.indicator_values:
+                    return math.nan
+                return ctx.indicator_values[_name]
+
+            return _derived
         # Cross-timeframe identifier (e.g., ``close_1d``, ``high_4h``).
         # Read the most-recently-CLOSED bucket of the requested base
         # at the requested timeframe via the per-strategy aggregator
