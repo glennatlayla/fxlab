@@ -50,6 +50,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -161,6 +162,12 @@ class Strategy(TimestampMixin, Base):
         created_by: ULID of the user who created this strategy.
         is_active: Whether this strategy is currently active.
         source: Provenance ('draft_form' | 'ir_upload') — see migration 0025.
+        archived_at: Soft-archive timestamp. When non-NULL the strategy is
+            considered archived: hidden from the default browse view but
+            retained for audit / referential integrity. NULL means the
+            strategy is in the active catalogue. Indexed (btree) so the
+            ``archived_at IS NULL`` filter on the list endpoint stays
+            cheap on large strategy tables. Backed by migration 0030.
     """
 
     __tablename__ = "strategies"
@@ -169,6 +176,11 @@ class Strategy(TimestampMixin, Base):
             "source IN ('draft_form', 'ir_upload')",
             name="chk_strategies_source",
         ),
+        # Plain btree index on archived_at — the list endpoint filters
+        # ``archived_at IS NULL`` on every default load (Show archived
+        # toggle off), so this index keeps that scan O(matches) instead
+        # of O(rows) on a growing catalogue. Mirror in migration 0030.
+        Index("ix_strategies_archived_at", "archived_at"),
     )
 
     id: Any = Column(String(26), primary_key=True, nullable=False)
@@ -189,6 +201,12 @@ class Strategy(TimestampMixin, Base):
         default="draft_form",
         server_default="draft_form",
     )
+    # Soft-archive timestamp (migration 0030). NULL == active, non-NULL
+    # == archived. The contract derives the "is archived?" boolean
+    # downstream (StrategyDetail.archived_at != null) — we deliberately
+    # do not add a parallel ``is_archived`` Boolean column because two
+    # sources of truth for the same fact drift apart.
+    archived_at: Any = Column(DateTime(timezone=True), nullable=True)
 
     builds: Any = relationship("StrategyBuild", back_populates="strategy")
 
