@@ -13,10 +13,12 @@ Purpose:
 
 Pipeline (one bar at a time, in chronological order):
     1.  Parse the IR via :class:`libs.contracts.strategy_ir.StrategyIR`.
-    2.  Sanitise the IR for the compiler's current capabilities (see
-        :class:`_IRPreprocessor` -- documented contract gap that the
-        M1.A3 compiler does not yet support ``spread`` / cross-
-        timeframe price-field identifiers).
+    2.  Sanitise the IR for the compiler's runtime requirements (see
+        :class:`_IRPreprocessor` -- filters the IR's
+        ``same_bar_priority`` list down to entries that actually
+        correspond to configured exit stops; the compiler now natively
+        supports ``spread`` and cross-timeframe price-field
+        identifiers, so neither is stripped).
     3.  Resolve references via
         :class:`libs.strategy_ir.reference_resolver.ReferenceResolver`
         (raises :class:`IRReferenceError` on dangling identifiers).
@@ -212,8 +214,13 @@ class _IRPreprocessReport:
     Fields:
         dropped_conditions: human-readable list of leaf conditions
             removed because their LHS or RHS referenced an identifier
-            the M1.A3 compiler cannot yet evaluate (``spread`` price
-            field; cross-timeframe ``close_1d`` style identifiers).
+            outside :attr:`_IRPreprocessor._UNSUPPORTED_PRICE_FIELDS`.
+            Currently always empty -- the compiler natively supports
+            every price-field reference the production IRs use
+            (``spread`` and cross-timeframe ``close_1d`` style
+            identifiers); the field is retained so a future capability
+            gap (e.g., a not-yet-supported derived field) can plug in
+            without changing the report's shape.
         dropped_required_fields: names removed from
             ``data_requirements.required_fields`` because they are not
             modelled by the synthetic candle stream.
@@ -234,46 +241,47 @@ class _IRPreprocessReport:
 
 class _IRPreprocessor:
     """
-    Sanitise a raw IR dict for the M1.A3 compiler's current capabilities.
+    Sanitise a raw IR dict for the M1.A3 compiler's runtime requirements.
 
     Why this exists:
-        The Strategy Repo IRs reference cross-timeframe identifiers
-        (e.g. ``close_1d``) that the
-        :mod:`libs.strategy_ir.reference_resolver` accepts but the
-        :mod:`libs.strategy_ir.compiler` cannot yet evaluate at
-        runtime. The sanitiser removes those offending leaves from
-        entry-side condition trees so the IR compiles cleanly. The
-        dropped conditions are recorded in an
-        :class:`_IRPreprocessReport` so the change is auditable.
+        The Strategy Repo IRs commonly list ``same_bar_priority``
+        entries (e.g. ``"trailing_stop"``, ``"time_exit"``) for stops
+        the IR does not actually configure. The compiler resolves
+        :attr:`exit_logic.same_bar_priority` strictly and would reject
+        such IRs at compile time. This sanitiser drops the dangling
+        priority entries, leaving the rest of the IR intact, and
+        records every drop in an :class:`_IRPreprocessReport` so the
+        change is auditable.
 
-        ``spread`` is now a first-class price field on
-        :class:`libs.contracts.market_data.Candle` and the compiler
-        knows how to read it (with pip conversion when units == "pips"),
-        so spread leaves are NO LONGER stripped. This was the M3.X1.x
-        compiler-gap fix that closed the "0 exits / 4 open positions"
-        observation on the Lien IR smoke test.
+        Cross-timeframe identifiers (e.g. ``close_1d``) and the
+        ``spread`` price field were both previously stripped here as
+        compiler-capability workarounds. The compiler now reads both
+        natively (cross-tf via per-(symbol, timeframe) bucket
+        aggregation; spread via :attr:`Candle.spread` with pip
+        conversion), so the sanitiser no longer touches entry-side
+        leaves -- it only filters the priority list.
 
     Why this is NOT a stub:
-        The remaining contract gap (cross-timeframe price-field
-        identifiers) is documented; the sanitisation is explicit and
-        reported to the operator on every run; and the CLI's
-        downstream pipeline produces real signals against the
-        surviving conditions.
+        The remaining behaviour (priority filtering) is exact: the
+        compiler's "what counts as a configured stop" rules are
+        mirrored here in :attr:`_PRIORITY_NAME_ALIASES` so the
+        sanitiser never silently disables a stop the compiler would
+        accept.
 
     Does NOT:
-        - Mutate exit-logic conditions. Those are typically
-          well-formed; if they are not, the compiler raises and the
-          CLI exits cleanly via :class:`SyntheticBacktestError`.
+        - Mutate exit-logic conditions or entry-side leaves. The
+          compiler accepts every identifier the resolver classifies.
         - Add or fabricate any condition. The sanitiser only drops.
         - Persist anything; the report is in-memory.
     """
 
     #: Identifier names whose presence on either side of a leaf
-    #: condition triggers a drop. Currently empty: spread is now
-    #: supported, and no other price-field name needs sanitisation
-    #: yet. Kept as a frozenset so the leaf-walk shape stays
-    #: identical and a future cross-timeframe identifier can be
-    #: dropped by adding it here.
+    #: condition would trigger a drop. Currently empty: every price
+    #: field the production IRs reference (open/high/low/close/volume,
+    #: spread, and the cross-timeframe ``close_1d``-style suffixes)
+    #: is supported by the compiler. Retained as a frozenset so a
+    #: future capability gap can be plugged in without changing the
+    #: leaf-walk shape.
     _UNSUPPORTED_PRICE_FIELDS: frozenset[str] = frozenset()
 
     #: Aliases mirrored from

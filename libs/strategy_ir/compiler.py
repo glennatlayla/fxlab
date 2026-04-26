@@ -93,6 +93,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from libs.contracts.indicator import IndicatorRequest, IndicatorResult
 from libs.contracts.interfaces.signal_strategy import SignalStrategyInterface
+from libs.contracts.market_data import INTERVAL_SECONDS, CandleInterval
 from libs.contracts.signal import (
     Signal,
     SignalDirection,
@@ -132,6 +133,18 @@ from libs.strategy_ir.risk_translator import (
 if TYPE_CHECKING:
     from libs.contracts.execution import PositionSnapshot
     from libs.contracts.market_data import Candle
+
+
+# ---------------------------------------------------------------------------
+# Bar-interval seconds lookup keyed on the CandleInterval enum.
+#
+# Sourced from :data:`libs.contracts.market_data.INTERVAL_SECONDS`. We
+# re-bind it here under a private alias so call sites in this module
+# stay short and the import is not visible to module consumers (the
+# enum itself is the public surface).
+# ---------------------------------------------------------------------------
+
+_INTERVAL_SECONDS_BY_ENUM: dict[CandleInterval, int] = dict(INTERVAL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +198,14 @@ class _EvalContext:
             bar; consulted by stateful exit evaluators.
         bar_counter: monotonic count of bars seen by this strategy
             instance; consumed by the time_exit evaluator.
+        cross_tf: aggregator providing per-(symbol, timeframe)
+            last-closed OHLCV. Consulted by identifier evaluators
+            compiled for ``<base>_<tf>`` cross-timeframe references
+            (e.g. ``close_1d``). Always present (the IRStrategy
+            constructs an empty aggregator when the IR has no
+            cross-timeframe references) so evaluators can call
+            :meth:`_CrossTimeframeAggregator.get_last_closed` without
+            a None-check on the hot path.
     """
 
     candle: Candle
@@ -193,6 +214,7 @@ class _EvalContext:
     lookback_buffers: dict[str, LookbackBuffer]
     open_trade: _OpenTradeContext | None = None
     bar_counter: int = 0
+    cross_tf: _CrossTimeframeAggregator | None = None
 
 
 @dataclass(frozen=True)
@@ -366,6 +388,301 @@ _PRICE_FIELD_GETTERS: dict[str, Callable[[Candle], float]] = {
 
 
 # ---------------------------------------------------------------------------
+# Cross-timeframe price-field support.
+#
+# IRs reference identifiers like ``close_1d`` / ``high_4h`` / ``open_1h``
+# in entry conditions when they need a confirmation read at a higher
+# timeframe than the bar feed the engine drives. The compiler handles
+# these by aggregating the lower-timeframe primary stream into per-(symbol,
+# timeframe) buckets and exposing the most-recently-CLOSED bucket's
+# OHLCV via the cross-timeframe identifier.
+#
+# Bucket alignment is UTC-epoch-aligned: bucket_id = epoch_seconds //
+# tf_seconds. This matches the synthetic provider's bar timestamps
+# (which floor to the bar interval in UTC) so two consecutive runs
+# produce byte-identical aggregations -- the determinism contract.
+# ---------------------------------------------------------------------------
+
+#: Cross-timeframe suffixes the compiler recognises, mapped to their
+#: bucket length in seconds. Suffixes are matched against identifier
+#: tails (``close_1d`` -> ``1d`` -> 86400s). Adding a new timeframe
+#: here is the only edit needed for the compiler to evaluate it.
+_CROSS_TIMEFRAME_SECONDS: dict[str, int] = {
+    "15m": 900,
+    "1h": 3_600,
+    "4h": 14_400,
+    "1d": 86_400,
+}
+
+
+#: Price-field bases recognised on the LHS of a cross-timeframe
+#: identifier (``<base>_<tf>``). Spread is intentionally excluded:
+#: spread is a per-bar bid/ask snapshot, not a meaningful aggregation
+#: across a higher-timeframe bucket.
+_CROSS_TIMEFRAME_BASES: frozenset[str] = frozenset({"open", "high", "low", "close", "volume"})
+
+
+def _split_cross_timeframe_ref(ident: str) -> tuple[str, str, int] | None:
+    """
+    Decompose a ``<base>_<timeframe>`` identifier into its parts.
+
+    Args:
+        ident: candidate identifier, e.g. ``"close_1d"``.
+
+    Returns:
+        ``(base, timeframe_str, timeframe_seconds)`` when ``ident`` matches
+        the cross-timeframe pattern (e.g., ``("close", "1d", 86400)``),
+        otherwise ``None``.
+
+    Why a dedicated splitter:
+        Two callers need this -- the compiler's identifier dispatcher
+        (to decide whether to emit a cross-tf reader) and the IR scan
+        that determines which (symbol, timeframe) buckets the
+        :class:`_CrossTimeframeAggregator` must track. Centralising
+        the split keeps the two callers' classification rules in
+        lock-step.
+    """
+    if "_" not in ident:
+        return None
+    # Try suffixes longest-first so a future "15m" / "5m" overlap is
+    # resolved deterministically.
+    for tf_str in sorted(_CROSS_TIMEFRAME_SECONDS.keys(), key=len, reverse=True):
+        suffix = f"_{tf_str}"
+        if ident.endswith(suffix):
+            base = ident[: -len(suffix)]
+            if base in _CROSS_TIMEFRAME_BASES:
+                return base, tf_str, _CROSS_TIMEFRAME_SECONDS[tf_str]
+    return None
+
+
+@dataclass
+class _CrossTimeframeBucket:
+    """
+    Mutable in-progress aggregation bucket for one (symbol, timeframe).
+
+    Why a dataclass and not a tuple:
+        We mutate this on every bar (open is fixed at first bar of the
+        bucket, high/low/close roll, volume accumulates). A frozen
+        tuple would force a re-allocation per bar, which is wasted
+        work given the aggregator is a private engine-internal cache.
+
+    Attributes:
+        bucket_id: epoch-seconds floor // tf_seconds. Sentinel ``-1``
+            until the first bar arrives.
+        open: bucket open (first bar's open in this bucket).
+        high: bucket high so far.
+        low: bucket low so far.
+        close: bucket close so far (latest contributing bar's close).
+        volume: sum of volume across contributing bars.
+        bucket_end_seconds: epoch seconds at which this bucket closes;
+            cached so the per-bar completion check is one comparison.
+        is_closed: True once a bar has been seen whose end-time reaches
+            ``bucket_end_seconds``. The bucket is then mirrored into
+            :attr:`_CrossTimeframeAggregator._last_closed` and stays in
+            place until the next bar in a different bucket arrives.
+    """
+
+    bucket_id: int = -1
+    open: float = float("nan")
+    high: float = float("nan")
+    low: float = float("nan")
+    close: float = float("nan")
+    volume: float = 0.0
+    bucket_end_seconds: int = 0
+    is_closed: bool = False
+
+
+class _CrossTimeframeAggregator:
+    """
+    Per-(symbol, timeframe) bucket aggregator for cross-timeframe reads.
+
+    Responsibilities:
+        - On every primary-stream bar, update the in-progress bucket
+          for each tracked timeframe.
+        - When the current bar's end-time reaches the bucket's end,
+          snapshot the in-progress bucket into the per-(symbol,
+          timeframe) "last closed" store so subsequent identifier
+          reads return the just-closed bucket's OHLCV.
+        - When a bar arrives in a new bucket (boundary crossing), if
+          the previous bucket was never marked closed (e.g., the data
+          feed skipped a sub-interval), snapshot it before starting
+          the new bucket so no aggregation is silently dropped.
+
+    Does NOT:
+        - Read a wall clock or random source.
+        - Persist state across :class:`StrategyIRCompiler.compile`
+          calls (each compiled :class:`IRStrategy` owns its own
+          aggregator, allocated at compile time and isolated to that
+          strategy instance).
+        - Track sub-bucket alignment errors (e.g., a 1h bar arriving
+          off-grid). The aggregator trusts that the engine feeds bars
+          whose timestamps floor to the primary timeframe.
+
+    Dependencies:
+        - Reads :class:`Candle` fields only (no broker / clock).
+
+    Example:
+        agg = _CrossTimeframeAggregator(timeframes=("1d",))
+        agg.update("EURUSD", candle)  # called once per evaluate()
+        close_1d = agg.get_last_closed("EURUSD", "1d", "close")
+    """
+
+    __slots__ = ("_timeframes", "_pending", "_last_closed")
+
+    def __init__(self, timeframes: tuple[str, ...]) -> None:
+        """
+        Allocate per-(symbol, timeframe) state lazily.
+
+        Args:
+            timeframes: tuple of timeframe strings (``"1h"``, ``"1d"``,
+                ...) the IR references via cross-tf identifiers. Empty
+                tuple means the IR has no cross-tf refs and the
+                aggregator will be a no-op.
+        """
+        # Tuple so the iteration order is deterministic across runs.
+        self._timeframes: tuple[str, ...] = tuple(timeframes)
+        # (symbol, timeframe) -> in-progress bucket. Created lazily on
+        # first observation so the aggregator does not need a symbol
+        # universe at construction time (the IRStrategy's universe may
+        # be filtered by the engine before evaluate() runs).
+        self._pending: dict[tuple[str, str], _CrossTimeframeBucket] = {}
+        # (symbol, timeframe) -> snapshotted closed bucket. Read by
+        # cross-timeframe identifier evaluators. Returns NaN per field
+        # until the first bucket has been closed.
+        self._last_closed: dict[tuple[str, str], _CrossTimeframeBucket] = {}
+
+    def update(self, symbol: str, candle: Candle) -> None:
+        """
+        Fold ``candle`` into the in-progress bucket for every tracked
+        timeframe under ``symbol``.
+
+        Args:
+            symbol: ticker the candle belongs to.
+            candle: the bar currently being evaluated. Its
+                :attr:`Candle.interval` determines the bar's end-time
+                (used to decide whether the bar completes the bucket).
+
+        Why interval-aware completion:
+            A 15m bar at 09:45 ends at 10:00, which closes the
+            09:00-10:00 1h bucket. A 15m bar at 09:30 ends at 09:45,
+            still mid-bucket. We compute end-time as
+            ``timestamp + INTERVAL_SECONDS[bar.interval]`` and compare
+            against ``bucket_end_seconds`` so the rule works uniformly
+            for any (primary_tf, cross_tf) pair where primary_tf
+            divides cross_tf evenly (the only case Strategy IRs use).
+        """
+        if not self._timeframes:
+            return
+        ts_seconds = int(candle.timestamp.timestamp())
+        bar_seconds = _INTERVAL_SECONDS_BY_ENUM.get(candle.interval, 0)
+        # Bar end is the open + interval (exclusive); a bar at ts=09:00
+        # interval 1h ends at 10:00. We accept missing intervals by
+        # falling back to ts + 1 -- the "completion" check then only
+        # fires when the candle's open already meets the bucket end,
+        # which is the safest fallback.
+        bar_end_seconds = ts_seconds + (bar_seconds if bar_seconds > 0 else 1)
+        cv_open = float(candle.open)
+        cv_high = float(candle.high)
+        cv_low = float(candle.low)
+        cv_close = float(candle.close)
+        cv_volume = float(candle.volume)
+        for tf_str in self._timeframes:
+            tf_seconds = _CROSS_TIMEFRAME_SECONDS[tf_str]
+            bucket_id = ts_seconds // tf_seconds
+            key = (symbol, tf_str)
+            pending = self._pending.get(key)
+            if pending is None or pending.bucket_id != bucket_id:
+                # Boundary crossing (or first observation). Snapshot
+                # the previous bucket if it was non-empty and not yet
+                # marked closed -- this covers the case where the
+                # primary bar interval does not divide the higher tf
+                # evenly enough for the end-time check to fire.
+                if pending is not None and not pending.is_closed and pending.bucket_id >= 0:
+                    self._snapshot(key, pending)
+                bucket_end_seconds = (bucket_id + 1) * tf_seconds
+                pending = _CrossTimeframeBucket(
+                    bucket_id=bucket_id,
+                    open=cv_open,
+                    high=cv_high,
+                    low=cv_low,
+                    close=cv_close,
+                    volume=cv_volume,
+                    bucket_end_seconds=bucket_end_seconds,
+                    is_closed=False,
+                )
+                self._pending[key] = pending
+            else:
+                # Same bucket: roll high/low/close, accumulate volume.
+                # Open stays fixed at the bucket's first bar.
+                if cv_high > pending.high or math.isnan(pending.high):
+                    pending.high = cv_high
+                if cv_low < pending.low or math.isnan(pending.low):
+                    pending.low = cv_low
+                pending.close = cv_close
+                pending.volume += cv_volume
+            # Completion check: the bar's end-time has reached the
+            # bucket boundary. Mark closed AND snapshot so the next
+            # bar (which will start a new bucket or stay in this one
+            # for higher-tf where multiple primary bars contribute)
+            # can read the freshly-closed values immediately.
+            if not pending.is_closed and bar_end_seconds >= pending.bucket_end_seconds:
+                pending.is_closed = True
+                self._snapshot(key, pending)
+
+    def get_last_closed(self, symbol: str, tf_str: str, base: str) -> float:
+        """
+        Return the last-closed bucket's value for ``base`` under
+        (symbol, timeframe), or NaN when no bucket has closed yet.
+
+        Args:
+            symbol: ticker.
+            tf_str: timeframe string (``"1h"``, ``"1d"``, ...).
+            base: one of ``open``/``high``/``low``/``close``/``volume``.
+
+        Returns:
+            Float value; NaN propagates "no data yet" through to the
+            leaf evaluator which short-circuits to False on NaN.
+        """
+        bucket = self._last_closed.get((symbol, tf_str))
+        if bucket is None:
+            return math.nan
+        if base == "open":
+            return bucket.open
+        if base == "high":
+            return bucket.high
+        if base == "low":
+            return bucket.low
+        if base == "close":
+            return bucket.close
+        if base == "volume":
+            return bucket.volume
+        # Defensive: an unknown base would mean the compiler emitted
+        # a reader for a base outside _CROSS_TIMEFRAME_BASES.
+        return math.nan
+
+    def _snapshot(self, key: tuple[str, str], pending: _CrossTimeframeBucket) -> None:
+        """
+        Copy ``pending`` into the last-closed store for ``key``.
+
+        The stored bucket is a fresh dataclass instance so subsequent
+        mutations to the in-progress bucket (continuing to roll under
+        the next bar in the same bucket, or starting a new bucket)
+        cannot retroactively change the snapshotted last-closed
+        values.
+        """
+        self._last_closed[key] = _CrossTimeframeBucket(
+            bucket_id=pending.bucket_id,
+            open=pending.open,
+            high=pending.high,
+            low=pending.low,
+            close=pending.close,
+            volume=pending.volume,
+            bucket_end_seconds=pending.bucket_end_seconds,
+            is_closed=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Pip-size table for FX symbols.
 #
 # The compiler converts ``spread`` leaves with ``units == "pips"`` into
@@ -470,6 +787,7 @@ class IRStrategy(SignalStrategyInterface):
         lookback_buffers: dict[str, LookbackBuffer] | None = None,
         risk_model: CompiledRiskModel | None = None,
         exit_wiring: _ExitWiring | None = None,
+        cross_tf_timeframes: tuple[str, ...] = (),
     ) -> None:
         """
         Construct the compiled strategy. Normally called by
@@ -509,6 +827,14 @@ class IRStrategy(SignalStrategyInterface):
                 for callers constructing :class:`IRStrategy` directly
                 with no risk-management requirement (tests using the
                 pre-M1.A5 surface).
+            cross_tf_timeframes: timeframe strings (``"1h"``, ``"1d"``,
+                ...) the IR references via cross-timeframe identifiers
+                like ``close_1d``. Determines which (symbol, timeframe)
+                buckets the per-strategy
+                :class:`_CrossTimeframeAggregator` will track. An
+                empty tuple (the default) keeps the aggregator a
+                zero-cost no-op for IRs that contain no cross-tf
+                refs.
         """
         self._ir = ir
         self._deployment_id = deployment_id
@@ -538,6 +864,14 @@ class IRStrategy(SignalStrategyInterface):
         # Monotonic per-strategy bar counter. Used to stamp
         # entry_bar_index on freshly-opened positions for time_exit.
         self._bar_counter: int = 0
+        # Cross-timeframe aggregator. Tracks per-(symbol, tf) OHLCV
+        # buckets so cross-timeframe identifiers like ``close_1d``
+        # can read the most-recently-completed bucket at evaluation
+        # time. Allocated once per compiled strategy; shared across
+        # symbols and across evaluate() calls.
+        self._cross_tf: _CrossTimeframeAggregator = _CrossTimeframeAggregator(
+            timeframes=cross_tf_timeframes
+        )
 
     # ---------- SignalStrategyInterface metadata ----------
 
@@ -650,6 +984,7 @@ class IRStrategy(SignalStrategyInterface):
             lookback_buffers=self._lookback_buffers,
             open_trade=open_trade,
             bar_counter=self._bar_counter,
+            cross_tf=self._cross_tf,
         )
 
         # ``_prev_N`` references must read PRIOR-bar values during this
@@ -708,6 +1043,14 @@ class IRStrategy(SignalStrategyInterface):
             # finally block so an early return above still advances
             # the buffers in lock-step with the bar stream.
             self._push_lookback_values(candle, indicator_values)
+            # Update the cross-timeframe aggregator AFTER conditions
+            # have been evaluated so this bar's contribution to the
+            # in-progress higher-tf bucket is not visible to the
+            # current bar's identifier reads. The semantics are
+            # "close_1d returns the close of the most recently CLOSED
+            # 1d bucket as of THIS bar's open"; updating in the
+            # finally block enforces that contract.
+            self._cross_tf.update(symbol, candle)
             # Bar counter advances unconditionally so time_exit's
             # ``bars_in_trade`` arithmetic stays in lock-step with the
             # bar stream regardless of whether a signal fires.
@@ -987,7 +1330,15 @@ class StrategyIRCompiler:
         """
         # 1. Resolve every reference. Raises IRReferenceError on any
         #    dangling identifier in entry/exit/filter conditions.
-        ReferenceResolver(ir).resolve()
+        resolved = ReferenceResolver(ir).resolve()
+
+        # 1b. Discover cross-timeframe identifiers referenced anywhere
+        #     in the IR so the compiled IRStrategy's aggregator knows
+        #     which (symbol, timeframe) buckets to maintain. Sourcing
+        #     this from the already-classified ResolvedReferences
+        #     keeps the compiler's "what is a cross-tf ref" rule in
+        #     lock-step with the resolver's classification.
+        cross_tf_timeframes = self._collect_cross_timeframe_timeframes(resolved.references)
 
         # 2. Build the indicator-id whitelist used by leaf compilers.
         indicator_ids: frozenset[str] = frozenset(ind.id for ind in ir.indicators)
@@ -1052,7 +1403,60 @@ class StrategyIRCompiler:
             risk_model=compiled_risk_model,
             lookback_buffers=lookback_buffers,
             exit_wiring=exit_wiring,
+            cross_tf_timeframes=cross_tf_timeframes,
         )
+
+    # ---------- cross-timeframe planning ----------
+
+    def _collect_cross_timeframe_timeframes(
+        self,
+        references: tuple[Any, ...],
+    ) -> tuple[str, ...]:
+        """
+        Extract the set of cross-timeframe timeframe strings the IR
+        references.
+
+        Args:
+            references: tuple of :class:`ResolvedReference` objects
+                from :meth:`ReferenceResolver.resolve`. Only those with
+                ``kind == "cross_timeframe"`` contribute. The raw_value
+                holds the full identifier (e.g. ``"close_1d"``); we
+                split off the suffix to get the timeframe string.
+
+        Returns:
+            Sorted tuple of unique timeframe strings (sorted for
+            determinism so two compilations of the same IR produce a
+            byte-identical aggregator construction order).
+
+        Why source from resolved references:
+            The :class:`ReferenceResolver` already classifies every
+            atom in every leaf condition / derived-field formula /
+            filter as ``cross_timeframe`` when the suffix matches the
+            IR's confirmation_timeframes / primary_timeframe. Re-using
+            its classification here means the compiler cannot diverge
+            from the resolver on what counts as cross-tf.
+        """
+        timeframes: set[str] = set()
+        for ref in references:
+            if getattr(ref, "kind", None) != "cross_timeframe":
+                continue
+            raw = getattr(ref, "raw_value", None)
+            if not isinstance(raw, str):
+                continue
+            split = _split_cross_timeframe_ref(raw)
+            if split is None:
+                # Resolver and compiler disagreed on what counts as
+                # cross-tf -- surface this loudly so the regression
+                # test catches the divergence rather than silently
+                # producing NaN reads.
+                raise IRReferenceError(
+                    f"reference resolver classified {raw!r} as cross_timeframe "
+                    f"but the compiler does not recognise its suffix; supported "
+                    f"timeframes: {sorted(_CROSS_TIMEFRAME_SECONDS.keys())}"
+                )
+            _base, tf_str, _tf_seconds = split
+            timeframes.add(tf_str)
+        return tuple(sorted(timeframes))
 
     # ---------- lookback planning ----------
 
@@ -1419,6 +1823,27 @@ class StrategyIRCompiler:
                 return ctx.indicator_values[_name]
 
             return _ind
+        # Cross-timeframe identifier (e.g., ``close_1d``, ``high_4h``).
+        # Read the most-recently-CLOSED bucket of the requested base
+        # at the requested timeframe via the per-strategy aggregator
+        # carried on the EvalContext. Returns NaN when no bucket has
+        # closed yet so the leaf evaluator short-circuits to False
+        # during warmup -- matching the convention used by indicator
+        # and lookback reads.
+        cross_tf_split = _split_cross_timeframe_ref(ident)
+        if cross_tf_split is not None:
+            base, tf_str, _tf_seconds = cross_tf_split
+
+            def _cross_tf(
+                ctx: _EvalContext,
+                _base: str = base,
+                _tf: str = tf_str,
+            ) -> float:
+                if ctx.cross_tf is None:
+                    return math.nan
+                return ctx.cross_tf.get_last_closed(ctx.candle.symbol, _tf, _base)
+
+            return _cross_tf
         # ``<base>_prev_<N>`` references read from the per-base ring
         # buffer allocated at the top of compile(). The base name MUST
         # have a buffer entry by now (the LookbackResolver walked the

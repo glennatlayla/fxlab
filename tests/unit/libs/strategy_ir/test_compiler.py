@@ -1360,3 +1360,325 @@ def test_priority_list_unknown_name_raises_after_alias_resolution() -> None:
     with pytest.raises(IRReferenceError) as excinfo:
         compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
     assert "nonsense_stop" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Cross-timeframe price-field references
+#
+# The IRs reference identifiers like ``close_1d`` (close of the most
+# recently completed 1d bar) at evaluation time. The compiler aggregates
+# the lower-tf primary stream into per-(symbol, tf) buckets and exposes
+# the most-recently-CLOSED bucket via the cross-tf identifier.
+#
+# These tests drive a 1h primary stream and verify a `close_1d` reference
+# returns NaN during the first day's warmup, then yields the prior day's
+# close once a 1d bucket has fully closed.
+# ---------------------------------------------------------------------------
+
+
+def _make_h1_candle(index: int, close: float, *, base_ts: datetime | None = None) -> Candle:
+    """Build a 1h candle with monotonically increasing UTC timestamps.
+
+    Differs from :func:`_make_candle` in that it accepts a custom base
+    timestamp -- the cross-timeframe tests need bars aligned to UTC
+    midnight so the 1d bucket math is unambiguous.
+    """
+    base = base_ts if base_ts is not None else _BASE_TIMESTAMP
+    ts = base + timedelta(hours=index)
+    price = Decimal(str(close))
+    return Candle(
+        symbol=_SYMBOL,
+        interval=CandleInterval.H1,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        volume=1000,
+        timestamp=ts,
+    )
+
+
+def _build_cross_tf_close_long_ir() -> StrategyIR:
+    """Build an IR whose ONLY entry condition is ``close > close_1d``.
+
+    Long entry fires when the current 1h close exceeds the prior 1d
+    close (a trend confirmation read). The IR has no exits other than
+    the standard mean-reversion primary so the test can focus on the
+    entry-time cross-tf evaluation.
+    """
+    body = {
+        "schema_version": "0.1-inferred",
+        "artifact_type": "strategy_ir",
+        "metadata": {
+            "strategy_name": "CrossTF_Close_Long",
+            "strategy_version": "0.0.1-test",
+            "author": "M1.A3 cross-tf acceptance test",
+            "created_utc": "2026-04-25T00:00:00Z",
+            "objective": "Long when 1h close > prior 1d close.",
+            "status": "test_fixture",
+            "notes": "Used by test_cross_timeframe_close_evaluates_against_prior_daily_bucket.",
+        },
+        "universe": {
+            "asset_class": "spot_fx",
+            "symbols": [_SYMBOL],
+            "direction": "long",
+        },
+        "data_requirements": {
+            "primary_timeframe": "1h",
+            "confirmation_timeframes": ["1d"],
+            "required_fields": ["open", "high", "low", "close"],
+            "timezone": "UTC",
+            "session_rules": {
+                "allowed_entry_days": [],
+                "blocked_entry_windows": [],
+            },
+            "warmup_bars": 24,
+            "missing_bar_policy": "reject_run",
+        },
+        "indicators": [
+            {
+                "id": "sma_dummy",
+                "type": "sma",
+                "source": "close",
+                "length": 1,
+                "timeframe": "1h",
+            },
+        ],
+        "entry_logic": {
+            "evaluation_timing": "on_bar_close",
+            "execution_timing": "next_bar_open",
+            "long": {
+                "logic": {
+                    "op": "and",
+                    "conditions": [
+                        {"lhs": "close", "operator": ">", "rhs": "close_1d"},
+                    ],
+                },
+                "order_type": "market",
+            },
+        },
+        "exit_logic": {
+            "primary_exit": {
+                "type": "mean_reversion_to_mid",
+                "long_condition": {"lhs": "close", "operator": "<", "rhs": "sma_dummy"},
+                "short_condition": {"lhs": "close", "operator": ">", "rhs": "sma_dummy"},
+            },
+            "same_bar_priority": ["primary_exit"],
+        },
+        "risk_model": {
+            "position_sizing": {
+                "method": "fixed_fractional_risk",
+                "risk_pct_of_equity": 0.5,
+            },
+            "max_open_positions": 1,
+            "daily_loss_limit_pct": 2.0,
+            "max_drawdown_halt_pct": 10.0,
+            "pyramiding": False,
+        },
+        "execution_model": {
+            "fill_model": "next_bar_open",
+            "slippage_model_ref": "test_slippage_v1",
+            "spread_model_ref": "test_spread_v1",
+            "commission_model_ref": "test_commission_v1",
+            "swap_model_ref": "test_swap_v1",
+            "partial_fill_policy": "not_applicable_for_market_orders",
+            "reject_policy": "log_and_skip_signal",
+        },
+    }
+    return StrategyIR.model_validate(body)
+
+
+def test_cross_timeframe_close_evaluates_against_prior_daily_bucket() -> None:
+    """Drive a 1h stream across two UTC days and verify ``close_1d``
+    returns NaN for the entire first day's warmup, then yields day-1's
+    close for every 1h bar of day 2.
+
+    Setup:
+        - Day 1 (24 1h bars): closes ramp 1.10 -> 1.33 (each bar +0.01).
+          Day 1's close_1d is therefore 1.33.
+        - Day 2 (24 1h bars): closes ramp 1.20 -> 1.43.
+
+    Expected long-entry condition (``close > close_1d``) firing:
+        - Day 1: NaN day-1-close -> condition is False on every bar.
+        - Day 2: close_1d == 1.33; long fires on every bar where
+          close > 1.33. Bars 24..47 close at 1.20, 1.21, ..., 1.43.
+          Bars where close > 1.33 are indices 38..47 (closes 1.34 -> 1.43).
+    """
+    day1_base_ts = datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc)
+    closes_day1 = [round(1.10 + 0.01 * i, 2) for i in range(24)]
+    closes_day2 = [round(1.20 + 0.01 * i, 2) for i in range(24)]
+    closes = closes_day1 + closes_day2
+    candles = [_make_h1_candle(i, c, base_ts=day1_base_ts) for i, c in enumerate(closes)]
+
+    # The IR's sma_dummy indicator (length=1) is just close itself.
+    indicator_arrays = {"sma_dummy": list(closes)}
+
+    ir = _build_cross_tf_close_long_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    signals = _run_strategy(strategy, candles, indicator_arrays)
+    bar_index_by_ts = {c.timestamp: i for i, c in enumerate(candles)}
+    actual_long_entries = sorted(
+        bar_index_by_ts[s.bar_timestamp]
+        for s in signals
+        if s.signal_type == SignalType.ENTRY and s.direction == SignalDirection.LONG
+    )
+    expected_long_entries = [i for i in range(24, 48) if closes[i] > 1.33]
+    assert actual_long_entries == expected_long_entries, (
+        f"long-entry indices mismatch: expected {expected_long_entries}, "
+        f"got {actual_long_entries}; closes_day2={closes_day2}"
+    )
+
+
+def test_cross_timeframe_close_returns_nan_during_first_day_warmup() -> None:
+    """Verify that no long-entry signal fires during the first 24 1h
+    bars (the first 1d bucket). The cross-tf NaN-propagates because no
+    1d bucket has CLOSED yet, so the comparison ``close > close_1d``
+    short-circuits to False on every bar.
+    """
+    day1_base_ts = datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc)
+    # Strictly rising prices -- if close_1d were to (incorrectly) read
+    # this bar's bucket-in-progress, every bar after the first would
+    # fire a long entry. The correct behaviour is zero entries.
+    closes = [round(1.10 + 0.01 * i, 2) for i in range(24)]
+    candles = [_make_h1_candle(i, c, base_ts=day1_base_ts) for i, c in enumerate(closes)]
+    indicator_arrays = {"sma_dummy": list(closes)}
+
+    ir = _build_cross_tf_close_long_ir()
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    signals = _run_strategy(strategy, candles, indicator_arrays)
+    long_entries = [
+        s
+        for s in signals
+        if s.signal_type == SignalType.ENTRY and s.direction == SignalDirection.LONG
+    ]
+    assert long_entries == [], (
+        f"expected zero long entries during first-day warmup but got {len(long_entries)}; "
+        "cross-timeframe close_1d should be NaN until a 1d bucket has fully closed"
+    )
+
+
+def test_cross_timeframe_aggregates_high_low_across_subbar_stream() -> None:
+    """Drive a 1h stream where intra-day highs and lows VARY per bar,
+    and verify ``high_1d`` returns the maximum HIGH across the prior
+    day's 24 hourly bars (not just the prior bar's high).
+
+    This is the regression that catches "we only stored the last bar
+    instead of aggregating".
+    """
+    day1_base_ts = datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc)
+    # Day 1 highs zig-zag with the maximum at hour 5 (high=1.30).
+    day1_highs = [1.10, 1.15, 1.18, 1.20, 1.25, 1.30, 1.22, 1.18] + [1.15] * 16
+    day1_lows = [0.95, 0.96, 0.97, 0.98, 0.99, 1.00, 1.01, 1.02] + [1.05] * 16
+    day1_closes = [1.05] * 24
+    # Day 2 closes flat at 1.10 so the IR's primary_exit (close < sma_dummy
+    # which is itself) never fires; we only care about entries.
+    day2_closes = [1.10] * 24
+    day2_highs = [1.12] * 24
+    day2_lows = [1.08] * 24
+
+    candles: list[Candle] = []
+    for i in range(48):
+        if i < 24:
+            o = Decimal(str(day1_closes[i]))
+            h = Decimal(str(day1_highs[i]))
+            lo = Decimal(str(day1_lows[i]))
+            c = Decimal(str(day1_closes[i]))
+        else:
+            o = Decimal(str(day2_closes[i - 24]))
+            h = Decimal(str(day2_highs[i - 24]))
+            lo = Decimal(str(day2_lows[i - 24]))
+            c = Decimal(str(day2_closes[i - 24]))
+        candles.append(
+            Candle(
+                symbol=_SYMBOL,
+                interval=CandleInterval.H1,
+                open=o,
+                high=h,
+                low=lo,
+                close=c,
+                volume=1000,
+                timestamp=day1_base_ts + timedelta(hours=i),
+            )
+        )
+
+    # Build an IR whose long entry condition is ``high > high_1d``.
+    body = _build_cross_tf_close_long_ir().model_dump()
+    body["entry_logic"]["long"]["logic"]["conditions"] = [
+        {"lhs": "high", "operator": ">", "rhs": "high_1d"}
+    ]
+    ir = StrategyIR.model_validate(body)
+    compiler = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    indicator_arrays = {"sma_dummy": [1.0] * 48}  # arbitrary; not exercised
+    signals = _run_strategy(strategy, candles, indicator_arrays)
+    long_entry_count = sum(
+        1
+        for s in signals
+        if s.signal_type == SignalType.ENTRY and s.direction == SignalDirection.LONG
+    )
+    # Day 1 is warmup (NaN). Day 2 highs are all 1.12 which is BELOW
+    # day-1 high (1.30) -> condition is always False on day 2 -> 0 entries.
+    # If aggregation were broken (e.g. stored the last bar's high 1.15),
+    # then 1.12 > 1.15 would still be False so this case would not
+    # distinguish. Use a more direct check below.
+    assert long_entry_count == 0, (
+        f"expected zero entries because day-2 highs (1.12) do not exceed "
+        f"day-1 high (1.30); got {long_entry_count}"
+    )
+
+    # Direct introspection of the aggregator after the first 24 bars
+    # (end of day 1). The day-1 1d bucket should have just closed and
+    # be the most-recently-closed bucket. Catches the "stored the last
+    # bar instead of aggregating" regression directly.
+    strategy_introspect = compiler.compile(ir, deployment_id=_DEPLOYMENT_ID)
+    _run_strategy(strategy_introspect, candles[:24], indicator_arrays)
+    bucket_high = strategy_introspect._cross_tf.get_last_closed(_SYMBOL, "1d", "high")
+    assert bucket_high == pytest.approx(1.30), (
+        f"day-1 1d-bucket high should aggregate to max=1.30, got {bucket_high}"
+    )
+    bucket_low = strategy_introspect._cross_tf.get_last_closed(_SYMBOL, "1d", "low")
+    assert bucket_low == pytest.approx(0.95), (
+        f"day-1 1d-bucket low should aggregate to min=0.95, got {bucket_low}"
+    )
+    bucket_open = strategy_introspect._cross_tf.get_last_closed(_SYMBOL, "1d", "open")
+    assert bucket_open == pytest.approx(1.05), (
+        f"day-1 1d-bucket open should equal first bar's open=1.05, got {bucket_open}"
+    )
+    bucket_close = strategy_introspect._cross_tf.get_last_closed(_SYMBOL, "1d", "close")
+    assert bucket_close == pytest.approx(1.05), (
+        f"day-1 1d-bucket close should equal last bar's close=1.05, got {bucket_close}"
+    )
+    bucket_volume = strategy_introspect._cross_tf.get_last_closed(_SYMBOL, "1d", "volume")
+    assert bucket_volume == pytest.approx(24 * 1000), (
+        f"day-1 1d-bucket volume should sum to 24*1000=24000, got {bucket_volume}"
+    )
+
+
+def test_cross_timeframe_strategy_compiles_and_runs_deterministically() -> None:
+    """Compile the cross-tf IR twice, run both compilations through the
+    same bar stream, assert byte-identical signal sequences. Mirrors
+    the existing determinism test but for the cross-tf code path.
+    """
+    day1_base_ts = datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc)
+    closes = [round(1.10 + 0.005 * i, 4) for i in range(72)]  # 3 days of 1h bars
+    candles = [_make_h1_candle(i, c, base_ts=day1_base_ts) for i, c in enumerate(closes)]
+    indicator_arrays = {"sma_dummy": list(closes)}
+
+    ir = _build_cross_tf_close_long_ir()
+    compiler_a = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    compiler_b = StrategyIRCompiler(clock=BarClock(), broker=NullBroker())
+    strategy_a = compiler_a.compile(ir, deployment_id=_DEPLOYMENT_ID)
+    strategy_b = compiler_b.compile(ir, deployment_id=_DEPLOYMENT_ID)
+
+    signals_a = _run_strategy(strategy_a, candles, indicator_arrays)
+    signals_b = _run_strategy(strategy_b, candles, indicator_arrays)
+
+    assert len(signals_a) == len(signals_b)
+    dump_a = [s.model_dump() for s in signals_a]
+    dump_b = [s.model_dump() for s in signals_b]
+    assert dump_a == dump_b, "cross-tf compilation must be deterministic across runs"
