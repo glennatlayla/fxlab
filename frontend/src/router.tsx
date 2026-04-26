@@ -95,6 +95,11 @@ const More = lazy(() => import("./pages/More"));
 // scope matches those endpoints (exports:read).
 const RunResults = lazy(() => import("./pages/RunResults"));
 
+// Run Compare (M-compare) — side-by-side comparison of two completed
+// runs powered by the M2.C3 metrics + equity-curve endpoints. Same
+// scope as RunResults since the underlying data is the same.
+const RunCompare = lazy(() => import("./pages/RunCompare"));
+
 export const router = createBrowserRouter(
   [
     {
@@ -403,6 +408,24 @@ export const router = createBrowserRouter(
               <FeatureErrorBoundary featureName="Run Results">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <RunResults />
+                </Suspense>
+              </FeatureErrorBoundary>
+            </AuthGuard>
+          ),
+        },
+        // Run Compare (M-compare): side-by-side comparison of two
+        // completed runs at /runs/compare?a={idA}&b={idB}. Reuses the
+        // M2.C3 metrics + equity-curve endpoints, so the same
+        // exports:read scope applies. Registered as a static path so
+        // react-router resolves it ahead of the runs/:runId/* dynamic
+        // routes regardless of declaration order.
+        {
+          path: "runs/compare",
+          element: (
+            <AuthGuard requiredScope="exports:read">
+              <FeatureErrorBoundary featureName="Run Compare">
+                <Suspense fallback={<PageLoadingFallback />}>
+                  <RunCompare />
                 </Suspense>
               </FeatureErrorBoundary>
             </AuthGuard>
