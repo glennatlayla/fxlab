@@ -27,6 +27,7 @@ Example:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -34,6 +35,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 from ulid import ULID
 
+from libs.contracts.errors import RowVersionConflictError
 from libs.contracts.interfaces.strategy_repository_interface import (
     StrategyRepositoryInterface,
 )
@@ -61,6 +63,7 @@ def _strategy_to_dict(record: Strategy) -> dict[str, Any]:
         "is_active": record.is_active,
         "row_version": record.row_version,
         "source": record.source,
+        "archived_at": record.archived_at.isoformat() if record.archived_at else None,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }
@@ -161,6 +164,7 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
         is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> list[dict[str, Any]]:
         """
         List strategies with optional filters and pagination.
@@ -170,6 +174,9 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
             is_active: Filter by active status.
             limit: Maximum results.
             offset: Pagination offset.
+            include_archived: When ``False`` (default), filter
+                ``archived_at IS NULL``. The btree index added in
+                migration 0030 keeps this scan cheap on large tables.
 
         Returns:
             List of strategy dicts ordered by created_at descending.
@@ -179,6 +186,8 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
             query = query.filter(Strategy.created_by == created_by)
         if is_active is not None:
             query = query.filter(Strategy.is_active == is_active)
+        if not include_archived:
+            query = query.filter(Strategy.archived_at.is_(None))
 
         records = query.order_by(desc(Strategy.created_at)).limit(limit).offset(offset).all()
         return [_strategy_to_dict(r) for r in records]
@@ -192,6 +201,7 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
         name_contains: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Page strategies with filters and return the matching total count.
@@ -223,6 +233,8 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
             base = base.filter(Strategy.is_active == is_active)
         if source is not None:
             base = base.filter(Strategy.source == source)
+        if not include_archived:
+            base = base.filter(Strategy.archived_at.is_(None))
         if name_contains is not None and name_contains.strip():
             # ``ilike`` for case-insensitive substring search. The wrapper
             # ``%...%`` mirrors the trade-blotter / audit-explorer search
@@ -281,6 +293,76 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
         logger.info(
             "strategy.updated",
             strategy_id=strategy_id,
+            row_version=record.row_version,
+            component="SqlStrategyRepository",
+        )
+        return _strategy_to_dict(record)
+
+    def set_archived(
+        self,
+        strategy_id: str,
+        *,
+        archived_at: datetime | None,
+        expected_row_version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Set or clear ``strategies.archived_at`` for a single row.
+
+        Reads the row first so we can validate ``expected_row_version``
+        in the same Python frame as the write — SQLAlchemy's session
+        update path is not naturally compare-and-swap, but the
+        repository owns the transaction boundary so the read + bumped
+        write happen atomically within the request-scoped session.
+
+        Args:
+            strategy_id: ULID of the strategy to mutate.
+            archived_at: New value for the column. ``None`` restores
+                the strategy to the active catalogue; a UTC ``datetime``
+                soft-archives it.
+            expected_row_version: Optional optimistic-lock guard. When
+                supplied, raises :class:`RowVersionConflictError` on
+                mismatch and persists nothing.
+
+        Returns:
+            Updated strategy dict, or ``None`` when no row matches
+            ``strategy_id``.
+
+        Raises:
+            RowVersionConflictError: ``expected_row_version`` did not
+                match the persisted ``row_version``.
+        """
+        record = self._db.query(Strategy).filter(Strategy.id == strategy_id).first()
+        if record is None:
+            return None
+
+        actual_rv = int(record.row_version)
+        if expected_row_version is not None and expected_row_version != actual_rv:
+            logger.warning(
+                "strategy.set_archived.row_version_conflict",
+                strategy_id=strategy_id,
+                expected_row_version=expected_row_version,
+                actual_row_version=actual_rv,
+                component="SqlStrategyRepository",
+            )
+            raise RowVersionConflictError(
+                (
+                    f"Strategy {strategy_id} row_version mismatch "
+                    f"(expected {expected_row_version}, actual {actual_rv})"
+                ),
+                entity="strategy",
+                entity_id=strategy_id,
+                expected_row_version=expected_row_version,
+                actual_row_version=actual_rv,
+            )
+
+        record.archived_at = archived_at
+        record.row_version = actual_rv + 1
+        self._db.flush()
+
+        logger.info(
+            "strategy.set_archived",
+            strategy_id=strategy_id,
+            archived=archived_at is not None,
             row_version=record.row_version,
             component="SqlStrategyRepository",
         )
