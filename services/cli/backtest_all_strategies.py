@@ -117,8 +117,10 @@ _DEFAULT_END: str = "2026-04-01"
 #: produced by both CLIs hash to comparable values for the same window.
 _DEFAULT_SEED: int = 42
 
-#: Default destination for the JSON report.
-_DEFAULT_OUTPUT: str = "/tmp/backtest_comparison.json"
+#: Default destination for the JSON report. /tmp is the conventional
+#: location for ad-hoc CLI output that the operator may inspect or
+#: discard; production use specifies --output explicitly.
+_DEFAULT_OUTPUT: str = "/tmp/backtest_comparison.json"  # nosec B108
 
 
 # ---------------------------------------------------------------------------

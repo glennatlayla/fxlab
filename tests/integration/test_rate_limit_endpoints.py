@@ -45,6 +45,7 @@ from libs.contracts.risk import PreTradeRiskLimits, RiskCheckResult, RiskEvent
 from libs.contracts.run_results import (
     EquityCurveResponse,
     RunMetrics,
+    StrategyRunsPage,
     TradeBlotterPage,
 )
 from libs.contracts.safety import (
@@ -165,6 +166,22 @@ class MockResearchRunService(ResearchRunServiceInterface):
     def get_metrics(self, run_id: str) -> RunMetrics:
         """Return empty metrics (not used in rate limit tests)."""
         return RunMetrics(run_id=run_id)
+
+    def list_runs_for_strategy(
+        self,
+        strategy_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> StrategyRunsPage:
+        """Return empty paged runs (not used in rate limit tests)."""
+        return StrategyRunsPage(
+            runs=[],
+            page=page,
+            page_size=page_size,
+            total_count=0,
+            total_pages=0,
+        )
 
 
 class MockRiskGateService(RiskGateInterface):
