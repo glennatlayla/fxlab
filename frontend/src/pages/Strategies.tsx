@@ -46,10 +46,13 @@ import toast from "react-hot-toast";
 import { useAuth } from "@/auth/useAuth";
 import { LoadingState } from "@/components/ui/LoadingState";
 import {
+  archiveStrategy,
+  ArchiveStrategyError,
   cloneStrategy,
   CloneStrategyError,
   listStrategies,
   ListStrategiesError,
+  restoreStrategy,
   type StrategyListItem,
   type StrategyListPage,
 } from "@/api/strategies";
@@ -246,15 +249,12 @@ function CloneStrategyModal({
         className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
         data-testid="strategies-clone-form"
       >
-        <h2
-          id="strategies-clone-modal-title"
-          className="text-lg font-semibold text-surface-900"
-        >
+        <h2 id="strategies-clone-modal-title" className="text-lg font-semibold text-surface-900">
           Clone {source.name}
         </h2>
         <p className="mt-1 text-sm text-surface-500">
-          A copy of this strategy's source code will be saved under a new name.
-          Run history, deployments, and approvals are not copied.
+          A copy of this strategy's source code will be saved under a new name. Run history,
+          deployments, and approvals are not copied.
         </p>
 
         <div className="mt-4">
@@ -337,6 +337,12 @@ export default function Strategies() {
   const pageSize = DEFAULT_PAGE_SIZE;
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [nameQuery, setNameQuery] = useState("");
+  // Show-archived toggle. Defaults off so the operator's first view
+  // matches the active catalogue. When on, the page re-fetches with
+  // include_archived=true and the rendered table shows an "Archived"
+  // badge on each archived row plus a Restore button instead of
+  // Archive.
+  const [showArchived, setShowArchived] = useState(false);
 
   // Loaded data + status.
   const [pageData, setPageData] = useState<StrategyListPage | null>(null);
@@ -351,6 +357,18 @@ export default function Strategies() {
   // lookup against ``pageData``.
   const [cloneSource, setCloneSource] = useState<StrategyListItem | null>(null);
 
+  // Archive / restore confirm-dialog state. Holds the row the operator
+  // clicked Archive or Restore on, plus the requested action so the
+  // confirm button + body copy render correctly. ``null`` means closed.
+  const [archiveAction, setArchiveAction] = useState<{
+    row: StrategyListItem;
+    kind: "archive" | "restore";
+  } | null>(null);
+  // In-flight flag for the confirm-dialog action — disables the
+  // confirm button while the API call is pending so the operator
+  // cannot double-fire.
+  const [archiveSubmitting, setArchiveSubmitting] = useState(false);
+
   // Reload counter — bumped after a successful clone so the list
   // refreshes and the new row becomes visible without a manual refresh.
   const [refreshTick, setRefreshTick] = useState(0);
@@ -360,8 +378,9 @@ export default function Strategies() {
     () => ({
       source: sourceFilter === "all" ? undefined : sourceFilter,
       name_contains: nameQuery.trim() || undefined,
+      includeArchived: showArchived || undefined,
     }),
-    [sourceFilter, nameQuery],
+    [sourceFilter, nameQuery, showArchived],
   );
 
   useEffect(() => {
@@ -405,6 +424,46 @@ export default function Strategies() {
     setNameQuery(next);
     setPage(1);
   }, []);
+
+  const handleShowArchivedChange = useCallback((next: boolean) => {
+    setShowArchived(next);
+    setPage(1);
+  }, []);
+
+  const handleArchiveSubmit = useCallback(async () => {
+    if (!archiveAction || archiveSubmitting) return;
+    const { row, kind } = archiveAction;
+    setArchiveSubmitting(true);
+    try {
+      if (kind === "archive") {
+        const updated = await archiveStrategy(row.id);
+        toast.success(`Archived "${updated.name}".`);
+      } else {
+        const updated = await restoreStrategy(row.id);
+        toast.success(`Restored "${updated.name}".`);
+      }
+      // Bump the refresh tick so the table re-fetches and the row
+      // either disappears (archive + showArchived off) or loses its
+      // Archived badge (restore).
+      setRefreshTick((n) => n + 1);
+      setArchiveAction(null);
+    } catch (err) {
+      // ArchiveStrategyError carries the typed status — surface 409
+      // and 404 messages verbatim so the operator can decide what to
+      // do (refresh and retry, or pick a different row).
+      if (err instanceof ArchiveStrategyError) {
+        toast.error(err.detail ?? err.message);
+      } else if (err instanceof Error) {
+        toast.error(err.message);
+      } else {
+        toast.error(
+          kind === "archive" ? "Failed to archive strategy." : "Failed to restore strategy.",
+        );
+      }
+    } finally {
+      setArchiveSubmitting(false);
+    }
+  }, [archiveAction, archiveSubmitting]);
 
   const handleViewDetail = useCallback(
     (id: string) => {
@@ -491,6 +550,21 @@ export default function Strategies() {
             <option value="ir_upload">Imported IR</option>
             <option value="draft_form">Draft form</option>
           </select>
+        </div>
+        <div className="flex items-center pb-2 pl-2">
+          {/* Show-archived toggle. Defaults off. When on, the page
+              re-fetches with include_archived=true so the operator
+              can see (and restore) soft-archived strategies. */}
+          <label className="inline-flex items-center gap-2 text-sm text-surface-700">
+            <input
+              type="checkbox"
+              data-testid="strategies-show-archived"
+              checked={showArchived}
+              onChange={(e) => handleShowArchivedChange(e.target.checked)}
+              className="h-4 w-4 rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+            />
+            Show archived
+          </label>
         </div>
       </div>
 
@@ -591,7 +665,18 @@ export default function Strategies() {
                     <div className="mt-0.5 font-mono text-xs text-surface-500">{row.id}</div>
                   </td>
                   <td className="px-4 py-3 align-top">
-                    <SourcePill source={row.source} />
+                    <div className="flex flex-wrap items-center gap-1">
+                      <SourcePill source={row.source} />
+                      {row.archived_at && (
+                        <span
+                          data-testid={`strategy-row-archived-badge-${row.id}`}
+                          className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800"
+                          title={`Archived ${row.archived_at}`}
+                        >
+                          Archived
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3 align-top text-sm text-surface-700">v{row.version}</td>
                   <td className="px-4 py-3 align-top text-sm text-surface-700">
@@ -602,6 +687,32 @@ export default function Strategies() {
                   </td>
                   <td className="px-4 py-3 text-right align-top">
                     <div className="flex justify-end gap-2">
+                      {/* Archive vs Restore — exactly one renders per
+                          row based on the row's archived_at value.
+                          Mutually exclusive so the operator never sees
+                          both at once and the click target is
+                          unambiguous. */}
+                      {row.archived_at == null ? (
+                        <button
+                          type="button"
+                          data-testid={`strategy-row-archive-${row.id}`}
+                          onClick={() => setArchiveAction({ row, kind: "archive" })}
+                          className="inline-flex items-center rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50"
+                          aria-label={`Archive ${row.name}`}
+                        >
+                          Archive
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          data-testid={`strategy-row-restore-${row.id}`}
+                          onClick={() => setArchiveAction({ row, kind: "restore" })}
+                          className="inline-flex items-center rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50"
+                          aria-label={`Restore ${row.name}`}
+                        >
+                          Restore
+                        </button>
+                      )}
                       <button
                         type="button"
                         data-testid={`strategy-row-clone-${row.id}`}
@@ -686,6 +797,69 @@ export default function Strategies() {
           navigate(`/strategy-studio/${newId}`);
         }}
       />
+
+      {/* Archive / restore confirm dialog. One dialog covers both
+          actions; copy + button label switch on the requested kind. */}
+      {archiveAction && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="strategies-archive-modal-title"
+          data-testid="strategies-archive-modal"
+        >
+          <div
+            className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
+            data-testid="strategies-archive-dialog"
+          >
+            <h2
+              id="strategies-archive-modal-title"
+              className="text-lg font-semibold text-surface-900"
+            >
+              {archiveAction.kind === "archive" ? "Archive" : "Restore"} {archiveAction.row.name}?
+            </h2>
+            <p
+              className="mt-2 text-sm text-surface-600"
+              data-testid="strategies-archive-dialog-body"
+            >
+              {archiveAction.kind === "archive"
+                ? `Archive ${archiveAction.row.name}? It will be hidden from the default list but kept for audit.`
+                : `Restore ${archiveAction.row.name} to active list?`}
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                data-testid="strategies-archive-cancel"
+                onClick={() => setArchiveAction(null)}
+                disabled={archiveSubmitting}
+                className="rounded-md border border-surface-300 bg-white px-4 py-2 text-sm font-medium text-surface-700 hover:bg-surface-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="strategies-archive-confirm"
+                onClick={handleArchiveSubmit}
+                disabled={archiveSubmitting}
+                className={
+                  "rounded-md px-4 py-2 text-sm font-medium text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50 " +
+                  (archiveAction.kind === "archive"
+                    ? "bg-amber-600 hover:bg-amber-700"
+                    : "bg-emerald-600 hover:bg-emerald-700")
+                }
+              >
+                {archiveSubmitting
+                  ? archiveAction.kind === "archive"
+                    ? "Archiving…"
+                    : "Restoring…"
+                  : archiveAction.kind === "archive"
+                    ? "Archive"
+                    : "Restore"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

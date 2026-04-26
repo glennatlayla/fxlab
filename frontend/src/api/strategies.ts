@@ -201,6 +201,11 @@ export interface StrategyDetail {
   created_at: string;
   /** ISO-8601 last-update timestamp. */
   updated_at: string;
+  /**
+   * ISO-8601 soft-archive timestamp, or null for active rows. Mirror of
+   * :class:`libs.contracts.strategy.StrategyListItem.archived_at`.
+   */
+  archived_at: string | null;
   /** Re-validated StrategyIR for ``source==="ir_upload"``. */
   parsed_ir: StrategyIR | null;
   /** Draft form payload for ``source==="draft_form"``. */
@@ -306,6 +311,12 @@ export interface StrategyListItem {
   created_at: string;
   /** Soft-delete flag. ``false`` rows are hidden by default. */
   is_active: boolean;
+  /**
+   * ISO-8601 timestamp the strategy was soft-archived, or ``null`` for
+   * active rows. Drives the "Archived" badge + Restore-vs-Archive
+   * action button in the browse page (M5 archive lifecycle).
+   */
+  archived_at: string | null;
 }
 
 /**
@@ -332,6 +343,13 @@ export interface ListStrategiesOptions {
   source?: StrategySource;
   /** Case-insensitive substring filter applied to the strategy name. */
   name_contains?: string;
+  /**
+   * When true, soft-archived strategies (``archived_at`` non-null) are
+   * included in the response. Defaults to false on the server so the
+   * Strategies browse page only surfaces archived rows when the
+   * "Show archived" toggle is on.
+   */
+  includeArchived?: boolean;
 }
 
 /**
@@ -385,6 +403,12 @@ export async function listStrategies(
   if (opts?.source) params.source = opts.source;
   if (opts?.name_contains && opts.name_contains.trim()) {
     params.name_contains = opts.name_contains.trim();
+  }
+  if (opts?.includeArchived) {
+    // Backend expects the snake_case query param name "include_archived".
+    // Only set when truthy — omitting it relies on the FastAPI default
+    // of False so the legacy callers' query strings are unchanged.
+    params.include_archived = "true";
   }
 
   try {
@@ -503,15 +527,11 @@ export class CloneStrategyError extends Error {
  *     }
  *   }
  */
-export async function cloneStrategy(
-  sourceId: string,
-  newName: string,
-): Promise<ClonedStrategy> {
+export async function cloneStrategy(sourceId: string, newName: string): Promise<ClonedStrategy> {
   try {
-    const resp = await apiClient.post<CloneStrategyResponse>(
-      `/strategies/${sourceId}/clone`,
-      { new_name: newName },
-    );
+    const resp = await apiClient.post<CloneStrategyResponse>(`/strategies/${sourceId}/clone`, {
+      new_name: newName,
+    });
     return resp.data.strategy;
   } catch (err) {
     if (err instanceof AxiosError && err.response) {
@@ -667,5 +687,173 @@ export async function getStrategyRuns(
       );
     }
     throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /strategies/{strategy_id}/archive | /restore — soft-archive lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Strategy record returned by ``POST /strategies/{id}/archive`` and
+ * ``POST /strategies/{id}/restore``.
+ *
+ * Mirrors the backend response shape from
+ * ``services/api/routes/strategies.py::archive_strategy_route`` /
+ * ``restore_strategy_route``: the persistence dict the service hands
+ * back, including the post-write ``archived_at`` (ISO-8601 string for
+ * archive, ``null`` after restore) and the bumped ``row_version``.
+ *
+ * Identical shape to :class:`ClonedStrategy` plus ``archived_at`` so
+ * the page can display it in the same row without a follow-up GET.
+ */
+export interface ArchivedStrategy {
+  /** ULID of the affected strategy (unchanged across the lifecycle write). */
+  id: string;
+  /** Display name (unchanged). */
+  name: string;
+  /** Stored ``code`` body. */
+  code: string;
+  /** Inherited from the existing row. */
+  version: string;
+  /** Inherited from the existing row. */
+  source: StrategySource;
+  /** ULID of the original creator (unchanged). */
+  created_by: string;
+  /** Soft-delete flag (unchanged by archive/restore — orthogonal to is_active). */
+  is_active: boolean;
+  /** Bumped on every archive/restore write. */
+  row_version: number;
+  /**
+   * ISO-8601 archive timestamp after a successful archive call, or
+   * ``null`` after restore. Drives the UI's archive badge + Restore vs.
+   * Archive button selection.
+   */
+  archived_at: string | null;
+  /** ISO-8601 creation timestamp (unchanged). */
+  created_at: string;
+  /** ISO-8601 last-update timestamp (== now after the write). */
+  updated_at: string;
+}
+
+/** Envelope returned by ``POST /strategies/{id}/archive`` and ``/restore``. */
+export interface ArchiveStrategyResponse {
+  strategy: ArchivedStrategy;
+}
+
+/**
+ * Typed error for archive/restore endpoint failures.
+ *
+ * Carries the HTTP status and the backend ``detail`` string so the
+ * Strategies browse page can branch on 404 (gone), 409 (already in
+ * the requested state, or row_version conflict) without parsing
+ * free-form messages.
+ */
+export class ArchiveStrategyError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "ArchiveStrategyError";
+  }
+}
+
+/**
+ * Build a typed :class:`ArchiveStrategyError` from a caught axios error.
+ *
+ * Centralised so archiveStrategy and restoreStrategy share one error-
+ * shape contract.
+ */
+function makeArchiveError(
+  err: unknown,
+  fallbackPrefix: string,
+  strategyId: string,
+): ArchiveStrategyError | unknown {
+  if (err instanceof AxiosError && err.response) {
+    const status = err.response.status;
+    const detailRaw = err.response.data?.detail;
+    const detail =
+      typeof detailRaw === "string"
+        ? detailRaw
+        : status === 404
+          ? `Strategy ${strategyId} not found`
+          : status === 409
+            ? `${fallbackPrefix} ${strategyId}: conflict`
+            : `${fallbackPrefix} ${strategyId} (status ${status})`;
+    return new ArchiveStrategyError(
+      detail,
+      status,
+      typeof detailRaw === "string" ? detailRaw : undefined,
+    );
+  }
+  return err;
+}
+
+/**
+ * Soft-archive a strategy via ``POST /strategies/{id}/archive``.
+ *
+ * The backend sets ``archived_at = now`` and bumps ``row_version``.
+ * The strategy disappears from the default catalogue browse view but
+ * its history (runs, audit trail, deployments) is retained.
+ *
+ * Args:
+ *   strategyId: ULID of the strategy to archive.
+ *
+ * Returns:
+ *   The updated :class:`ArchivedStrategy` record (already envelope-
+ *   unwrapped) carrying the new ``archived_at`` ISO-8601 timestamp
+ *   and the bumped ``row_version``.
+ *
+ * Raises:
+ *   ArchiveStrategyError (statusCode=404) — strategy does not exist.
+ *   ArchiveStrategyError (statusCode=409) — strategy is already
+ *     archived, or a concurrent writer mutated the row.
+ *   AxiosError on network failure or other non-2xx HTTP errors.
+ *
+ * Example:
+ *   try {
+ *     const archived = await archiveStrategy(row.id);
+ *     toast.success(`Archived "${archived.name}".`);
+ *   } catch (err) {
+ *     if (err instanceof ArchiveStrategyError) toast.error(err.detail ?? err.message);
+ *   }
+ */
+export async function archiveStrategy(strategyId: string): Promise<ArchivedStrategy> {
+  try {
+    const resp = await apiClient.post<ArchiveStrategyResponse>(`/strategies/${strategyId}/archive`);
+    return resp.data.strategy;
+  } catch (err) {
+    throw makeArchiveError(err, "Failed to archive strategy", strategyId);
+  }
+}
+
+/**
+ * Restore a soft-archived strategy via ``POST /strategies/{id}/restore``.
+ *
+ * Inverse of :func:`archiveStrategy`. The backend clears ``archived_at``
+ * and bumps ``row_version``; the strategy reappears in the default
+ * catalogue immediately.
+ *
+ * Args:
+ *   strategyId: ULID of the strategy to restore.
+ *
+ * Returns:
+ *   The updated :class:`ArchivedStrategy` record carrying
+ *   ``archived_at: null`` and a bumped ``row_version``.
+ *
+ * Raises:
+ *   ArchiveStrategyError (statusCode=404) — strategy does not exist.
+ *   ArchiveStrategyError (statusCode=409) — strategy is not currently
+ *     archived, or a concurrent writer mutated the row.
+ *   AxiosError on network failure or other non-2xx HTTP errors.
+ */
+export async function restoreStrategy(strategyId: string): Promise<ArchivedStrategy> {
+  try {
+    const resp = await apiClient.post<ArchiveStrategyResponse>(`/strategies/${strategyId}/restore`);
+    return resp.data.strategy;
+  } catch (err) {
+    throw makeArchiveError(err, "Failed to restore strategy", strategyId);
   }
 }

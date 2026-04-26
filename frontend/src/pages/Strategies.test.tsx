@@ -46,6 +46,8 @@ vi.mock("@/api/strategies", async (importOriginal) => {
     ...original,
     listStrategies: vi.fn(),
     cloneStrategy: vi.fn(),
+    archiveStrategy: vi.fn(),
+    restoreStrategy: vi.fn(),
   };
 });
 
@@ -92,6 +94,8 @@ vi.mock("@/auth/useAuth", () => ({
 import * as strategiesApi from "@/api/strategies";
 const mockedListStrategies = strategiesApi.listStrategies as unknown as ReturnType<typeof vi.fn>;
 const mockedCloneStrategy = strategiesApi.cloneStrategy as unknown as ReturnType<typeof vi.fn>;
+const mockedArchiveStrategy = strategiesApi.archiveStrategy as unknown as ReturnType<typeof vi.fn>;
+const mockedRestoreStrategy = strategiesApi.restoreStrategy as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -139,6 +143,8 @@ describe("Strategies browse page", () => {
   beforeEach(() => {
     mockedListStrategies.mockReset();
     mockedCloneStrategy.mockReset();
+    mockedArchiveStrategy.mockReset();
+    mockedRestoreStrategy.mockReset();
     navigateMock.mockReset();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
@@ -443,10 +449,7 @@ describe("Strategies browse page", () => {
   it("shows an inline error and stays open when cloneStrategy returns 409", async () => {
     await openCloneModalForFirstRow();
     mockedCloneStrategy.mockRejectedValueOnce(
-      new CloneStrategyError(
-        'A strategy named "Bollinger Reversal (copy)" already exists',
-        409,
-      ),
+      new CloneStrategyError('A strategy named "Bollinger Reversal (copy)" already exists', 409),
     );
 
     fireEvent.click(screen.getByTestId("strategies-clone-submit"));
@@ -454,9 +457,7 @@ describe("Strategies browse page", () => {
     await waitFor(() => {
       expect(screen.getByTestId("strategies-clone-name-error")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("strategies-clone-name-error")).toHaveTextContent(
-      /already exists/i,
-    );
+    expect(screen.getByTestId("strategies-clone-name-error")).toHaveTextContent(/already exists/i);
 
     // Modal stays open so the operator can edit the name and retry
     // without re-opening it.
@@ -490,5 +491,193 @@ describe("Strategies browse page", () => {
       expect(screen.queryByTestId("strategies-clone-modal")).not.toBeInTheDocument();
     });
     expect(mockedCloneStrategy).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------
+  // Archive / restore lifecycle (POST /strategies/{id}/archive | restore)
+  // -------------------------------------------------------------------
+
+  function makeArchivedRecord(
+    overrides: Partial<{
+      id: string;
+      name: string;
+      archived_at: string | null;
+      row_version: number;
+    }> = {},
+  ) {
+    return {
+      id: "01ROWARCHIVE000000000000A",
+      name: "Bollinger Reversal",
+      code: "{}",
+      version: "1.0.0",
+      source: "ir_upload" as const,
+      created_by: "01HUSER000000000000000001",
+      is_active: true,
+      row_version: 2,
+      archived_at: "2026-04-26T18:53:34+00:00",
+      created_at: "2026-04-25T12:00:00Z",
+      updated_at: "2026-04-26T18:53:34+00:00",
+      ...overrides,
+    };
+  }
+
+  it("renders Archive button only on active rows; clicking opens confirm and calls archiveStrategy", async () => {
+    const activeRow = makeRow({
+      id: "01ROWACTIVE000000000000A",
+      name: "Active Strategy",
+      archived_at: null,
+    });
+    mockedListStrategies.mockResolvedValue(makePage({ strategies: [activeRow] }));
+    mockedArchiveStrategy.mockResolvedValueOnce(
+      makeArchivedRecord({ id: activeRow.id, name: activeRow.name }),
+    );
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-table")).toBeInTheDocument();
+    });
+
+    // Archive button visible; Restore is not.
+    expect(screen.getByTestId(`strategy-row-archive-${activeRow.id}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`strategy-row-restore-${activeRow.id}`)).not.toBeInTheDocument();
+
+    // Open the confirm dialog.
+    fireEvent.click(screen.getByTestId(`strategy-row-archive-${activeRow.id}`));
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-archive-modal")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("strategies-archive-dialog-body")).toHaveTextContent(
+      /will be hidden from the default list but kept for audit/i,
+    );
+
+    // Confirm fires the API.
+    fireEvent.click(screen.getByTestId("strategies-archive-confirm"));
+
+    await waitFor(() => {
+      expect(mockedArchiveStrategy).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedArchiveStrategy).toHaveBeenCalledWith(activeRow.id);
+
+    // Success toast + refetch (initial + post-archive = 2 list calls).
+    await waitFor(() => {
+      expect(toastSuccessMock).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(mockedListStrategies).toHaveBeenCalledTimes(2);
+    });
+    // Modal dismissed.
+    await waitFor(() => {
+      expect(screen.queryByTestId("strategies-archive-modal")).not.toBeInTheDocument();
+    });
+  });
+
+  it("renders Restore button only on archived rows; clicking opens confirm and calls restoreStrategy", async () => {
+    const archivedRow = makeRow({
+      id: "01ROWARCH000000000000000B",
+      name: "Archived Strategy",
+      archived_at: "2026-04-26T18:53:34+00:00",
+    });
+    mockedListStrategies.mockResolvedValue(makePage({ strategies: [archivedRow] }));
+    mockedRestoreStrategy.mockResolvedValueOnce(
+      makeArchivedRecord({
+        id: archivedRow.id,
+        name: archivedRow.name,
+        archived_at: null,
+        row_version: 3,
+      }),
+    );
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-table")).toBeInTheDocument();
+    });
+
+    // The Archived badge renders inline next to the source pill.
+    expect(screen.getByTestId(`strategy-row-archived-badge-${archivedRow.id}`)).toBeInTheDocument();
+
+    // Restore button visible; Archive is not.
+    expect(screen.getByTestId(`strategy-row-restore-${archivedRow.id}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`strategy-row-archive-${archivedRow.id}`)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId(`strategy-row-restore-${archivedRow.id}`));
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-archive-modal")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("strategies-archive-dialog-body")).toHaveTextContent(
+      /restore .* to active list/i,
+    );
+
+    fireEvent.click(screen.getByTestId("strategies-archive-confirm"));
+    await waitFor(() => {
+      expect(mockedRestoreStrategy).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedRestoreStrategy).toHaveBeenCalledWith(archivedRow.id);
+
+    await waitFor(() => {
+      expect(toastSuccessMock).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(mockedListStrategies).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("toggling 'Show archived' refetches with includeArchived=true", async () => {
+    mockedListStrategies.mockResolvedValue(makePage());
+    renderPage();
+
+    await waitFor(() => {
+      expect(mockedListStrategies).toHaveBeenCalledTimes(1);
+    });
+    // First call has includeArchived undefined (falsy → omitted server-side).
+    expect(mockedListStrategies).toHaveBeenLastCalledWith(1, 20, {
+      source: undefined,
+      name_contains: undefined,
+      includeArchived: undefined,
+    });
+
+    fireEvent.click(screen.getByTestId("strategies-show-archived"));
+
+    await waitFor(() => {
+      expect(mockedListStrategies).toHaveBeenCalledTimes(2);
+    });
+    expect(mockedListStrategies).toHaveBeenLastCalledWith(1, 20, {
+      source: undefined,
+      name_contains: undefined,
+      includeArchived: true,
+    });
+
+    // Toggle back off — request reverts to the default-omitted shape.
+    fireEvent.click(screen.getByTestId("strategies-show-archived"));
+    await waitFor(() => {
+      expect(mockedListStrategies).toHaveBeenCalledTimes(3);
+    });
+    expect(mockedListStrategies).toHaveBeenLastCalledWith(1, 20, {
+      source: undefined,
+      name_contains: undefined,
+      includeArchived: undefined,
+    });
+  });
+
+  it("Cancel on the archive dialog dismisses without firing the API", async () => {
+    const activeRow = makeRow({
+      id: "01ROWCANCELARCH000000000C",
+      archived_at: null,
+    });
+    mockedListStrategies.mockResolvedValue(makePage({ strategies: [activeRow] }));
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-table")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId(`strategy-row-archive-${activeRow.id}`));
+    await waitFor(() => {
+      expect(screen.getByTestId("strategies-archive-modal")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("strategies-archive-cancel"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("strategies-archive-modal")).not.toBeInTheDocument();
+    });
+    expect(mockedArchiveStrategy).not.toHaveBeenCalled();
   });
 });
