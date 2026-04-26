@@ -760,3 +760,148 @@ def test_results_endpoints_return_503_when_service_unconfigured() -> None:
     finally:
         runs_routes.set_research_run_service(None)  # type: ignore[arg-type]
         runs_routes.set_dataset_resolver(None)  # type: ignore[arg-type]
+
+
+# ===========================================================================
+# POST /runs/{run_id}/cancel — operator-driven cancellation
+# ===========================================================================
+#
+# These tests exercise the new route end-to-end against the real
+# ResearchRunService stack and the in-memory mock repository. The
+# service is wired without an executor pool (the pool integration is
+# tested in test_research_run_service.py and test_run_executor_pool.py)
+# so the route tests focus purely on the HTTP contract: status codes,
+# response shape, auth, scope enforcement.
+
+
+_CANCEL_RUN_ID_RUNNING = "01HRNCANCE0000000000RNG001"
+_CANCEL_RUN_ID_TERMINAL = "01HRNCANCE0000000000TRM002"
+_CANCEL_RUN_ID_PENDING = "01HRNCANCE0000000000PND003"
+
+
+def _seed_record_with_status(
+    repo: MockResearchRunRepository,
+    *,
+    run_id: str,
+    status: ResearchRunStatus,
+) -> ResearchRunRecord:
+    """Insert a record directly with a specific status for the cancel tests."""
+    config = ResearchRunConfig(
+        run_type=ResearchRunType.BACKTEST,
+        strategy_id="01HSTRATCANCE000000000001",
+        symbols=["EURUSD"],
+        initial_equity=Decimal("100000"),
+    )
+    record = ResearchRunRecord(
+        id=run_id,
+        config=config,
+        status=status,
+        created_by="01HUSERCANCE0000000000001",
+    )
+    with repo._lock:  # noqa: SLF001 -- test seeding only
+        repo._store[run_id] = record  # noqa: SLF001 -- test seeding only
+    return record
+
+
+def test_cancel_invalid_ulid_returns_422(client: TestClient) -> None:
+    resp = client.post("/runs/not-a-ulid/cancel", headers=AUTH_HEADERS)
+    assert resp.status_code == 422
+
+
+def test_cancel_missing_run_returns_404(client: TestClient) -> None:
+    missing = "01HRNCANCE0000000000NFND09"
+    resp = client.post(f"/runs/{missing}/cancel", headers=AUTH_HEADERS)
+    assert resp.status_code == 404
+    assert missing in resp.json()["detail"]
+
+
+def test_cancel_pending_run_returns_200_and_marks_cancelled(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """PENDING -> CANCELLED via the route returns RunCancelResult body."""
+    _seed_record_with_status(
+        mock_repo, run_id=_CANCEL_RUN_ID_PENDING, status=ResearchRunStatus.PENDING
+    )
+
+    resp = client.post(f"/runs/{_CANCEL_RUN_ID_PENDING}/cancel", headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["run_id"] == _CANCEL_RUN_ID_PENDING
+    assert body["previous_status"] == "pending"
+    assert body["current_status"] == "cancelled"
+    assert body["cancelled"] is True
+    assert body["reason"] == "user_requested"
+
+    persisted = mock_repo.get_by_id(_CANCEL_RUN_ID_PENDING)
+    assert persisted is not None
+    assert persisted.status == ResearchRunStatus.CANCELLED
+
+
+def test_cancel_terminal_run_returns_409_with_reason(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """COMPLETED runs surface a 409 with the no-op reason in the body."""
+    _seed_record_with_status(
+        mock_repo, run_id=_CANCEL_RUN_ID_TERMINAL, status=ResearchRunStatus.COMPLETED
+    )
+
+    resp = client.post(f"/runs/{_CANCEL_RUN_ID_TERMINAL}/cancel", headers=AUTH_HEADERS)
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert "terminal_state" in detail or "completed" in detail
+
+
+def test_cancel_requires_authentication(client: TestClient) -> None:
+    resp = client.post(f"/runs/{_CANCEL_RUN_ID_PENDING}/cancel")
+    assert resp.status_code == 401
+
+
+def test_cancel_requires_runs_write_scope(
+    client: TestClient,
+    mock_repo: MockResearchRunRepository,
+) -> None:
+    """A user lacking ``runs:write`` scope is rejected with 403."""
+    from services.api.auth import AuthenticatedUser, get_current_user
+    from services.api.main import app
+
+    _seed_record_with_status(
+        mock_repo, run_id=_CANCEL_RUN_ID_PENDING, status=ResearchRunStatus.PENDING
+    )
+
+    viewer = AuthenticatedUser(
+        user_id="01HVEWERCANCE0000000000001",
+        email="viewer@fxlab.test",
+        role="viewer",
+        scopes=[],
+    )
+
+    async def _viewer_dep() -> AuthenticatedUser:
+        return viewer
+
+    app.dependency_overrides[get_current_user] = _viewer_dep
+    try:
+        resp = client.post(
+            f"/runs/{_CANCEL_RUN_ID_PENDING}/cancel",
+            headers=AUTH_HEADERS,
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert resp.status_code == 403
+
+
+def test_cancel_returns_503_when_service_unconfigured() -> None:
+    """Without a registered service, the cancel route fails-closed with 503."""
+    runs_routes.set_research_run_service(None)  # type: ignore[arg-type]
+    runs_routes.set_dataset_resolver(None)  # type: ignore[arg-type]
+    try:
+        from services.api.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(f"/runs/{_CANCEL_RUN_ID_PENDING}/cancel", headers=AUTH_HEADERS)
+        assert resp.status_code == 503
+    finally:
+        runs_routes.set_research_run_service(None)  # type: ignore[arg-type]
+        runs_routes.set_dataset_resolver(None)  # type: ignore[arg-type]

@@ -657,3 +657,161 @@ async def get_run_metrics_endpoint(
         component="runs",
     )
     return response
+
+
+# ===========================================================================
+# POST /runs/{run_id}/cancel — operator-driven cancellation
+# ===========================================================================
+#
+# Powers the "Cancel" button rendered next to PENDING / QUEUED / RUNNING
+# rows in the StrategyDetail recent-runs section. Auth scope is
+# ``runs:write`` (matches POST /runs/from-ir above) so any role that
+# can submit a run can also cancel one. Terminal-state requests are
+# surfaced as 409 Conflict with the no-op reason in the detail string;
+# the frontend uses the status code to render an "already finished"
+# toast rather than refreshing the row optimistically.
+
+
+class _CancelRunRequest(BaseModel):
+    """
+    Optional body for ``POST /runs/{run_id}/cancel``.
+
+    Empty body is accepted (the route layer handles ``request=None``).
+    When present, the only field is a free-form ``reason`` the operator
+    can supply for audit-log surfacing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional operator-supplied reason for the cancellation.",
+    )
+
+
+@router.post(
+    "/{run_id}/cancel",
+    summary="Cancel a research run",
+)
+async def cancel_run_endpoint(
+    run_id: str = Path(..., description="Run ULID"),
+    payload: _CancelRunRequest | None = None,
+    user: AuthenticatedUser = Depends(require_scope("runs:write")),
+    service: ResearchRunService = Depends(get_research_run_service),
+) -> JSONResponse:
+    """
+    Cancel a research run, aborting the in-flight executor task if any.
+
+    Behaviour:
+        * 200 — the cancel transitioned the run to CANCELLED. The body
+          is the :class:`RunCancelResult` envelope so callers can read
+          ``previous_status`` / ``current_status`` without re-fetching
+          the full record.
+        * 404 — the run does not exist.
+        * 409 — the run was already in a terminal state. The detail
+          string carries the no-op reason so the frontend can surface
+          a "this run is already finished" toast.
+        * 422 — invalid ULID format.
+        * 401 / 403 — auth missing or insufficient scope.
+        * 503 — research run service is not wired into the route module.
+
+    Args:
+        run_id: ULID of the research run to cancel.
+        payload: Optional body containing a free-form ``reason``. The
+            reason is logged but does not affect the persisted state
+            (the service uses the canonical ``error_message=
+            "user_requested"`` so audit reports stay consistent).
+        user: Authenticated caller; must hold ``runs:write`` scope.
+        service: Injected :class:`ResearchRunService`.
+
+    Returns:
+        200 :class:`JSONResponse` with the :class:`RunCancelResult` body
+        when the run was cancellable; otherwise the error mapping above.
+    """
+    corr_id = correlation_id_var.get("no-corr")
+
+    logger.info(
+        "cancel_run.entry",
+        run_id=run_id,
+        user_id=user.user_id,
+        reason=(payload.reason if payload is not None else None),
+        correlation_id=corr_id,
+        component="runs",
+    )
+
+    if not is_valid_ulid(run_id):
+        logger.warning(
+            "cancel_run.invalid_ulid",
+            run_id=run_id,
+            correlation_id=corr_id,
+            component="runs",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid ULID format",
+        )
+
+    try:
+        result = await service.cancel_run_with_abort(
+            run_id,
+            requested_by=user.user_id,
+            correlation_id=corr_id,
+        )
+    except NotFoundError as exc:
+        logger.warning(
+            "cancel_run.not_found",
+            run_id=run_id,
+            correlation_id=corr_id,
+            component="runs",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.error(
+            "cancel_run.error",
+            run_id=run_id,
+            error=str(exc),
+            exc_info=True,
+            correlation_id=corr_id,
+            component="runs",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from exc
+
+    if not result.cancelled:
+        # Terminal-state no-op -- surface 409 with the reason embedded
+        # so the frontend can branch on the response without re-reading
+        # the full record. We log at info because this is an expected
+        # operator interaction (clicking cancel on a row that already
+        # finished concurrently), not an error condition.
+        logger.info(
+            "cancel_run.no_op",
+            run_id=run_id,
+            previous_status=result.previous_status,
+            current_status=result.current_status,
+            reason=result.reason,
+            correlation_id=corr_id,
+            component="runs",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Run {run_id} is in status {result.current_status}; "
+                f"cancel is a no-op (reason={result.reason})."
+            ),
+        )
+
+    logger.info(
+        "cancel_run.success",
+        run_id=run_id,
+        previous_status=result.previous_status,
+        current_status=result.current_status,
+        correlation_id=corr_id,
+        component="runs",
+    )
+    return JSONResponse(content=result.model_dump(mode="json"), status_code=status.HTTP_200_OK)
