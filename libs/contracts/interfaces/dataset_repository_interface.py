@@ -50,6 +50,76 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 
+@dataclass(frozen=True)
+class BarInventoryAggregate:
+    """
+    Repository-level snapshot of one ``(symbol, timeframe)`` aggregate
+    over the candle-records table.
+
+    Returned by :meth:`DatasetRepositoryInterface.get_bar_inventory` so
+    the service layer can project storage rows into the wire-shape
+    :class:`libs.contracts.dataset.BarInventoryRow` without leaking
+    SQLAlchemy types.
+
+    Attributes:
+        symbol: Symbol the row applies to.
+        timeframe: Bar resolution (e.g. ``"15m"``, ``"1h"``).
+        row_count: Number of candle rows for the pair (>= 0).
+        min_ts: Oldest bar timestamp, or ``None`` when the pair has no
+            bars yet.
+        max_ts: Newest bar timestamp, or ``None`` when the pair has no
+            bars yet.
+    """
+
+    symbol: str
+    timeframe: str
+    row_count: int = 0
+    min_ts: datetime | None = None
+    max_ts: datetime | None = None
+
+
+@dataclass(frozen=True)
+class StrategyUsageRecord:
+    """
+    Repository-level snapshot of a strategy that has consumed the
+    dataset via at least one research run.
+
+    Attributes:
+        strategy_id: ULID of the strategy.
+        name: Strategy display name (``""`` when the strategy row no
+            longer exists; historical research runs may outlive their
+            strategies).
+        last_used_at: Most recent ``completed_at`` across the matching
+            research runs, or ``None`` when no completed run exists yet.
+    """
+
+    strategy_id: str
+    name: str = ""
+    last_used_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class RecentRunRecord:
+    """
+    Repository-level snapshot of a research run that referenced the
+    dataset.
+
+    Attributes:
+        run_id: ULID of the research run.
+        strategy_id: ULID of the strategy the run targets.
+        status: Lifecycle status string (``"pending"``, ``"queued"``,
+            ``"running"``, ``"completed"``, ``"failed"``,
+            ``"cancelled"``).
+        completed_at: Completion timestamp, or ``None`` for in-flight
+            runs.
+    """
+
+    run_id: str
+    strategy_id: str
+    status: str
+    completed_at: datetime | None = None
+
+
 class DatasetRepositoryError(Exception):
     """
     Raised when the repository cannot satisfy a request for any reason
@@ -231,9 +301,105 @@ class DatasetRepositoryInterface(ABC):
         """
         ...
 
+    @abstractmethod
+    def get_bar_inventory(
+        self,
+        *,
+        symbols: list[str],
+        timeframe: str,
+    ) -> list[BarInventoryAggregate]:
+        """
+        Return one aggregate per ``(symbol, timeframe)`` over the
+        candle-records table.
+
+        The dataset catalog has no foreign key into the candle store
+        (the bar table predates the catalog and is keyed on
+        ``(symbol, interval, timestamp)``). Joining is left to the
+        repository: implementations issue a single
+        ``GROUP BY symbol`` query against the candle-record table
+        filtered by the dataset's ``symbols`` array and ``timeframe``.
+
+        For symbols with zero rows in the bar table, the implementation
+        SHOULD include a :class:`BarInventoryAggregate` with
+        ``row_count=0``, ``min_ts=None``, ``max_ts=None`` so the
+        operator UI can show a "no data ingested" badge for that symbol.
+
+        Args:
+            symbols: Symbols the dataset covers. Each becomes one row in
+                the result (whether or not bars exist).
+            timeframe: Bar resolution string (mirrors
+                :attr:`DatasetRecord.timeframe`).
+
+        Returns:
+            One :class:`BarInventoryAggregate` per input symbol, sorted
+            by symbol ascending. Empty when ``symbols`` is empty.
+
+        Raises:
+            DatasetRepositoryError: On driver / connection failure.
+        """
+        ...
+
+    @abstractmethod
+    def get_strategies_using(
+        self,
+        dataset_ref: str,
+        *,
+        limit: int = 10,
+    ) -> list[StrategyUsageRecord]:
+        """
+        Return the top ``limit`` strategies that have referenced
+        ``dataset_ref`` in a research run, sorted by the most recent
+        completed run timestamp (descending; NULLs last).
+
+        Linkage: research runs persist their config as JSON in
+        :attr:`ResearchRun.config_json`; the dataset reference lives at
+        ``data_selection.dataset_ref`` inside that blob. The repository
+        is responsible for materialising the strategy display name from
+        the ``strategies`` table when present.
+
+        Args:
+            dataset_ref: Catalog reference key.
+            limit: Maximum strategies to return (defaults to 10).
+
+        Returns:
+            List of :class:`StrategyUsageRecord` (length 0..limit).
+            Empty when the dataset has never been referenced.
+
+        Raises:
+            DatasetRepositoryError: On driver / connection failure.
+        """
+        ...
+
+    @abstractmethod
+    def get_recent_runs(
+        self,
+        dataset_ref: str,
+        *,
+        limit: int = 10,
+    ) -> list[RecentRunRecord]:
+        """
+        Return the most recent ``limit`` research runs that referenced
+        ``dataset_ref``, ordered by ``completed_at`` descending (NULLs
+        first so still-running runs surface at the top of the list).
+
+        Args:
+            dataset_ref: Catalog reference key.
+            limit: Maximum runs to return (defaults to 10).
+
+        Returns:
+            List of :class:`RecentRunRecord` (length 0..limit).
+
+        Raises:
+            DatasetRepositoryError: On driver / connection failure.
+        """
+        ...
+
 
 __all__ = [
+    "BarInventoryAggregate",
     "DatasetRecord",
     "DatasetRepositoryError",
     "DatasetRepositoryInterface",
+    "RecentRunRecord",
+    "StrategyUsageRecord",
 ]

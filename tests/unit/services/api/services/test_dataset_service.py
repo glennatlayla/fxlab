@@ -16,6 +16,8 @@ Scope:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from libs.contracts.interfaces.dataset_repository_interface import (
@@ -546,3 +548,240 @@ class TestCount:
         assert service.count() == 1
         repo.clear()
         assert service.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# get_detail
+# ---------------------------------------------------------------------------
+
+
+class TestGetDetail:
+    def test_unknown_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError) as excinfo:
+            service.get_detail("never-registered")
+        assert excinfo.value.dataset_ref == "never-registered"
+
+    def test_empty_ref_raises_not_found(
+        self,
+        service: DatasetService,
+    ) -> None:
+        with pytest.raises(DatasetNotFoundError):
+            service.get_detail("")
+
+    def test_returns_header_fields_from_record(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo, is_certified=True)
+        detail = service.get_detail("fx-eurusd-15m-certified-v3")
+        assert detail.dataset_ref == "fx-eurusd-15m-certified-v3"
+        assert detail.dataset_id == "01HSEED0000000000000000001"
+        assert detail.symbols == ["EURUSD"]
+        assert detail.timeframe == "15m"
+        assert detail.source == "synthetic"
+        assert detail.version == "v3"
+        assert detail.is_certified is True
+        # MockDatasetRepository stamps timestamps on save.
+        assert detail.created_at is not None
+        assert detail.updated_at is not None
+
+    def test_empty_inventory_when_no_bars_seeded(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        detail = service.get_detail("fx-eurusd-15m-certified-v3")
+        # Even with no bars, the inventory carries one zero-row entry
+        # per symbol so the UI can render a "no bars yet" badge per
+        # symbol consistently.
+        assert len(detail.bar_inventory) == 1
+        only_row = detail.bar_inventory[0]
+        assert only_row.symbol == "EURUSD"
+        assert only_row.timeframe == "15m"
+        assert only_row.row_count == 0
+        assert only_row.min_ts is None
+        assert only_row.max_ts is None
+        assert detail.strategies_using == []
+        assert detail.recent_runs == []
+
+    def test_inventory_aggregates_seeded_bars(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(
+            repo,
+            dataset_ref="fx-majors-15m",
+            symbols=["EURUSD", "GBPUSD"],
+        )
+        # Use the timeframe stamped on the seeded record ("15m").
+        ts1 = datetime(2026, 1, 1, 0, 0, 0)
+        ts2 = datetime(2026, 4, 25, 23, 45, 0)
+        repo.seed_bars(
+            symbol="EURUSD",
+            timeframe="15m",
+            timestamps=[ts1, ts2, datetime(2026, 2, 15, 12, 0, 0)],
+        )
+        # GBPUSD has no bars seeded — it must still appear with zero.
+
+        detail = service.get_detail("fx-majors-15m")
+        assert len(detail.bar_inventory) == 2
+        eur = next(r for r in detail.bar_inventory if r.symbol == "EURUSD")
+        gbp = next(r for r in detail.bar_inventory if r.symbol == "GBPUSD")
+        assert eur.row_count == 3
+        assert eur.min_ts == ts1.isoformat()
+        assert eur.max_ts == ts2.isoformat()
+        assert gbp.row_count == 0
+        assert gbp.min_ts is None
+        assert gbp.max_ts is None
+
+    def test_strategies_using_groups_distinct_strategies(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        ts_old = datetime(2026, 1, 1, 12, 0, 0)
+        ts_new = datetime(2026, 4, 25, 14, 30, 0)
+        repo.seed_run(
+            run_id="01HRUN00000000000000000001",
+            strategy_id="01HSTRAT0000000000000000A",
+            strategy_name="EURUSD MACD",
+            dataset_ref="fx-eurusd-15m-certified-v3",
+            status="completed",
+            completed_at=ts_old,
+        )
+        repo.seed_run(
+            run_id="01HRUN00000000000000000002",
+            strategy_id="01HSTRAT0000000000000000A",
+            strategy_name="EURUSD MACD",
+            dataset_ref="fx-eurusd-15m-certified-v3",
+            status="completed",
+            completed_at=ts_new,
+        )
+        repo.seed_run(
+            run_id="01HRUN00000000000000000003",
+            strategy_id="01HSTRAT0000000000000000B",
+            strategy_name="EURUSD RSI",
+            dataset_ref="fx-eurusd-15m-certified-v3",
+            status="completed",
+            completed_at=ts_old,
+        )
+
+        detail = service.get_detail("fx-eurusd-15m-certified-v3")
+        assert len(detail.strategies_using) == 2
+        # Most-recent first; A wins because its newest run is newer.
+        assert detail.strategies_using[0].strategy_id == "01HSTRAT0000000000000000A"
+        assert detail.strategies_using[0].name == "EURUSD MACD"
+        assert detail.strategies_using[0].last_used_at == ts_new.isoformat()
+        assert detail.strategies_using[1].strategy_id == "01HSTRAT0000000000000000B"
+        assert detail.strategies_using[1].last_used_at == ts_old.isoformat()
+
+    def test_strategies_using_filters_by_dataset_ref(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo, dataset_ref="match-ref")
+        _seed(repo, dataset_ref="other-ref")
+        repo.seed_run(
+            run_id="01HRUN00000000000000000001",
+            strategy_id="01HSTRAT0000000000000000A",
+            strategy_name="A",
+            dataset_ref="match-ref",
+            status="completed",
+            completed_at=datetime(2026, 4, 25),
+        )
+        repo.seed_run(
+            run_id="01HRUN00000000000000000002",
+            strategy_id="01HSTRAT0000000000000000B",
+            strategy_name="B",
+            dataset_ref="other-ref",
+            status="completed",
+            completed_at=datetime(2026, 4, 25),
+        )
+        detail = service.get_detail("match-ref")
+        assert [s.strategy_id for s in detail.strategies_using] == [
+            "01HSTRAT0000000000000000A",
+        ]
+
+    def test_recent_runs_orders_in_flight_first(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        repo.seed_run(
+            run_id="01HRUN00000000000000000001",
+            strategy_id="01HSTRAT0000000000000000A",
+            strategy_name="A",
+            dataset_ref="fx-eurusd-15m-certified-v3",
+            status="completed",
+            completed_at=datetime(2026, 4, 24, 14, 30, 0),
+        )
+        repo.seed_run(
+            run_id="01HRUN00000000000000000002",
+            strategy_id="01HSTRAT0000000000000000B",
+            strategy_name="B",
+            dataset_ref="fx-eurusd-15m-certified-v3",
+            status="running",
+            completed_at=None,
+        )
+        repo.seed_run(
+            run_id="01HRUN00000000000000000003",
+            strategy_id="01HSTRAT0000000000000000C",
+            strategy_name="C",
+            dataset_ref="fx-eurusd-15m-certified-v3",
+            status="completed",
+            completed_at=datetime(2026, 4, 25, 14, 30, 0),
+        )
+        detail = service.get_detail("fx-eurusd-15m-certified-v3")
+        # NULLs first → the still-running run heads the list.
+        assert detail.recent_runs[0].run_id == "01HRUN00000000000000000002"
+        assert detail.recent_runs[0].status == "running"
+        assert detail.recent_runs[0].completed_at is None
+        # Then most-recent completed first.
+        assert detail.recent_runs[1].run_id == "01HRUN00000000000000000003"
+        assert detail.recent_runs[2].run_id == "01HRUN00000000000000000001"
+
+    def test_recent_runs_capped_at_ten(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        for n in range(15):
+            repo.seed_run(
+                run_id=f"01HRUN0000000000000000{n:04d}"[:26],
+                strategy_id="01HSTRAT0000000000000000A",
+                strategy_name="A",
+                dataset_ref="fx-eurusd-15m-certified-v3",
+                status="completed",
+                completed_at=datetime(2026, 4, 1) + timedelta(hours=n),
+            )
+        detail = service.get_detail("fx-eurusd-15m-certified-v3")
+        assert len(detail.recent_runs) == 10
+
+    def test_strategies_using_capped_at_ten(
+        self,
+        service: DatasetService,
+        repo: MockDatasetRepository,
+    ) -> None:
+        _seed(repo)
+        for n in range(15):
+            sid_padded = f"01HSTRAT00000000000000{n:04d}"[:26]
+            repo.seed_run(
+                run_id=f"01HRUN0000000000000000{n:04d}"[:26],
+                strategy_id=sid_padded,
+                strategy_name=f"S{n}",
+                dataset_ref="fx-eurusd-15m-certified-v3",
+                status="completed",
+                completed_at=datetime(2026, 4, 1) + timedelta(hours=n),
+            )
+        detail = service.get_detail("fx-eurusd-15m-certified-v3")
+        assert len(detail.strategies_using) == 10

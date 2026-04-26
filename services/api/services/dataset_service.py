@@ -57,10 +57,20 @@ from __future__ import annotations
 import structlog
 import ulid
 
-from libs.contracts.dataset import DatasetListItem, PagedDatasets
+from libs.contracts.dataset import (
+    BarInventoryRow,
+    DatasetDetail,
+    DatasetListItem,
+    PagedDatasets,
+    RecentRunRef,
+    StrategyRef,
+)
 from libs.contracts.interfaces.dataset_repository_interface import (
+    BarInventoryAggregate,
     DatasetRecord,
     DatasetRepositoryInterface,
+    RecentRunRecord,
+    StrategyUsageRecord,
 )
 from libs.strategy_ir.interfaces.dataset_service_interface import (
     DatasetNotFoundError,
@@ -387,6 +397,74 @@ class DatasetService(DatasetServiceInterface):
         """
         return self._repo.count()
 
+    def get_detail(self, dataset_ref: str) -> DatasetDetail:
+        """
+        Return the rich :class:`DatasetDetail` envelope for the
+        ``/admin/datasets/{ref}`` page.
+
+        Orchestrates four repository calls (catalog row, bar inventory,
+        strategies-using, recent runs) and projects the storage
+        dataclasses into wire-shape Pydantic models.
+
+        Args:
+            dataset_ref: Catalog reference key.
+
+        Returns:
+            Populated :class:`DatasetDetail` ready for JSON
+            serialisation.
+
+        Raises:
+            DatasetNotFoundError: If the reference is not registered.
+        """
+        if not dataset_ref:
+            raise DatasetNotFoundError(dataset_ref)
+
+        record = self._repo.find_by_ref(dataset_ref)
+        if record is None:
+            logger.warning(
+                "dataset_service.get_detail.miss",
+                component="DatasetService",
+                operation="get_detail",
+                dataset_ref=dataset_ref,
+                result="not_found",
+            )
+            raise DatasetNotFoundError(dataset_ref)
+
+        bar_aggregates = self._repo.get_bar_inventory(
+            symbols=list(record.symbols),
+            timeframe=record.timeframe,
+        )
+        strategies = self._repo.get_strategies_using(dataset_ref, limit=10)
+        runs = self._repo.get_recent_runs(dataset_ref, limit=10)
+
+        detail = DatasetDetail(
+            dataset_ref=record.dataset_ref,
+            dataset_id=record.id,
+            symbols=list(record.symbols),
+            timeframe=record.timeframe,
+            source=record.source,
+            version=record.version,
+            is_certified=bool(record.is_certified),
+            created_at=record.created_at.isoformat() if record.created_at else None,
+            updated_at=record.updated_at.isoformat() if record.updated_at else None,
+            bar_inventory=[_to_bar_row(a) for a in bar_aggregates],
+            strategies_using=[_to_strategy_ref(s) for s in strategies],
+            recent_runs=[_to_recent_run_ref(r) for r in runs],
+        )
+
+        logger.info(
+            "dataset_service.get_detail.completed",
+            component="DatasetService",
+            operation="get_detail",
+            dataset_ref=dataset_ref,
+            symbols_count=len(record.symbols),
+            inventory_rows=len(detail.bar_inventory),
+            strategies_count=len(detail.strategies_using),
+            recent_runs_count=len(detail.recent_runs),
+            result="success",
+        )
+        return detail
+
     def update_certification(self, dataset_ref: str, *, is_certified: bool) -> None:
         """
         Flip the certification flag on an existing dataset row.
@@ -476,6 +554,45 @@ def _to_list_item(record: DatasetRecord) -> DatasetListItem:
         created_by=record.created_by,
         created_at=record.created_at.isoformat() if record.created_at else None,
         updated_at=record.updated_at.isoformat() if record.updated_at else None,
+    )
+
+
+def _to_bar_row(aggregate: BarInventoryAggregate) -> BarInventoryRow:
+    """
+    Translate a storage :class:`BarInventoryAggregate` into the
+    wire-shape :class:`BarInventoryRow`.
+    """
+    return BarInventoryRow(
+        symbol=aggregate.symbol,
+        timeframe=aggregate.timeframe,
+        row_count=aggregate.row_count,
+        min_ts=aggregate.min_ts.isoformat() if aggregate.min_ts else None,
+        max_ts=aggregate.max_ts.isoformat() if aggregate.max_ts else None,
+    )
+
+
+def _to_strategy_ref(usage: StrategyUsageRecord) -> StrategyRef:
+    """
+    Translate a storage :class:`StrategyUsageRecord` into the
+    wire-shape :class:`StrategyRef`.
+    """
+    return StrategyRef(
+        strategy_id=usage.strategy_id,
+        name=usage.name,
+        last_used_at=usage.last_used_at.isoformat() if usage.last_used_at else None,
+    )
+
+
+def _to_recent_run_ref(run: RecentRunRecord) -> RecentRunRef:
+    """
+    Translate a storage :class:`RecentRunRecord` into the wire-shape
+    :class:`RecentRunRef`.
+    """
+    return RecentRunRef(
+        run_id=run.run_id,
+        strategy_id=run.strategy_id,
+        status=run.status,
+        completed_at=run.completed_at.isoformat() if run.completed_at else None,
     )
 
 

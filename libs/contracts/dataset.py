@@ -1,5 +1,5 @@
 """
-Dataset catalog contracts (M4.E3 admin browse + register page).
+Dataset catalog contracts (M4.E3 admin browse + register page; detail view).
 
 Purpose:
     Wire-level Pydantic schemas that the ``/datasets`` admin route
@@ -15,6 +15,15 @@ Responsibilities:
       ``page_size`` / ``total_count`` / ``total_pages`` mirroring the
       shape adopted by :mod:`libs.contracts.strategy.StrategyListPage`
       so the frontend reuses the same pagination component.
+    - :class:`BarInventoryRow` — one row in the per-symbol/timeframe
+      bar-inventory section of the admin Detail page.
+    - :class:`StrategyRef` — one row in the "Strategies using this
+      dataset" section of the admin Detail page.
+    - :class:`RecentRunRef` — one row in the "Recent runs" section of
+      the admin Detail page.
+    - :class:`DatasetDetail` — top-level envelope returned by the
+      ``GET /datasets/{ref}/detail`` admin endpoint; powers the
+      ``/admin/datasets/:ref`` page in the frontend.
 
 Does NOT:
     - Define the catalog table schema (that lives in
@@ -165,9 +174,171 @@ class PagedDatasets(BaseModel):
     total_pages: int = Field(..., ge=0, description="Total pages at this page_size.")
 
 
+# ---------------------------------------------------------------------------
+# Dataset detail (M4.E3 follow-up — /admin/datasets/{ref} page)
+# ---------------------------------------------------------------------------
+
+
+class BarInventoryRow(BaseModel):
+    """
+    One row in the bar-inventory section of the dataset detail page.
+
+    Aggregates :class:`libs.contracts.models.CandleRecord` rows for a
+    single ``(symbol, timeframe)`` pair: count and the min/max bar
+    timestamp the catalog has on hand for the dataset.
+
+    Attributes:
+        symbol: Symbol the row applies to (e.g. ``"EURUSD"``).
+        timeframe: Bar resolution string (mirrors the dataset record's
+            ``timeframe`` — every row in this dataset shares it, but it
+            is repeated here so the table is self-describing).
+        row_count: Number of candle bars stored for this pair.
+            Non-negative; zero indicates the symbol is registered but no
+            bars have been ingested yet.
+        min_ts: ISO-8601 timestamp of the oldest bar, or ``None`` when
+            ``row_count`` is zero.
+        max_ts: ISO-8601 timestamp of the newest bar, or ``None`` when
+            ``row_count`` is zero.
+
+    Example:
+        row = BarInventoryRow(
+            symbol="EURUSD",
+            timeframe="15m",
+            row_count=12345,
+            min_ts="2026-01-01T00:00:00",
+            max_ts="2026-04-25T23:45:00",
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    symbol: str = Field(..., min_length=1, description="Symbol the row applies to.")
+    timeframe: str = Field(..., min_length=1, description="Bar resolution.")
+    row_count: int = Field(..., ge=0, description="Number of bars stored.")
+    min_ts: str | None = Field(None, description="ISO-8601 timestamp of oldest bar.")
+    max_ts: str | None = Field(None, description="ISO-8601 timestamp of newest bar.")
+
+
+class StrategyRef(BaseModel):
+    """
+    One row in the "Strategies using this dataset" section of the
+    dataset detail page.
+
+    Derived by walking :class:`libs.contracts.models.ResearchRun` rows
+    whose ``config_json.data_selection.dataset_ref`` matches the dataset
+    being inspected, projecting the distinct ``strategy_id`` set, then
+    enriching each entry with the strategy's display name and the most
+    recent run timestamp.
+
+    Attributes:
+        strategy_id: ULID primary key of the strategy.
+        name: Human-readable strategy name (or ``""`` if the strategy
+            row has been deleted but historical research runs still
+            reference its id).
+        last_used_at: ISO-8601 timestamp of the most recent
+            ResearchRun.completed_at against this dataset for this
+            strategy, or ``None`` if the only matching runs are still
+            in flight.
+
+    Example:
+        ref = StrategyRef(
+            strategy_id="01HSTRAT0000000000000001",
+            name="EURUSD MACD Momentum",
+            last_used_at="2026-04-25T14:30:00",
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    strategy_id: str = Field(..., min_length=1, description="Strategy ULID.")
+    name: str = Field("", description="Human-readable strategy name (may be empty).")
+    last_used_at: str | None = Field(None, description="ISO-8601 timestamp of last completed run.")
+
+
+class RecentRunRef(BaseModel):
+    """
+    One row in the "Recent runs" section of the dataset detail page.
+
+    Each row is a :class:`libs.contracts.models.ResearchRun` whose
+    ``config_json.data_selection.dataset_ref`` matches the dataset.
+
+    Attributes:
+        run_id: ULID primary key of the research run.
+        strategy_id: ULID of the strategy the run targets.
+        status: Lifecycle status string (``"pending"``, ``"queued"``,
+            ``"running"``, ``"completed"``, ``"failed"``,
+            ``"cancelled"``).
+        completed_at: ISO-8601 timestamp of completion, or ``None`` when
+            the run is still in flight.
+
+    Example:
+        ref = RecentRunRef(
+            run_id="01HRUN00000000000000000001",
+            strategy_id="01HSTRAT0000000000000001",
+            status="completed",
+            completed_at="2026-04-25T14:30:00",
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str = Field(..., min_length=1, description="ResearchRun ULID.")
+    strategy_id: str = Field(..., min_length=1, description="Strategy ULID.")
+    status: str = Field(..., min_length=1, description="Lifecycle status string.")
+    completed_at: str | None = Field(None, description="ISO-8601 timestamp of completion.")
+
+
+class DatasetDetail(BaseModel):
+    """
+    Response body for ``GET /datasets/{dataset_ref}/detail``.
+
+    Top-level envelope rendered by the ``/admin/datasets/:ref`` page.
+    The header fields mirror :class:`DatasetListItem` so the same
+    pill / badge components can render either shape; the three list
+    fields drill into per-symbol bar inventory, strategies that have
+    consumed the dataset, and the most recent runs that referenced it.
+
+    Attributes:
+        dataset_ref: Catalog reference key (UNIQUE).
+        dataset_id: ULID primary key of the dataset row.
+        symbols: Tradable symbols the dataset covers.
+        timeframe: Bar resolution string.
+        source: Provenance tag.
+        version: Catalog version string.
+        is_certified: True once the cert gate has cleared.
+        created_at: ISO-8601 timestamp of insert (or None).
+        updated_at: ISO-8601 timestamp of last update (or None).
+        bar_inventory: One row per ``(symbol, timeframe)`` covered by
+            the dataset. Empty when no bars have been ingested.
+        strategies_using: Top 10 strategies (by most-recent run) that
+            have referenced this dataset_ref in a research run.
+        recent_runs: Top 10 runs (by ``completed_at`` desc, NULLs last)
+            that referenced this dataset_ref.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dataset_ref: str = Field(..., min_length=1)
+    dataset_id: str = Field(..., min_length=1)
+    symbols: list[str] = Field(default_factory=list)
+    timeframe: str = Field(..., min_length=1)
+    source: str = Field(..., min_length=1)
+    version: str = Field(..., min_length=1)
+    is_certified: bool = Field(...)
+    created_at: str | None = Field(None)
+    updated_at: str | None = Field(None)
+    bar_inventory: list[BarInventoryRow] = Field(default_factory=list)
+    strategies_using: list[StrategyRef] = Field(default_factory=list)
+    recent_runs: list[RecentRunRef] = Field(default_factory=list)
+
+
 __all__ = [
     "DEFAULT_DATASET_LIST_PAGE_SIZE",
     "MAX_DATASET_LIST_PAGE_SIZE",
+    "BarInventoryRow",
+    "DatasetDetail",
     "DatasetListItem",
     "PagedDatasets",
+    "RecentRunRef",
+    "StrategyRef",
 ]

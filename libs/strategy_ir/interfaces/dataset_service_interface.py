@@ -88,7 +88,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from libs.contracts.dataset import DatasetListItem, PagedDatasets
+from libs.contracts.dataset import DatasetDetail, DatasetListItem, PagedDatasets
 from libs.strategy_ir.interfaces.dataset_resolver_interface import (
     DatasetNotFoundError,
     ResolvedDataset,
@@ -294,8 +294,35 @@ class DatasetServiceInterface(Protocol):
         """
         ...
 
+    def get_detail(self, dataset_ref: str) -> DatasetDetail:
+        """
+        Return the rich :class:`DatasetDetail` envelope rendered by the
+        ``/admin/datasets/{ref}`` page.
+
+        Combines the catalog row metadata with three derived sections:
+
+        - ``bar_inventory``: per-symbol bar counts + min/max timestamps
+          aggregated from the candle-records table.
+        - ``strategies_using``: top 10 strategies that have referenced
+          this dataset_ref in a research run, sorted by the most recent
+          completed run.
+        - ``recent_runs``: top 10 research runs that referenced this
+          dataset_ref, ordered by ``completed_at`` descending.
+
+        Args:
+            dataset_ref: Catalog reference key.
+
+        Returns:
+            Populated :class:`DatasetDetail`.
+
+        Raises:
+            DatasetNotFoundError: If the reference is not registered.
+        """
+        ...
+
 
 __all__ = [
+    "DatasetDetail",
     "DatasetListItem",
     "DatasetNotFoundError",
     "DatasetServiceInterface",
