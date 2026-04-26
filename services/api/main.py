@@ -79,6 +79,7 @@ from services.api.routes import (
     risk,
     risk_alert,
     risk_analytics,
+    run_exports,
     runs,
     shadow,
     strategies,
@@ -1525,12 +1526,46 @@ async def lifespan(app: FastAPI):
                 app.state.dataset_service = dataset_service
                 app.state.dataset_resolver = dataset_resolver
 
+                # Wire the run-blotter CSV export service. Shares the same
+                # ResearchRunRepository instance (and therefore session)
+                # used by ResearchRunService so the blotter export reads the
+                # same view of the run record as the JSON results endpoints.
+                #
+                # ``repo`` and ``storage`` are required by the constructor
+                # for backwards-compatibility with the job-bundle methods
+                # on :class:`ExportService` (create_export / list_exports /
+                # download_export); the streaming CSV path never touches
+                # them. We pass the real SQL-backed export repository and
+                # the production artifact storage already initialised above
+                # so this service can serve those job-bundle endpoints too
+                # if they are mounted in a future tranche, without leaving
+                # in-memory stand-ins in a production code path.
+                from services.api.repositories.sql_export_repository import (
+                    SqlExportRepository,
+                )
+                from services.api.routes.run_exports import (
+                    set_export_service as set_run_exports_service,
+                )
+                from services.api.services.export_service import ExportService
+
+                db_session_export = SessionLocal()
+                export_repo = SqlExportRepository(db=db_session_export)
+                run_blotter_export_service = ExportService(
+                    repo=export_repo,
+                    storage=app.state.artifact_storage,
+                    research_run_repo=research_run_repo,
+                )
+                set_run_exports_service(run_blotter_export_service)
+                app.state.run_blotter_export_service = run_blotter_export_service
+                app.state.run_blotter_export_db_session = db_session_export
+
                 logger.info(
                     "startup.research_run_service_wired",
                     component="startup",
                     detail="ResearchRunService and CatalogBackedResolver "
                     "(DatasetService + SqlDatasetRepository) wired and "
-                    "registered with /runs routes.",
+                    "registered with /runs routes; run-blotter CSV export "
+                    "service wired for /runs/{id}/exports/blotter.csv.",
                 )
         except Exception as exc:
             logger.critical(
@@ -1774,6 +1809,7 @@ app.include_router(health.router)  # Health probe — unauthenticated, must be f
 app.include_router(mobile_dashboard.router)  # BE-01: Mobile Dashboard Summary Endpoint
 app.include_router(auth.router)  # M14-T8: OIDC auth (discovery, token, revoke, JWKS)
 app.include_router(runs.router)
+app.include_router(run_exports.router)  # GET /runs/{id}/exports/blotter.csv (CSV download)
 app.include_router(readiness.router)
 app.include_router(exports.router)  # M13-T4: Export stubs (zip bundles in M31)
 app.include_router(research.router)  # M13-T4: Research stubs (M25/M26 will implement)
