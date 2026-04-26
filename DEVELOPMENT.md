@@ -54,6 +54,57 @@ fills. When Oanda creds land, the constructor args swap to
 `OandaMarketDataProvider` + `OandaBrokerAdapter` — no other code
 changes.
 
+## Database Backup / Restore (Postgres)
+
+The `services/cli/db_backup.py` CLI wraps `pg_dump` / `psql` so an
+operator can capture and restore the FXLab Postgres database without
+remembering connection-string mechanics. Three modes are supported,
+each with a corresponding Makefile target.
+
+```bash
+# 1. Capture a backup. Default OUTPUT is /tmp/fxlab-backup-<UTC ts>.sql.
+DATABASE_URL=postgresql://fxlab:secret@localhost:5432/fxlab \
+    make db-backup
+# or with a specific path:
+DATABASE_URL=postgresql://fxlab:secret@localhost:5432/fxlab \
+    make db-backup OUTPUT=/var/backups/fxlab-2026-04-25.sql
+
+# 2. Verify a backup BEFORE restoring (no DB I/O — parses the dump
+#    locally and reports per-table row counts).
+make db-verify INPUT=/var/backups/fxlab-2026-04-25.sql
+
+# 3. Restore. The CLI refuses to overwrite a non-empty database
+#    unless FORCE=1 is set — guardrail against accidentally clobbering
+#    a populated DB. Drop+recreate the schema explicitly if you
+#    actually intend to overwrite.
+DATABASE_URL=postgresql://fxlab:secret@localhost:5432/fxlab \
+    make db-restore INPUT=/var/backups/fxlab-2026-04-25.sql
+# Force overwrite (rare; intended for restore-into-existing-DB scenarios):
+DATABASE_URL=postgresql://fxlab:secret@localhost:5432/fxlab \
+    make db-restore INPUT=/var/backups/fxlab-2026-04-25.sql FORCE=1
+```
+
+Notes:
+
+- `pg_dump` and `psql` must be on `PATH` (Debian/Ubuntu:
+  `sudo apt install postgresql-client`). The CLI exits 1 with a clear
+  message if either binary is missing.
+- The password from `DATABASE_URL` is passed to subprocesses via
+  `PGPASSWORD` — never via argv (so it never appears in `ps` output)
+  and never logged. Every log line and error message that names the
+  target uses the redacted form `postgresql://user:***@host:5432/db`.
+- Default subprocess timeouts are 600s (backup) and 1200s (restore);
+  override with `--timeout SECONDS` on the underlying CLI if needed.
+- Use `db-verify` as the dry-run check before any production restore.
+
+Direct CLI invocation (when not using Make):
+
+```bash
+DATABASE_URL=postgresql://fxlab:secret@localhost:5432/fxlab \
+    .venv/bin/python -m services.cli.db_backup \
+    --mode backup --output /tmp/fxlab-backup.sql
+```
+
 ## Running Tests
 
 ```bash

@@ -15,7 +15,8 @@ PRECOMMIT   := .venv/bin/pre-commit
         coverage quality ci clean \
         verify minitux-ps minitux-logs minitux-diag \
         admin-reset \
-        ps logs diag
+        ps logs diag \
+        db-backup db-restore db-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -371,6 +372,29 @@ backtest:  ## Run a strategy backtest against synthetic FX data (override IR=, S
 		--output "$(OUTPUT)"
 
 # ---------------------------------------------------------------------------
+# Multi-strategy backtest comparison (every IR, side-by-side)
+# ---------------------------------------------------------------------------
+# Drives services/cli/backtest_all_strategies.py: discovers every IR
+# matching IRGLOB=, runs each through SyntheticBacktestExecutor over the
+# same window+seed, and emits a JSON comparison report (OUTPUT=) plus a
+# Markdown table on stdout that pastes cleanly into a PR description.
+#
+# Override IRGLOB=, START=, END=, SEED=, OUTPUT= as needed; defaults match
+# the M3.X1 production sweep (every Strategy Repo IR, Q1 2026, seed 42).
+backtest-all: IRGLOB ?= Strategy Repo/*/*.strategy_ir.json
+backtest-all: START ?= 2026-01-01
+backtest-all: END ?= 2026-04-01
+backtest-all: SEED ?= 42
+backtest-all: OUTPUT ?= /tmp/backtest_comparison.json
+backtest-all:  ## Run every Strategy IR through the synthetic backtest and emit a side-by-side comparison (override IRGLOB=, START=, END=, SEED=, OUTPUT=)
+	$(PYTHON) -m services.cli.backtest_all_strategies \
+		--ir-glob "$(IRGLOB)" \
+		--start "$(START)" \
+		--end "$(END)" \
+		--seed "$(SEED)" \
+		--output "$(OUTPUT)"
+
+# ---------------------------------------------------------------------------
 # minitux read-only diagnostics
 # ---------------------------------------------------------------------------
 # Prerequisites: the operator must have an SSH alias for the minitux
@@ -538,3 +562,46 @@ diag:  ## Local diagnostic bundle (no ssh): ps + smoke_health_eval verdict
 	@echo "--- smoke-eval verdict ---"
 	@docker compose -f $(LOCAL_COMPOSE_FILE) ps --all --format json \
 		| python3 scripts/smoke_health_eval.py poll --compose-file $(LOCAL_COMPOSE_FILE) || true
+
+# ---------------------------------------------------------------------------
+# Postgres backup / restore / verify (services/cli/db_backup.py)
+# ---------------------------------------------------------------------------
+# Operator wrapper around `pg_dump` / `psql` for the FXLab Postgres
+# instance. Three operations:
+#   - db-backup   OUTPUT=/path/to/dump.sql  (default: /tmp/fxlab-backup-<UTC ts>.sql)
+#   - db-verify   INPUT=/path/to/dump.sql   (parses dump locally; no DB I/O)
+#   - db-restore  INPUT=/path/to/dump.sql   (refuses non-empty DB without FORCE=1)
+#
+# Reads DATABASE_URL from the environment for backup and restore. The
+# verify mode never touches the database; it parses COPY blocks and
+# INSERT statements in the dump and reports per-table row counts. The
+# CLI redacts the password from every log line / error message
+# (postgresql://user:***@host:5432/db).
+#
+# Set FORCE=1 to overwrite a non-empty database during restore. Without
+# it, the CLI refuses if the target appears populated — this is the
+# guardrail against accidentally clobbering a live DB.
+DB_BACKUP_DEFAULT_OUTPUT := /tmp/fxlab-backup-$(shell date -u +%Y%m%d-%H%M%S).sql
+
+db-backup: OUTPUT ?= $(DB_BACKUP_DEFAULT_OUTPUT)
+db-backup:  ## Dump Postgres via pg_dump (override OUTPUT=/path/to/dump.sql)
+	$(PYTHON) -m services.cli.db_backup --mode backup --output "$(OUTPUT)"
+
+db-restore:  ## Restore a SQL dump via psql (requires INPUT=/path/to/dump.sql; FORCE=1 to overwrite non-empty DB)
+	@if [ -z "$(INPUT)" ]; then \
+		echo "usage: make db-restore INPUT=/path/to/dump.sql [FORCE=1]"; \
+		echo ""; \
+		echo "Restores the dump into the database referenced by DATABASE_URL."; \
+		echo "Without FORCE=1, the CLI refuses if the target DB has any rows."; \
+		exit 2; \
+	fi
+	$(PYTHON) -m services.cli.db_backup --mode restore --input "$(INPUT)" $(if $(FORCE),--force,)
+
+db-verify:  ## Parse a SQL dump locally and report table row counts (requires INPUT=/path/to/dump.sql)
+	@if [ -z "$(INPUT)" ]; then \
+		echo "usage: make db-verify INPUT=/path/to/dump.sql"; \
+		echo ""; \
+		echo "Parses the dump locally (no DB I/O) and prints per-table row counts."; \
+		exit 2; \
+	fi
+	$(PYTHON) -m services.cli.db_backup --mode verify --input "$(INPUT)"
