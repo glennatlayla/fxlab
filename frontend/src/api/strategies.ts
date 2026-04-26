@@ -279,3 +279,129 @@ export async function getStrategy(strategyId: string): Promise<StrategyDetail> {
     throw err;
   }
 }
+
+// ---------------------------------------------------------------------------
+// GET /strategies — M2.D5 paginated browse-page endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * One row in the M2.D5 strategies browse-page table.
+ *
+ * Mirrors :class:`libs.contracts.strategy.StrategyListItem`. The frontend
+ * uses these to render the catalogue grid; clicking a row navigates to
+ * the existing ``/strategy-studio/:id`` detail page.
+ */
+export interface StrategyListItem {
+  /** Strategy ULID. */
+  id: string;
+  /** Display name (mirrors metadata.strategy_name for IR uploads). */
+  name: string;
+  /** Provenance flag — drives the source pill in the table. */
+  source: StrategySource;
+  /** SemVer-style version string. */
+  version: string;
+  /** ULID of the user who created the strategy. */
+  created_by: string;
+  /** ISO-8601 timestamp of creation. */
+  created_at: string;
+  /** Soft-delete flag. ``false`` rows are hidden by default. */
+  is_active: boolean;
+}
+
+/**
+ * Response body for ``GET /strategies?page=...`` (M2.D5 envelope).
+ *
+ * Mirrors :class:`libs.contracts.strategy.StrategyListPage`. The frontend
+ * grid renders ``strategies`` and uses ``page`` / ``page_size`` /
+ * ``total_count`` / ``total_pages`` to drive Next/Prev affordances and
+ * "Page X of Y" copy.
+ */
+export interface StrategyListPage {
+  strategies: StrategyListItem[];
+  page: number;
+  page_size: number;
+  total_count: number;
+  total_pages: number;
+  /** Convenience field — size of the current page (always strategies.length). */
+  count: number;
+}
+
+/** Optional filters accepted by :func:`listStrategies`. */
+export interface ListStrategiesOptions {
+  /** Provenance filter — ``"ir_upload"`` | ``"draft_form"`` | undefined. */
+  source?: StrategySource;
+  /** Case-insensitive substring filter applied to the strategy name. */
+  name_contains?: string;
+}
+
+/**
+ * Typed error for ``GET /strategies?page=...`` failures.
+ *
+ * Carries the HTTP status and the backend ``detail`` string so the
+ * browse page can render a typed banner without parsing free-form
+ * messages.
+ */
+export class ListStrategiesError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "ListStrategiesError";
+  }
+}
+
+/**
+ * Fetch one page of the strategies catalogue.
+ *
+ * Args:
+ *   page: 1-based page index.
+ *   page_size: Strategies per page (capped server-side at 200).
+ *   opts: Optional ``source`` / ``name_contains`` filters.
+ *
+ * Returns:
+ *   A :class:`StrategyListPage` envelope ready for the browse-page grid.
+ *
+ * Raises:
+ *   ListStrategiesError when the backend returns a non-2xx response.
+ *     ``statusCode`` carries the HTTP status (422 for invalid filter
+ *     values, 401 for missing auth handled by the global interceptor).
+ *   AxiosError on network failure.
+ *
+ * Example:
+ *   const page = await listStrategies(1, 20, { source: "ir_upload" });
+ *   for (const row of page.strategies) console.log(row.id, row.name);
+ */
+export async function listStrategies(
+  page: number,
+  page_size: number,
+  opts?: ListStrategiesOptions,
+): Promise<StrategyListPage> {
+  const params: Record<string, string> = {
+    page: String(page),
+    page_size: String(page_size),
+  };
+  if (opts?.source) params.source = opts.source;
+  if (opts?.name_contains && opts.name_contains.trim()) {
+    params.name_contains = opts.name_contains.trim();
+  }
+
+  try {
+    const resp = await apiClient.get<StrategyListPage>("/strategies/", { params });
+    return resp.data;
+  } catch (err) {
+    if (err instanceof AxiosError && err.response) {
+      const status = err.response.status;
+      const detailRaw = err.response.data?.detail;
+      const detail =
+        typeof detailRaw === "string" ? detailRaw : `Failed to load strategies (status ${status})`;
+      throw new ListStrategiesError(
+        detail,
+        status,
+        typeof detailRaw === "string" ? detailRaw : undefined,
+      );
+    }
+    throw err;
+  }
+}

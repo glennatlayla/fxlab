@@ -56,6 +56,8 @@ import type { ReactNode } from "react";
 vi.mock("lucide-react", () => ({
   LayoutDashboard: () => <div data-testid="icon-dashboard">Dashboard</div>,
   FlaskConical: () => <div data-testid="icon-flask">Flask</div>,
+  // FolderKanban: M2.D5 Strategies catalogue link in the Sidebar.
+  FolderKanban: () => <div data-testid="icon-folderkanban">FolderKanban</div>,
   Play: () => <div data-testid="icon-play">Play</div>,
   Package: () => <div data-testid="icon-package">Package</div>,
   Rss: () => <div data-testid="icon-rss">Rss</div>,
@@ -81,6 +83,42 @@ vi.mock("@/features/emergency/api", () => ({
   emergencyApi: {
     getStatus: vi.fn(() => Promise.resolve([])),
   },
+}));
+
+/**
+ * Mock useAuth so the Sidebar's scope-aware item filtering returns true
+ * for every required scope. The Sidebar (M2.D5) hides nav links the
+ * user lacks the required scope for; without this mock the test's
+ * un-authenticated AuthProvider tree returns false for every hasScope
+ * call, collapsing the Trading / Operations / Governance sections and
+ * breaking the "all 4 nav sections present" assertion.
+ */
+vi.mock("@/auth/useAuth", () => ({
+  useAuth: () => ({
+    user: {
+      userId: "test-user",
+      email: "trader@fxlab.test",
+      role: "operator",
+      scopes: [
+        "strategies:write",
+        "runs:write",
+        "feeds:read",
+        "approvals:write",
+        "overrides:approve",
+        "audit:read",
+        "exports:read",
+        "live:trade",
+        "admin:manage",
+        "deployments:read",
+      ],
+    },
+    isAuthenticated: true,
+    isLoading: false,
+    accessToken: "test-token",
+    login: vi.fn(),
+    logout: vi.fn(),
+    hasScope: () => true,
+  }),
 }));
 
 /**

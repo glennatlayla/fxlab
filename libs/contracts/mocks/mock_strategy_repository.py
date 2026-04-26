@@ -144,6 +144,52 @@ class MockStrategyRepository(StrategyRepositoryInterface):
         results.sort(key=lambda r: r["created_at"], reverse=True)
         return [dict(r) for r in results[offset : offset + limit]]
 
+    def list_with_total(
+        self,
+        *,
+        created_by: str | None = None,
+        is_active: bool | None = None,
+        source: str | None = None,
+        name_contains: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        Page strategies with filters and return the matching total count.
+
+        Mirrors :meth:`SqlStrategyRepository.list_with_total` so unit
+        tests against the mock repo see identical pagination semantics
+        to production.
+
+        Args:
+            created_by: Filter by creator ULID.
+            is_active: Filter by active status.
+            source: Filter by provenance flag.
+            name_contains: Case-insensitive substring match on ``name``.
+            limit: Page size.
+            offset: Pagination offset.
+
+        Returns:
+            ``(page_rows, total_count)`` ordered by ``created_at``
+            descending.
+        """
+        results = list(self._store.values())
+
+        if created_by is not None:
+            results = [r for r in results if r["created_by"] == created_by]
+        if is_active is not None:
+            results = [r for r in results if r["is_active"] == is_active]
+        if source is not None:
+            results = [r for r in results if r.get("source") == source]
+        if name_contains is not None and name_contains.strip():
+            needle = name_contains.strip().lower()
+            results = [r for r in results if needle in str(r.get("name", "")).lower()]
+
+        total_count = len(results)
+        results.sort(key=lambda r: r["created_at"], reverse=True)
+        page = [dict(r) for r in results[offset : offset + limit]]
+        return page, total_count
+
     def update(
         self,
         strategy_id: str,

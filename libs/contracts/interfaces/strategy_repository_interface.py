@@ -111,6 +111,42 @@ class StrategyRepositoryInterface(ABC):
         """
 
     @abstractmethod
+    def list_with_total(
+        self,
+        *,
+        created_by: str | None = None,
+        is_active: bool | None = None,
+        source: str | None = None,
+        name_contains: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        List strategies with filters + pagination and return the total count.
+
+        Powers the M2.D5 ``GET /strategies`` browse page where the UI
+        needs ``total_count`` to render pagination controls (Next/Prev,
+        "Page X of Y") that the legacy ``list_strategies`` cannot supply
+        without a separate count query.
+
+        Args:
+            created_by: Filter by creator ULID.
+            is_active: Filter by active status.
+            source: Filter by provenance — ``"ir_upload"`` or
+                ``"draft_form"``. ``None`` means no source filter.
+            name_contains: Case-insensitive substring filter on the
+                strategy ``name`` column. ``None`` means no name filter.
+            limit: Maximum results to return on this page.
+            offset: Number of results to skip before the page starts.
+
+        Returns:
+            ``(strategies, total_count)`` where ``strategies`` is the
+            page (length <= ``limit``) ordered by ``created_at``
+            descending, and ``total_count`` is the total number of rows
+            matching the filters across all pages.
+        """
+
+    @abstractmethod
     def update(
         self,
         strategy_id: str,

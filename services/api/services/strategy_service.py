@@ -42,6 +42,7 @@ from libs.contracts.errors import NotFoundError, ValidationError
 from libs.contracts.interfaces.strategy_repository_interface import (
     StrategyRepositoryInterface,
 )
+from libs.contracts.strategy import StrategyListItem, StrategyListPage
 from libs.contracts.strategy_ir import StrategyIR
 from services.api.services.dsl_validator import (
     DslValidationResult,
@@ -586,6 +587,95 @@ class StrategyService(StrategyServiceInterface):
             "offset": offset,
             "count": len(strategies),
         }
+
+    def list_strategies_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        source_filter: str | None = None,
+        name_contains: str | None = None,
+        created_by: str | None = None,
+        is_active: bool | None = None,
+    ) -> StrategyListPage:
+        """
+        Return one page of the strategies catalogue (M2.D5).
+
+        Wraps :meth:`StrategyRepositoryInterface.list_with_total` and
+        projects the persistence-layer dicts into the typed
+        :class:`StrategyListItem` rows the route serialises. Strategy
+        rows persisted before the ``source`` column existed default to
+        ``"draft_form"`` so the response always satisfies the
+        ``StrategyListItem.source`` regex.
+
+        Args:
+            page: 1-based page index (validated by the route layer).
+            page_size: Strategies per page (capped by the route layer).
+            source_filter: ``"ir_upload"`` | ``"draft_form"`` | None.
+            name_contains: Case-insensitive substring filter on ``name``.
+            created_by: Optional creator ULID filter.
+            is_active: Optional active-flag filter.
+
+        Returns:
+            :class:`StrategyListPage` value object — already validated
+            against the response schema, ready to ``model_dump`` for
+            JSON output.
+        """
+        # Translate page/page_size into limit/offset for the repository
+        # (the repo speaks the lower-level vocabulary so other callers
+        # like the legacy ``GET /strategies/?limit=&offset=`` still work).
+        offset = max(0, (page - 1) * page_size)
+        rows, total_count = self._strategy_repo.list_with_total(
+            created_by=created_by,
+            is_active=is_active,
+            source=source_filter,
+            name_contains=name_contains,
+            limit=page_size,
+            offset=offset,
+        )
+
+        items: list[StrategyListItem] = []
+        for row in rows:
+            # Defensive defaults so a legacy row that pre-dates migration
+            # 0025 still satisfies the response schema. Never silently
+            # drop a row — operators need to see everything in the table.
+            source = row.get("source") or "draft_form"
+            items.append(
+                StrategyListItem(
+                    id=str(row["id"]),
+                    name=str(row["name"]),
+                    source=source,
+                    version=str(row.get("version") or "0.1.0"),
+                    created_by=str(row["created_by"]),
+                    created_at=str(row["created_at"]),
+                    is_active=bool(row.get("is_active", True)),
+                )
+            )
+
+        # ceil(total_count / page_size) without importing math.
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+
+        result = StrategyListPage(
+            strategies=items,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=total_pages,
+        )
+
+        logger.debug(
+            "strategy.list_page.completed",
+            page=page,
+            page_size=page_size,
+            returned=len(items),
+            total_count=total_count,
+            source_filter=source_filter,
+            name_contains=name_contains,
+            component="StrategyService",
+            operation="list_strategies_page",
+        )
+
+        return result
 
     def validate_dsl_expression(self, expression: str) -> dict[str, Any]:
         """

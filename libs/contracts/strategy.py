@@ -109,3 +109,114 @@ class CompiledStrategy(BaseModel):
     source_hash: str = Field(..., description="SHA-256 of the source definition")
     version: str = Field(..., description="SemVer build tag")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+# ---------------------------------------------------------------------------
+# M2.D5 — Strategy list / browse page (paginated catalogue endpoint)
+# ---------------------------------------------------------------------------
+
+#: Hard cap on ``page_size`` for the strategies list endpoint. Matches the
+#: M2.C-style envelope adopted by the other list endpoints (audit, exports,
+#: trade blotter) where 200 is the largest single page the UI ever needs
+#: while remaining cheap to serialise.
+MAX_STRATEGY_LIST_PAGE_SIZE: int = 200
+
+#: Default page size for the list endpoint when the caller does not specify
+#: one. Mirrors the existing ``GET /strategies/`` ``limit=50`` default so
+#: callers using the legacy ``limit=`` query parameter see identical
+#: behaviour.
+DEFAULT_STRATEGY_LIST_PAGE_SIZE: int = 20
+
+
+class StrategyListItem(BaseModel):
+    """
+    A single row in the paginated strategies list.
+
+    Pinned to the columns the M2.D5 ``/strategies`` browse page renders:
+    identity, provenance (``source``), version, ownership, and audit
+    columns. Heavy fields like ``code`` are deliberately omitted — the
+    caller fetches the full :class:`StrategyDetail` only when an
+    individual row is opened.
+
+    Attributes:
+        id: Strategy ULID.
+        name: Display name.
+        source: Provenance flag — ``"ir_upload"`` or ``"draft_form"``.
+        version: SemVer-style version string.
+        created_by: ULID of the creating user.
+        created_at: ISO-8601 timestamp of creation.
+        is_active: Soft-delete flag (``True`` for visible strategies).
+
+    Example:
+        item = StrategyListItem(
+            id="01HZ...",
+            name="FX_DoubleBollinger_TrendZone",
+            source="ir_upload",
+            version="0.1.0",
+            created_by="01HUSER...",
+            created_at="2026-04-25T12:00:00+00:00",
+            is_active=True,
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(..., min_length=1, description="Strategy ULID.")
+    name: str = Field(..., min_length=1, description="Display name.")
+    source: str = Field(
+        ...,
+        pattern=r"^(ir_upload|draft_form)$",
+        description="Provenance flag — pinned by chk_strategies_source.",
+    )
+    version: str = Field(..., min_length=1, description="SemVer-style version.")
+    created_by: str = Field(..., min_length=1, description="Creator ULID.")
+    created_at: str = Field(..., min_length=1, description="ISO-8601 creation timestamp.")
+    is_active: bool = Field(..., description="Soft-delete flag.")
+
+
+class StrategyListPage(BaseModel):
+    """
+    Response body for ``GET /strategies`` (M2.D5).
+
+    Pagination contract mirrors the trade blotter endpoint:
+        - ``page`` is 1-based.
+        - ``page_size`` defaults to
+          :data:`DEFAULT_STRATEGY_LIST_PAGE_SIZE` (20) and is capped at
+          :data:`MAX_STRATEGY_LIST_PAGE_SIZE` (200); above the cap the
+          route returns HTTP 422 (FastAPI's ``le`` validator).
+        - Strategies are ordered by ``created_at`` descending so the most
+          recently imported row appears first.
+        - Pages beyond the last populated page return an empty
+          ``strategies`` list with ``total_count`` and ``total_pages``
+          unchanged so the UI can detect the end of the dataset and
+          disable the "Next" button.
+
+    Attributes:
+        strategies: The strategies on this page (may be empty).
+        page: 1-based page index requested.
+        page_size: Maximum strategies per page for this request.
+        total_count: Total strategies matching the filters.
+        total_pages: Ceiling of ``total_count / page_size`` (0 if no rows).
+
+    Example:
+        page = StrategyListPage(
+            strategies=[item],
+            page=1,
+            page_size=20,
+            total_count=37,
+            total_pages=2,
+        )
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    strategies: list[StrategyListItem] = Field(default_factory=list)
+    page: int = Field(..., ge=1, description="1-based page index.")
+    page_size: int = Field(
+        ...,
+        ge=1,
+        le=MAX_STRATEGY_LIST_PAGE_SIZE,
+        description="Strategies per page.",
+    )
+    total_count: int = Field(..., ge=0, description="Total matching strategies.")
+    total_pages: int = Field(..., ge=0, description="Total pages at this page_size.")

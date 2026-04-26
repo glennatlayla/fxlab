@@ -193,6 +193,41 @@ class StrategyServiceInterface(ABC):
         """
 
     @abstractmethod
+    def list_strategies_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        source_filter: str | None = None,
+        name_contains: str | None = None,
+        created_by: str | None = None,
+        is_active: bool | None = None,
+    ) -> Any:
+        """
+        Paginated browse-page contract for ``GET /strategies`` (M2.D5).
+
+        Returns a :class:`StrategyListPage` value object suitable for
+        direct serialisation by the route layer. The caller asserts
+        ``page >= 1`` and ``page_size >= 1`` (FastAPI's ``Query`` does
+        this in production); the implementation ignores any negative
+        offset that would arise from invalid input.
+
+        Args:
+            page: 1-based page index.
+            page_size: Maximum strategies per page.
+            source_filter: Optional provenance filter
+                (``"ir_upload"`` | ``"draft_form"``).
+            name_contains: Optional case-insensitive substring filter
+                applied to ``name``.
+            created_by: Optional creator ULID filter.
+            is_active: Optional soft-delete flag filter.
+
+        Returns:
+            :class:`libs.contracts.strategy.StrategyListPage` value
+            object containing the page rows + total_count + total_pages.
+        """
+
+    @abstractmethod
     def validate_dsl_expression(self, expression: str) -> dict[str, Any]:
         """
         Validate a DSL condition expression without creating a strategy.

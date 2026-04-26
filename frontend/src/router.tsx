@@ -62,6 +62,7 @@ import Dashboard from "./pages/Dashboard";
 // Lazy-loaded page components — each gets its own code split bundle
 const StrategyStudio = lazy(() => import("./pages/StrategyStudio"));
 const StrategyDetail = lazy(() => import("./pages/StrategyDetail"));
+const Strategies = lazy(() => import("./pages/Strategies"));
 const Runs = lazy(() => import("./pages/Runs"));
 const RunReadiness = lazy(() => import("./pages/RunReadiness"));
 const Feeds = lazy(() => import("./pages/Feeds"));
@@ -115,6 +116,22 @@ export const router = createBrowserRouter(
               <FeatureErrorBoundary featureName="Strategy Studio">
                 <Suspense fallback={<PageLoadingFallback />}>
                   <StrategyStudio />
+                </Suspense>
+              </FeatureErrorBoundary>
+            </AuthGuard>
+          ),
+        },
+        // Strategies catalogue / browse page (M2.D5): paginated list of all
+        // imported + draft strategies. Same scope as the rest of the
+        // strategies surface — the project does not define a separate
+        // strategies:read scope.
+        {
+          path: "strategies",
+          element: (
+            <AuthGuard requiredScope="strategies:write">
+              <FeatureErrorBoundary featureName="Strategies">
+                <Suspense fallback={<PageLoadingFallback />}>
+                  <Strategies />
                 </Suspense>
               </FeatureErrorBoundary>
             </AuthGuard>

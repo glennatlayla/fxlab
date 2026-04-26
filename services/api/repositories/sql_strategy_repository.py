@@ -183,6 +183,62 @@ class SqlStrategyRepository(StrategyRepositoryInterface):
         records = query.order_by(desc(Strategy.created_at)).limit(limit).offset(offset).all()
         return [_strategy_to_dict(r) for r in records]
 
+    def list_with_total(
+        self,
+        *,
+        created_by: str | None = None,
+        is_active: bool | None = None,
+        source: str | None = None,
+        name_contains: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        Page strategies with filters and return the matching total count.
+
+        Two queries hit the database — one ``count(*)`` over the filtered
+        set, one bounded ``select`` for the page itself. Sharing the
+        filter chain keeps the ``total_count`` perfectly consistent with
+        the page rows so the UI's "Page X of Y" never disagrees with the
+        rendered table on re-render.
+
+        Args:
+            created_by: Filter by creator ULID.
+            is_active: Filter by active status.
+            source: Filter by ``source`` column (``"ir_upload"`` |
+                ``"draft_form"``). ``None`` means "any source".
+            name_contains: Case-insensitive substring match against
+                ``Strategy.name``. ``None`` means "no name filter".
+            limit: Page size.
+            offset: Page offset (rows to skip).
+
+        Returns:
+            ``(strategies, total_count)`` — the page rows (most recent
+            first) and the total count of rows matching the filters.
+        """
+        base = self._db.query(Strategy)
+        if created_by is not None:
+            base = base.filter(Strategy.created_by == created_by)
+        if is_active is not None:
+            base = base.filter(Strategy.is_active == is_active)
+        if source is not None:
+            base = base.filter(Strategy.source == source)
+        if name_contains is not None and name_contains.strip():
+            # ``ilike`` for case-insensitive substring search. The wrapper
+            # ``%...%`` mirrors the trade-blotter / audit-explorer search
+            # idiom in this codebase. We escape any user-supplied wildcard
+            # characters so ``%`` and ``_`` in the search box behave as
+            # literal characters rather than SQL meta-characters.
+            needle = (
+                name_contains.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            base = base.filter(Strategy.name.ilike(f"%{needle}%", escape="\\"))
+
+        total_count = base.count()
+
+        records = base.order_by(desc(Strategy.created_at)).limit(limit).offset(offset).all()
+        return [_strategy_to_dict(r) for r in records], total_count
+
     def update(
         self,
         strategy_id: str,

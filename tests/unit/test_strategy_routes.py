@@ -69,16 +69,20 @@ class MockStrategyService:
         if self.raise_validation:
             raise ValidationError(self.raise_validation)
 
+        # Synthesize a unique-ish ULID-like ID per strategy so list/page
+        # tests can create more than one row and still see distinct items.
+        next_idx = len(self._strategies) + 1
         strategy = {
-            "id": "01HSTRAT0000000000000001",
+            "id": f"01HSTRAT{next_idx:018d}",
             "name": kwargs["name"],
             "code": "{}",
             "version": "0.1.0",
+            "source": "draft_form",
             "created_by": kwargs["created_by"],
             "is_active": True,
             "row_version": 1,
-            "created_at": "2026-04-12T14:00:00+00:00",
-            "updated_at": "2026-04-12T14:00:00+00:00",
+            "created_at": f"2026-04-12T14:00:{next_idx:02d}+00:00",
+            "updated_at": f"2026-04-12T14:00:{next_idx:02d}+00:00",
         }
         self._strategies.append(strategy)
 
@@ -160,6 +164,57 @@ class MockStrategyService:
             "offset": kwargs.get("offset", 0),
             "count": len(self._strategies),
         }
+
+    def list_strategies_page(self, **kwargs):
+        """
+        Mock M2.D5 paginated browse-page method.
+
+        Filters the in-memory list by source / name_contains so the
+        route-level filter tests can exercise the parameter wiring
+        without standing up the real ``StrategyService``. Returns a
+        :class:`StrategyListPage` so the route's ``model_dump`` call
+        sees the expected schema-validated value object.
+        """
+        from libs.contracts.strategy import StrategyListItem, StrategyListPage
+
+        page = int(kwargs.get("page", 1))
+        page_size = int(kwargs.get("page_size", 20))
+        source_filter = kwargs.get("source_filter")
+        name_contains = kwargs.get("name_contains")
+
+        rows = list(self._strategies)
+        if source_filter is not None:
+            rows = [r for r in rows if r.get("source") == source_filter]
+        if name_contains is not None and str(name_contains).strip():
+            needle = str(name_contains).strip().lower()
+            rows = [r for r in rows if needle in str(r.get("name", "")).lower()]
+
+        total_count = len(rows)
+        offset = max(0, (page - 1) * page_size)
+        page_rows = rows[offset : offset + page_size]
+
+        items: list[StrategyListItem] = []
+        for r in page_rows:
+            items.append(
+                StrategyListItem(
+                    id=str(r["id"]),
+                    name=str(r["name"]),
+                    source=str(r.get("source") or "draft_form"),
+                    version=str(r.get("version") or "0.1.0"),
+                    created_by=str(r["created_by"]),
+                    created_at=str(r["created_at"]),
+                    is_active=bool(r.get("is_active", True)),
+                )
+            )
+
+        total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+        return StrategyListPage(
+            strategies=items,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=total_pages,
+        )
 
     def validate_dsl_expression(self, expression: str) -> dict:
         if not expression or not expression.strip():
@@ -440,6 +495,216 @@ class TestListStrategiesRoute:
         resp = client.get("/strategies/", headers=_auth_headers())
         data = resp.json()
         assert data["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: GET /strategies/?page=&page_size=... (M2.D5 paginated browse page)
+# ---------------------------------------------------------------------------
+
+
+class TestListStrategiesPagedRoute:
+    """
+    Tests for the M2.D5 paginated envelope on ``GET /strategies/``.
+
+    The new envelope is opted into by supplying ``?page=`` (any 1-based
+    integer). When omitted, the legacy ``{strategies, limit, offset,
+    count}`` envelope is preserved (covered by
+    :class:`TestListStrategiesRoute`).
+
+    These tests verify:
+      * Empty result → ``total_count == 0`` and ``strategies == []``.
+      * Pagination math (page/page_size/total_count/total_pages) is
+        correct across multiple pages.
+      * ``source`` query param filters the result set.
+      * ``name_contains`` query param applies a case-insensitive
+        substring match.
+      * ``page_size`` is bounded above by the schema cap (200).
+      * Auth is enforced (the route inherits the ``strategies:write``
+        scope from the rest of the file).
+    """
+
+    def _seed_strategy(
+        self,
+        client: TestClient,
+        name: str,
+    ) -> str:
+        """Create a strategy via the existing POST endpoint.
+
+        Returns the new strategy id so tests can assert per-row state
+        without reaching into the mock service's internals.
+        """
+        resp = client.post(
+            "/strategies/",
+            json={
+                "name": name,
+                "entry_condition": "RSI(14) < 30",
+                "exit_condition": "RSI(14) > 70",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        return body["strategy"]["id"]
+
+    def test_paged_empty_returns_total_count_zero(self, strategy_test_env) -> None:
+        """Empty store returns total_count=0 with the new envelope."""
+        client, _, _ = strategy_test_env
+
+        resp = client.get("/strategies/?page=1&page_size=20", headers=_auth_headers())
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["strategies"] == []
+        assert data["page"] == 1
+        assert data["page_size"] == 20
+        assert data["total_count"] == 0
+        assert data["total_pages"] == 0
+        # Legacy compatibility — ``count`` mirrors page-level size.
+        assert data["count"] == 0
+
+    def test_paged_returns_envelope_with_total_count(self, strategy_test_env) -> None:
+        """Non-empty result populates the envelope including total_pages."""
+        client, _, _ = strategy_test_env
+        for i in range(3):
+            self._seed_strategy(client, f"Strategy {i}")
+
+        resp = client.get("/strategies/?page=1&page_size=20", headers=_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["page"] == 1
+        assert data["page_size"] == 20
+        assert data["total_count"] == 3
+        assert data["total_pages"] == 1
+        assert data["count"] == 3
+        assert len(data["strategies"]) == 3
+        for row in data["strategies"]:
+            # Pinned row schema — the frontend grid relies on these keys.
+            for key in ("id", "name", "source", "version", "created_by", "created_at", "is_active"):
+                assert key in row, f"missing {key} in row {row}"
+
+    def test_paged_pagination_math_across_pages(self, strategy_test_env) -> None:
+        """page + page_size correctly partition the dataset."""
+        client, _, _ = strategy_test_env
+        for i in range(5):
+            self._seed_strategy(client, f"S{i}")
+
+        # Page 1 of 2 (page_size=2): 2 rows, total_count=5, total_pages=3.
+        resp = client.get("/strategies/?page=1&page_size=2", headers=_auth_headers())
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["page"] == 1
+        assert data["page_size"] == 2
+        assert data["total_count"] == 5
+        assert data["total_pages"] == 3
+        assert len(data["strategies"]) == 2
+
+        # Page 3: last page, single row.
+        resp = client.get("/strategies/?page=3&page_size=2", headers=_auth_headers())
+        data = resp.json()
+        assert data["page"] == 3
+        assert len(data["strategies"]) == 1
+        assert data["total_pages"] == 3
+
+        # Page 4: out-of-range, empty rows but total_count + total_pages
+        # still populated so the UI can disable the Next button.
+        resp = client.get("/strategies/?page=4&page_size=2", headers=_auth_headers())
+        data = resp.json()
+        assert data["page"] == 4
+        assert data["strategies"] == []
+        assert data["total_count"] == 5
+        assert data["total_pages"] == 3
+
+    def test_paged_filter_by_source(self, strategy_test_env) -> None:
+        """``source=draft_form`` filters to draft-form strategies only."""
+        client, mock_service, _ = strategy_test_env
+        # Seed two draft_form rows via POST, then inject one ir_upload
+        # row directly through the mock so we can exercise both branches.
+        self._seed_strategy(client, "draft one")
+        self._seed_strategy(client, "draft two")
+        mock_service._strategies.append(
+            {
+                "id": "01HSTRATIRUPLOAD000000001",
+                "name": "ir uploaded",
+                "code": "{}",
+                "version": "1.0.0",
+                "source": "ir_upload",
+                "created_by": _OPERATOR_USER.user_id,
+                "is_active": True,
+                "row_version": 1,
+                "created_at": "2026-04-12T14:00:99+00:00",
+                "updated_at": "2026-04-12T14:00:99+00:00",
+            }
+        )
+
+        # Filter to ir_upload only.
+        resp = client.get(
+            "/strategies/?page=1&page_size=20&source=ir_upload", headers=_auth_headers()
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_count"] == 1
+        assert len(data["strategies"]) == 1
+        assert data["strategies"][0]["source"] == "ir_upload"
+        assert data["strategies"][0]["name"] == "ir uploaded"
+
+        # Filter to draft_form only.
+        resp = client.get(
+            "/strategies/?page=1&page_size=20&source=draft_form", headers=_auth_headers()
+        )
+        data = resp.json()
+        assert data["total_count"] == 2
+        for row in data["strategies"]:
+            assert row["source"] == "draft_form"
+
+    def test_paged_filter_by_name_contains_is_case_insensitive(self, strategy_test_env) -> None:
+        """``name_contains`` matches case-insensitively against the name column."""
+        client, _, _ = strategy_test_env
+        self._seed_strategy(client, "Bollinger Reversal")
+        self._seed_strategy(client, "RSI Mean Reversion")
+        self._seed_strategy(client, "Momentum Breakout")
+
+        resp = client.get(
+            "/strategies/?page=1&page_size=20&name_contains=BOLLINGER",
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_count"] == 1
+        assert data["strategies"][0]["name"] == "Bollinger Reversal"
+
+        # No matches → empty list, total 0.
+        resp = client.get(
+            "/strategies/?page=1&page_size=20&name_contains=zzz_no_match",
+            headers=_auth_headers(),
+        )
+        data = resp.json()
+        assert data["total_count"] == 0
+        assert data["strategies"] == []
+
+    def test_paged_invalid_source_filter_returns_422(self, strategy_test_env) -> None:
+        """A source value outside the regex returns 422 (FastAPI validation)."""
+        client, _, _ = strategy_test_env
+
+        resp = client.get(
+            "/strategies/?page=1&page_size=20&source=garbage", headers=_auth_headers()
+        )
+        assert resp.status_code == 422
+
+    def test_paged_page_size_above_cap_returns_422(self, strategy_test_env) -> None:
+        """``page_size`` above the cap (200) is a 422."""
+        client, _, _ = strategy_test_env
+
+        resp = client.get("/strategies/?page=1&page_size=999", headers=_auth_headers())
+        assert resp.status_code == 422
+
+    def test_paged_requires_auth(self, strategy_test_env) -> None:
+        """Request without auth is rejected before the service runs."""
+        client, _, _app = strategy_test_env
+        _app.dependency_overrides.clear()
+
+        resp = client.get("/strategies/?page=1&page_size=20")
+        assert resp.status_code in (401, 403, 422)
 
 
 # ---------------------------------------------------------------------------

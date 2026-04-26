@@ -438,30 +438,131 @@ async def get_strategy(
     return JSONResponse(content={"strategy": strategy})
 
 
-@router.get("/", summary="List strategies")
+@router.get("/", summary="List strategies (browse page, M2.D5)")
 async def list_strategies(
+    page: int | None = Query(
+        None,
+        ge=1,
+        description=(
+            "1-based page index. When supplied, the response uses the M2.D5 paginated "
+            "envelope: {strategies, page, page_size, total_count, total_pages, count}."
+        ),
+    ),
+    page_size: int = Query(
+        20,
+        ge=1,
+        le=200,
+        description="Page size (1-200, default 20). Used when ``page`` is supplied.",
+    ),
+    source: str | None = Query(
+        None,
+        pattern=r"^(ir_upload|draft_form)$",
+        description="Filter by provenance — 'ir_upload' or 'draft_form'.",
+    ),
+    name_contains: str | None = Query(
+        None,
+        max_length=255,
+        description="Case-insensitive substring filter on the strategy name.",
+    ),
     created_by: str | None = Query(None, description="Filter by creator ULID"),
     is_active: bool | None = Query(None, description="Filter by active status"),
-    limit: int = Query(50, ge=1, le=200, description="Page size"),
-    offset: int = Query(0, ge=0, description="Page offset"),
+    limit: int = Query(
+        50, ge=1, le=200, description="Legacy page size (used when ``page`` omitted)"
+    ),
+    offset: int = Query(0, ge=0, description="Legacy page offset (used when ``page`` omitted)"),
     user: AuthenticatedUser = Depends(require_scope("strategies:write")),
 ) -> JSONResponse:
     """
-    List strategies with optional filtering and pagination.
+    List strategies with optional filtering, pagination, and search.
+
+    Powers the M2.D5 ``/strategies`` browse page in the frontend. The
+    endpoint supports two pagination shapes for backward compatibility:
+
+    - **New (M2.D5):** caller supplies ``?page=1&page_size=20`` and gets
+      back ``{strategies: [...], page, page_size, total_count,
+      total_pages, count}`` where ``count`` is the size of the current
+      page (kept for older callers) and ``total_count`` is the size of
+      the entire filtered set.
+    - **Legacy:** caller omits ``page`` and uses ``?limit=&offset=``.
+      Response shape stays at ``{strategies, limit, offset, count}``.
+
+    The new shape adds two filters that the legacy shape did not
+    expose:
+
+    - ``source=ir_upload|draft_form`` — provenance discriminator.
+    - ``name_contains=...`` — case-insensitive substring search on
+      ``Strategy.name``.
+
+    Both filters compose with ``created_by`` and ``is_active`` so the
+    UI can offer a "my drafts" or "active IR uploads" view from the
+    same endpoint.
+
+    Auth scope: ``strategies:write`` (matches every other strategy
+    endpoint in this module — there is no ``strategies:read`` scope in
+    the project's ROLE_SCOPES vocabulary).
 
     Args:
-        created_by: Optional filter by creator ULID.
-        is_active: Optional filter by active status.
-        limit: Maximum results per page (1-200, default 50).
-        offset: Number of results to skip.
+        page: 1-based page index. Triggers the new envelope when set.
+        page_size: Strategies per page (1-200, default 20).
+        source: Optional provenance filter.
+        name_contains: Optional case-insensitive name substring filter.
+        created_by: Optional creator ULID filter.
+        is_active: Optional active-flag filter.
+        limit: Legacy page size (only used when ``page`` is omitted).
+        offset: Legacy page offset (only used when ``page`` is omitted).
         user: Authenticated user with strategies:write scope.
 
     Returns:
-        200 JSONResponse with strategies list and count.
+        200 JSONResponse. Body shape depends on whether ``page`` was
+        supplied (see above).
+
+    Example:
+        GET /strategies/?page=1&page_size=20&source=ir_upload
+        → 200 {"strategies": [...], "page": 1, "page_size": 20,
+                "total_count": 5, "total_pages": 1, "count": 5}
     """
     corr_id = correlation_id_var.get("no-corr")
     service = get_strategy_service()
 
+    if page is not None:
+        # New M2.D5 paginated envelope. The service hands back a
+        # validated StrategyListPage; we serialise via model_dump and
+        # add a ``count`` alias so the legacy assertion shape (count =
+        # rows on this page) keeps working for any caller that only
+        # checks page-level size.
+        page_obj = service.list_strategies_page(
+            page=page,
+            page_size=page_size,
+            source_filter=source,
+            name_contains=name_contains,
+            created_by=created_by,
+            is_active=is_active,
+        )
+        body = page_obj.model_dump(mode="json")
+        body["count"] = len(body["strategies"])
+
+        # Audit log per CLAUDE.md §8 — operators expect a per-request
+        # line so they can see who browsed which slice of the catalogue.
+        # ``strategy_list_browsed`` is the literal event name; structlog
+        # binds the first positional arg as the ``event`` key.
+        logger.info(
+            "strategy_list_browsed",
+            page=page,
+            page_size=page_size,
+            source_filter=source,
+            name_contains=name_contains,
+            returned=body["count"],
+            total_count=body["total_count"],
+            user_id=user.user_id,
+            correlation_id=corr_id,
+            component="strategies",
+            operation="list_strategies",
+        )
+
+        return JSONResponse(content=body)
+
+    # Legacy shape. Preserve byte-for-byte response for older callers
+    # (the M2.C tests and any internal scripts assume this shape).
     result = service.list_strategies(
         created_by=created_by,
         is_active=is_active,
@@ -474,6 +575,7 @@ async def list_strategies(
         count=result["count"],
         correlation_id=corr_id,
         component="strategies",
+        operation="list_strategies_legacy",
     )
 
     return JSONResponse(content=result)
