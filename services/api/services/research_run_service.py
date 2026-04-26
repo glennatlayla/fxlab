@@ -41,7 +41,10 @@ Example:
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import ulid as _ulid
@@ -71,6 +74,17 @@ from libs.contracts.run_results import (
 from libs.strategy_ir.interfaces.dataset_resolver_interface import (
     ResolvedDataset,
 )
+
+if TYPE_CHECKING:  # pragma: no cover -- typing-only import to avoid cycle
+    from services.api.services.synthetic_backtest_executor import (
+        SyntheticBacktestExecutor,
+    )
+
+#: Type alias for the IR-loader callable injected into the service.
+#: Given a strategy ULID, returns the parsed IR dict (the same shape
+#: the executor expects). Raising ``NotFoundError`` is the expected way
+#: to signal a missing strategy.
+IRLoader = Callable[[str], dict[str, Any]]
 
 
 class RunNotCompletedError(FXLabError):
@@ -115,8 +129,34 @@ class ResearchRunService(ResearchRunServiceInterface):
         record = service.submit_run(config, user_id="01HUSER...")
     """
 
-    def __init__(self, repo: ResearchRunRepositoryInterface) -> None:
+    def __init__(
+        self,
+        repo: ResearchRunRepositoryInterface,
+        *,
+        executor: SyntheticBacktestExecutor | None = None,
+        ir_loader: IRLoader | None = None,
+    ) -> None:
+        """
+        Construct the service.
+
+        Args:
+            repo: Persistence layer.
+            executor: Optional :class:`SyntheticBacktestExecutor`. When
+                provided alongside ``ir_loader``, calls to
+                :meth:`submit_from_ir` with ``auto_execute=True``
+                (the default) will run the backtest synchronously and
+                attach the result to the run record before returning.
+                When ``None``, ``auto_execute`` falls back to QUEUED-only
+                behaviour (the legacy M2.C2 contract).
+            ir_loader: Optional callable that resolves a ``strategy_id``
+                to a parsed IR dict. Required for auto-execute to work.
+                Typically a thin closure around
+                :meth:`StrategyService.get_strategy` that returns the
+                ``parsed_code`` field.
+        """
         self._repo = repo
+        self._executor = executor
+        self._ir_loader = ir_loader
 
     # ------------------------------------------------------------------
     # submit_run
@@ -195,6 +235,7 @@ class ResearchRunService(ResearchRunServiceInterface):
         user_id: str,
         *,
         correlation_id: str | None = None,
+        auto_execute: bool = True,
     ) -> ResearchRunRecord:
         """
         Submit a research run derived from a parsed ExperimentPlan.
@@ -226,9 +267,31 @@ class ResearchRunService(ResearchRunServiceInterface):
                 surfaces as HTTP 404 in the route layer.
             user_id: ULID of the user submitting the run.
             correlation_id: Optional request correlation ID.
+            auto_execute: When True (default) and both
+                ``executor`` + ``ir_loader`` were provided to
+                :meth:`__init__`, run the synthetic backtest
+                synchronously after queuing the run -- transition
+                QUEUED -> RUNNING -> COMPLETED (or FAILED) and attach
+                the populated :class:`ResearchRunResult` so the M2.C3
+                ``GET /runs/{id}/results/*`` endpoints immediately
+                return real data. Set to False (or pass
+                ``defer_execution=1`` from the route) to keep the
+                legacy M2.C2 QUEUED-only behaviour, e.g. for callers
+                that own their own execution dispatch.
 
         Returns:
-            The created :class:`ResearchRunRecord` in QUEUED status.
+            The created :class:`ResearchRunRecord`. When
+            ``auto_execute`` and the executor are both wired the
+            returned record carries ``status=COMPLETED`` and a
+            populated ``result``. Otherwise ``status=QUEUED`` and
+            ``result=None``.
+
+        Raises:
+            FXLabError: When ``auto_execute=True`` but the executor
+                raises during the run. The run record is transitioned
+                to FAILED with the error message persisted before
+                this exception propagates so callers (and the route's
+                500 handler) can rely on the persisted FAILED state.
 
         Example::
 
@@ -238,7 +301,7 @@ class ResearchRunService(ResearchRunServiceInterface):
                 resolved_dataset=resolver.resolve(plan.data_selection.dataset_ref),
                 user_id="01HUSER...",
             )
-            assert record.status == ResearchRunStatus.QUEUED
+            assert record.status == ResearchRunStatus.COMPLETED
         """
         # Walk-forward gets routed to its own engine; otherwise treat
         # the plan as a single backtest. We never silently downgrade --
@@ -298,10 +361,294 @@ class ResearchRunService(ResearchRunServiceInterface):
             run_type=run_type.value,
             user_id=user_id,
             correlation_id=correlation_id,
+            auto_execute=auto_execute,
+            executor_wired=self._executor is not None,
             component="research_run_service",
         )
 
-        return self.submit_run(config, user_id, correlation_id=correlation_id)
+        queued = self.submit_run(config, user_id, correlation_id=correlation_id)
+
+        # Auto-execute path: only fires when explicitly requested AND
+        # both the executor and the IR loader were injected. We do not
+        # silently swap to QUEUED-only when the executor is missing;
+        # instead we log loudly so an operator can spot misconfiguration.
+        if not auto_execute:
+            return queued
+        if self._executor is None or self._ir_loader is None:
+            logger.warning(
+                "research_run.submit_from_ir.auto_execute_skipped",
+                run_id=queued.id,
+                strategy_id=strategy_id,
+                executor_wired=self._executor is not None,
+                ir_loader_wired=self._ir_loader is not None,
+                correlation_id=correlation_id,
+                component="research_run_service",
+                detail="auto_execute=True but executor or ir_loader is unwired; "
+                "run remains QUEUED.",
+            )
+            return queued
+
+        return self._execute_synchronously(
+            run_id=queued.id,
+            strategy_id=strategy_id,
+            experiment_plan=experiment_plan,
+            resolved_dataset=resolved_dataset,
+            correlation_id=correlation_id,
+        )
+
+    # ------------------------------------------------------------------
+    # _execute_synchronously (M2.D3 wire-up of the M3.X1 executor)
+    # ------------------------------------------------------------------
+
+    def _execute_synchronously(
+        self,
+        *,
+        run_id: str,
+        strategy_id: str,
+        experiment_plan: ExperimentPlan,
+        resolved_dataset: ResolvedDataset,
+        correlation_id: str | None,
+    ) -> ResearchRunRecord:
+        """
+        Run the synthetic backtest in the calling thread and persist
+        the result onto the run record.
+
+        Lifecycle:
+            QUEUED -> RUNNING (started_at stamped)
+                   -> COMPLETED (completed_at stamped + result attached)
+                   on success.
+            QUEUED -> RUNNING -> FAILED (error_message persisted) on
+                   any executor exception.
+
+        Args:
+            run_id: ULID returned by :meth:`submit_run`.
+            strategy_id: ULID used to fetch the IR via
+                ``self._ir_loader``.
+            experiment_plan: Source of the seed and the holdout split
+                window the executor will replay over.
+            resolved_dataset: Source of the symbol set the executor
+                will trade against.
+            correlation_id: Propagated through every log line.
+
+        Returns:
+            The persisted record with terminal status (COMPLETED or
+            FAILED). On FAILED we still RETURN the record (rather than
+            raising) so the route layer can decide whether to translate
+            the persisted error into HTTP 500 or surface the run id and
+            let the client poll. Today the route translates a FAILED
+            run into HTTP 500; if the executor itself raised, we
+            re-raise the wrapped error after persisting FAILED.
+
+        Raises:
+            FXLabError: when the executor raised. The run row is
+                already in FAILED state; the route's exception handler
+                surfaces this as HTTP 500 with the error message.
+        """
+        # Local imports defer the executor's heavyweight strategy_ir
+        # imports until this method is actually called -- keeps cold
+        # service construction cheap and avoids the import cycle with
+        # services.cli.run_synthetic_backtest.
+        from services.api.services.synthetic_backtest_executor import (
+            SyntheticBacktestError,
+            SyntheticBacktestRequest,
+        )
+
+        assert self._executor is not None  # noqa: S101 -- guarded by caller
+        assert self._ir_loader is not None  # noqa: S101 -- guarded by caller
+
+        # 1. Transition QUEUED -> RUNNING. The repository stamps
+        #    started_at automatically on this transition (see
+        #    SqlResearchRunRepository.update_status).
+        try:
+            self._repo.update_status(run_id, ResearchRunStatus.RUNNING)
+        except Exception as exc:  # pragma: no cover -- defensive
+            # If we cannot even transition to RUNNING, leave the row in
+            # QUEUED and surface the error. Tests for this branch live
+            # in the repo, not the service.
+            logger.error(
+                "research_run.execute.queued_to_running_failed",
+                run_id=run_id,
+                error=str(exc),
+                exc_info=True,
+                component="research_run_service",
+            )
+            raise
+
+        # 2. Fetch the IR + build the executor request from the
+        #    experiment plan and resolved dataset.
+        try:
+            ir_dict = self._ir_loader(strategy_id)
+        except Exception as exc:
+            return self._mark_failed(
+                run_id,
+                f"failed to load IR for strategy {strategy_id}: {type(exc).__name__}: {exc}",
+                correlation_id=correlation_id,
+                exc=exc,
+            )
+
+        symbols = list(resolved_dataset.symbols)
+        seed = experiment_plan.run_metadata.random_seed
+        # Window: prefer the holdout split (most recent / smallest), then
+        # out-of-sample, then in-sample. Synthetic-data backtests do not
+        # benefit from longer-than-needed windows so we pick the smallest
+        # configured window the plan declares.
+        start_d, end_d = self._select_replay_window(experiment_plan)
+
+        # Timeframe: read from the IR's data_requirements.primary_timeframe
+        # via the executor's normalisation table; we pass the raw IR
+        # value here and let the executor translate.
+        timeframe = self._extract_primary_timeframe(ir_dict)
+
+        request = SyntheticBacktestRequest(
+            strategy_ir_dict=ir_dict,
+            symbols=symbols,
+            timeframe=timeframe,
+            start=start_d,
+            end=end_d,
+            seed=seed,
+            starting_balance=Decimal("100000"),
+            deployment_id=f"run-{run_id}",
+        )
+
+        # 3. Execute. Wrap every executor exception in our typed
+        #    FXLabError for the route's 500 path; persist FAILED before
+        #    re-raising.
+        try:
+            backtest_result = self._executor.execute(request)
+        except SyntheticBacktestError as exc:
+            failed_record = self._mark_failed(
+                run_id,
+                f"backtest execution failed: {exc}",
+                correlation_id=correlation_id,
+                exc=exc,
+            )
+            raise FXLabError(str(exc)) from exc
+        except Exception as exc:
+            # Any non-SyntheticBacktestError is a programming error
+            # (the executor should have wrapped it). Persist FAILED so
+            # the row reflects reality, then re-raise.
+            failed_record = self._mark_failed(
+                run_id,
+                f"backtest execution raised unexpectedly: {type(exc).__name__}: {exc}",
+                correlation_id=correlation_id,
+                exc=exc,
+            )
+            del failed_record
+            raise
+
+        # 4. Build the ResearchRunResult and persist it.
+        result = ResearchRunResult(
+            backtest_result=backtest_result,
+            summary_metrics={
+                "total_return_pct": str(backtest_result.total_return_pct),
+                "max_drawdown_pct": str(backtest_result.max_drawdown_pct),
+                "sharpe_ratio": str(backtest_result.sharpe_ratio),
+                "win_rate": str(backtest_result.win_rate),
+                "profit_factor": str(backtest_result.profit_factor),
+                "total_trades": backtest_result.total_trades,
+                "final_equity": str(backtest_result.final_equity),
+                "bars_processed": backtest_result.bars_processed,
+            },
+            completed_at=datetime.now(timezone.utc),
+        )
+        self._repo.save_result(run_id, result)
+        completed = self._repo.update_status(run_id, ResearchRunStatus.COMPLETED)
+
+        logger.info(
+            "research_run.execute.completed",
+            run_id=run_id,
+            strategy_id=strategy_id,
+            trade_count=backtest_result.total_trades,
+            equity_points=len(backtest_result.equity_curve),
+            total_return_pct=str(backtest_result.total_return_pct),
+            correlation_id=correlation_id,
+            component="research_run_service",
+        )
+
+        return completed
+
+    @staticmethod
+    def _select_replay_window(plan: ExperimentPlan) -> tuple[date, date]:
+        """
+        Pick the (start, end) date pair the synthetic backtest will
+        replay over.
+
+        Selection rule: prefer the holdout split (the most recent /
+        most relevant window for a smoke test); fall back to
+        out_of_sample then in_sample. Each split is a string pair on
+        the IR -- we parse YYYY-MM-DD here.
+
+        If parsing fails (the IR carries malformed dates), fall back
+        to the last 60 days ending today so the executor still has a
+        valid window. This is defensive, not policy: a production
+        engine config will surface the error instead.
+        """
+        for split_name in ("holdout", "out_of_sample", "in_sample"):
+            split = getattr(plan.splits, split_name, None)
+            if split is None:
+                continue
+            try:
+                start = datetime.strptime(split.start, "%Y-%m-%d").date()
+                end = datetime.strptime(split.end, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if end >= start:
+                return start, end
+        fallback_end = datetime.now(timezone.utc).date()
+        fallback_start = fallback_end - timedelta(days=60)
+        return fallback_start, fallback_end
+
+    @staticmethod
+    def _extract_primary_timeframe(ir_dict: dict[str, Any]) -> str:
+        """
+        Pull ``data_requirements.primary_timeframe`` out of the raw IR
+        dict. Falls back to ``"H1"`` (the synthetic provider's most
+        common pair) when the field is missing -- the executor will
+        raise SyntheticBacktestError if the value is not in its
+        normalisation table, so a wrong fallback fails loudly rather
+        than producing silent wrong output.
+        """
+        data_req = ir_dict.get("data_requirements", {})
+        if isinstance(data_req, dict):
+            tf = data_req.get("primary_timeframe")
+            if isinstance(tf, str) and tf:
+                return tf
+        return "H1"
+
+    def _mark_failed(
+        self,
+        run_id: str,
+        error_message: str,
+        *,
+        correlation_id: str | None,
+        exc: Exception,
+    ) -> ResearchRunRecord:
+        """
+        Persist a FAILED transition + error_message and log the cause.
+
+        Args:
+            run_id: The ULID to mark FAILED.
+            error_message: Operator-readable cause for the run row.
+            correlation_id: Propagated to the log line.
+            exc: The exception that triggered the failure; logged with
+                ``exc_info`` so the stack trace survives in structured
+                logs.
+
+        Returns:
+            The persisted record after the transition. The caller may
+            re-raise for HTTP 500 propagation.
+        """
+        logger.error(
+            "research_run.execute.failed",
+            run_id=run_id,
+            error=error_message,
+            exc_info=exc,
+            correlation_id=correlation_id,
+            component="research_run_service",
+        )
+        return self._repo.update_status(
+            run_id, ResearchRunStatus.FAILED, error_message=error_message
+        )
 
     # ------------------------------------------------------------------
     # get_run

@@ -1221,9 +1221,47 @@ async def lifespan(app: FastAPI):
                     ResearchRunService,
                 )
 
+                # M2.D3: wire the synthetic backtest executor + an IR loader
+                # closure so submit_from_ir(auto_execute=True) actually runs
+                # the backtest synchronously (instead of just queuing). The
+                # IR loader pulls the parsed IR dict off the strategy
+                # service's get_strategy() return; we use the StrategyService
+                # already wired above (app.state.strategy_service).
+                from services.api.services.synthetic_backtest_executor import (
+                    SyntheticBacktestExecutor,
+                )
+
+                strategy_service_for_ir = getattr(app.state, "strategy_service", None)
+
+                def _ir_loader(strategy_id: str) -> dict[str, Any]:
+                    """
+                    Closure: return the parsed IR dict for a strategy ULID.
+
+                    Raises NotFoundError when the strategy does not exist
+                    or carries a non-IR ``source`` (the executor would
+                    fail validation downstream; better to surface here).
+                    """
+                    if strategy_service_for_ir is None:
+                        raise RuntimeError(
+                            "StrategyService is not wired; cannot resolve "
+                            "strategy IR for auto-executed runs."
+                        )
+                    strategy = strategy_service_for_ir.get_strategy(strategy_id)
+                    parsed = strategy.get("parsed_code")
+                    if not isinstance(parsed, dict):
+                        raise RuntimeError(
+                            f"Strategy {strategy_id} has no parsed IR; "
+                            "auto-execute requires an ir_upload-source strategy."
+                        )
+                    return parsed
+
                 db_session_research = SessionLocal()
                 research_run_repo = SqlResearchRunRepository(db=db_session_research)
-                research_run_service = ResearchRunService(repo=research_run_repo)
+                research_run_service = ResearchRunService(
+                    repo=research_run_repo,
+                    executor=SyntheticBacktestExecutor(),
+                    ir_loader=_ir_loader if strategy_service_for_ir is not None else None,
+                )
                 set_research_run_service(research_run_service)
 
                 # Seed the in-memory dataset resolver. Rebuilt from the default

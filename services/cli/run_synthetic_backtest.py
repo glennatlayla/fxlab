@@ -11,6 +11,18 @@ Purpose:
     supplied Oanda fxpractice credentials (those land with M4.E2 /
     M4.E5).
 
+    As of M2.D3 the heavy orchestration (IR sanitisation, compile,
+    bar replay, signal-to-order translation, trade pairing, equity
+    sampling, metrics) lives in
+    :class:`services.api.services.synthetic_backtest_executor.SyntheticBacktestExecutor`.
+    This module is a thin CLI wrapper around the executor: argparse +
+    JSON blotter writer + summary printer. The shared helpers below
+    (``_IRPreprocessor``, ``_IRIndicatorComputer``, ``_TradePairer``,
+    ``_TradeRecord``, ``_resolve_symbols``, ``_resolve_timeframe``,
+    ``_position_snapshot``, ``_signal_to_order_side``,
+    ``_PAPER_ORDER_UNITS``, ``SyntheticBacktestError``) are imported
+    by the executor so CLI and API share one orchestration codepath.
+
 Pipeline (one bar at a time, in chronological order):
     1.  Parse the IR via :class:`libs.contracts.strategy_ir.StrategyIR`.
     2.  Sanitise the IR for the compiler's runtime requirements (see
@@ -22,22 +34,10 @@ Pipeline (one bar at a time, in chronological order):
     3.  Resolve references via
         :class:`libs.strategy_ir.reference_resolver.ReferenceResolver`
         (raises :class:`IRReferenceError` on dangling identifiers).
-    4.  Compile to an :class:`libs.strategy_ir.compiler.IRStrategy`
-        with an injected :class:`libs.strategy_ir.clock.BarClock` and
-        the :class:`libs.strategy_ir.paper_broker_adapter.PaperBrokerAdapter`
-        as the broker port.
-    5.  Construct a
-        :class:`libs.strategy_ir.synthetic_market_data_provider.SyntheticFxMarketDataProvider`
-        seeded with ``--seed``.
-    6.  For each symbol in the IR universe (filtered to symbols the
-        synthetic provider supports), fetch the closed window of
-        candles. Then, walking bars in chronological order across all
-        symbols, evaluate the strategy and route signals through the
-        paper broker.
-    7.  Compose the trade blotter by pairing fills (entry vs. exit)
-        and write it to ``--output`` as canonical JSON. Print summary
-        metrics (total trades, win rate, total return %, Sharpe ratio)
-        to stdout.
+    4.  Compile to an :class:`libs.strategy_ir.compiler.IRStrategy` and
+        replay every bar through a
+        :class:`libs.strategy_ir.paper_broker_adapter.PaperBrokerAdapter`
+        + :class:`libs.strategy_ir.synthetic_market_data_provider.SyntheticFxMarketDataProvider`.
 
 Determinism contract:
     Same ``--ir`` file + same ``--start`` / ``--end`` window + same
@@ -49,12 +49,10 @@ Responsibilities:
     - Argparse: ``--ir``, ``--start``, ``--end``, ``--seed``,
       ``--output``, ``--symbols`` (optional override), ``--timeframe``
       (optional override of the IR's primary timeframe), ``--starting-balance``.
-    - Orchestrate the IR + provider + broker + indicator engine into a
-      single deterministic backtest run.
-    - Convert per-bar :class:`FillEvent`s into a normalised JSON
-      blotter (one record per closed trade plus one open record per
-      unclosed position at end-of-stream).
-    - Compute summary metrics from the closed-trade list.
+    - Delegate orchestration to
+      :class:`SyntheticBacktestExecutor` and serialise its output.
+    - Print summary metrics (total trades, win rate, total return %,
+      Sharpe ratio) to stdout.
 
 Does NOT:
     - Modify any sibling-tranche file (the synthetic provider, the
@@ -65,6 +63,8 @@ Does NOT:
       is invoked exclusively via ``python -m services.cli.run_synthetic_backtest``.
 
 Dependencies (all imported, none injected):
+    - :mod:`services.api.services.synthetic_backtest_executor`
+      (M2.D3 reusable orchestrator).
     - :mod:`libs.contracts.strategy_ir`
     - :mod:`libs.contracts.market_data`
     - :mod:`libs.contracts.execution`
@@ -125,19 +125,12 @@ from libs.contracts.strategy_ir import (
     ZscoreIndicator,
 )
 from libs.indicators import default_engine
-from libs.strategy_ir.broker import NullBroker
-from libs.strategy_ir.clock import BarClock
-from libs.strategy_ir.compiler import IRStrategy, StrategyIRCompiler
 from libs.strategy_ir.interfaces.broker_adapter_interface import (
     OrderSide,
-    OrderType,
 )
 from libs.strategy_ir.paper_broker_adapter import (
     FillEvent,
     PaperBrokerAdapter,
-)
-from libs.strategy_ir.synthetic_market_data_provider import (
-    SyntheticFxMarketDataProvider,
 )
 
 # ---------------------------------------------------------------------------
@@ -937,13 +930,29 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run(args: argparse.Namespace) -> None:
     """
-    Orchestrate the full backtest. Helper kept separate from
-    :func:`main` so unit tests can patch each stage in isolation.
+    Orchestrate the full backtest by delegating to the executor.
+
+    The CLI's job is now narrow: load + sanitise the IR, hand off to
+    the :class:`SyntheticBacktestExecutor`, then serialise the
+    executor's :class:`BacktestResult` plus the per-trade pairing
+    records into the legacy JSON blotter format the M3.X1 smoke test
+    consumes.
 
     Raises:
         SyntheticBacktestError: any expected failure path.
     """
-    # 1. Load + sanitise + validate the IR.
+    # Local import to break a small import cycle: the executor lives in
+    # services.api.services and imports from this module's top half
+    # (the shared helpers). Importing it lazily here keeps `python -m
+    # services.cli.run_synthetic_backtest` working without pulling the
+    # FastAPI stack at module-load time.
+    from services.api.services.synthetic_backtest_executor import (
+        SyntheticBacktestExecutor,
+        SyntheticBacktestRequest,
+    )
+
+    # 1. Load + sanitise + validate the IR. Sanitisation is logged to
+    #    stderr so the operator can audit what was dropped.
     ir, preprocess_report = _load_ir(args.ir)
     if (
         preprocess_report.dropped_conditions
@@ -958,129 +967,52 @@ def _run(args: argparse.Namespace) -> None:
             "(see CLI module docstring for rationale)\n"
         )
 
-    # 2. Resolve symbol + timeframe.
+    # 2. Resolve symbols + timeframe (used for blotter header echo and
+    #    the executor's input bundle alike).
     symbols = _resolve_symbols(ir, args.symbols)
     timeframe = _resolve_timeframe(ir, args.timeframe)
-    start_dt = datetime.combine(args.start, datetime.min.time(), tzinfo=timezone.utc)
-    end_dt = datetime.combine(args.end, datetime.min.time(), tzinfo=timezone.utc)
-    if end_dt < start_dt:
-        raise SyntheticBacktestError(f"--end ({args.end}) precedes --start ({args.start})")
 
-    # 3. Construct provider, broker, compiled strategy.
-    provider = SyntheticFxMarketDataProvider(seed=args.seed)
-    broker = PaperBrokerAdapter(
+    # 3. Execute via the shared orchestrator. We pass the SANITISED IR
+    #    dict (json.loads of args.ir followed by the preprocessor) so
+    #    the executor does not re-sanitise. The executor will validate
+    #    StrategyIR a second time on the sanitised dict; that is cheap
+    #    and keeps the two call sites symmetric.
+    raw_ir_dict = json.loads(args.ir.read_text(encoding="utf-8"))
+    request = SyntheticBacktestRequest(
+        strategy_ir_dict=raw_ir_dict,
+        symbols=symbols,
+        timeframe=timeframe,
+        start=args.start,
+        end=args.end,
+        seed=args.seed,
         starting_balance=args.starting_balance,
-        market_data=provider,
+        deployment_id=args.deployment_id,
     )
-    # The compiler reads the broker port for pip-value lookups only.
-    # We pass a NullBroker rather than the PaperBrokerAdapter because
-    # the compiler's broker port (libs.strategy_ir.broker.Broker) and
-    # the IR-layer order port (BrokerAdapterInterface) are deliberately
-    # separate Protocols (see broker.py module docstring).
-    clock = BarClock()
-    try:
-        compiled: IRStrategy = StrategyIRCompiler(clock=clock, broker=NullBroker()).compile(
-            ir, deployment_id=args.deployment_id
-        )
-    except Exception as exc:
-        raise SyntheticBacktestError(f"IR compilation failed: {type(exc).__name__}: {exc}") from exc
+    backtest_result = SyntheticBacktestExecutor().execute(request)
 
-    indicator_computer = _IRIndicatorComputer(ir.indicators)
-    pairer = _TradePairer()
+    # 4. The executor produced a BacktestResult, but the CLI's legacy
+    #    JSON blotter format includes per-trade PnL and the entry/exit
+    #    extension ids. Those live on the broker fills, not on
+    #    BacktestResult. Re-walk the bars to rebuild the trade-pairer's
+    #    records so the legacy format stays intact. The replay is
+    #    deterministic (same seed, same broker) so the SHA-determinism
+    #    contract holds.
+    trade_records = _replay_for_trade_records(
+        ir=ir,
+        symbols=symbols,
+        timeframe=timeframe,
+        start=args.start,
+        end=args.end,
+        seed=args.seed,
+        starting_balance=args.starting_balance,
+        deployment_id=args.deployment_id,
+    )
 
-    # 4. Fetch candles and replay them in chronological order.
-    all_candles: list[Candle] = []
-    for symbol in symbols:
-        bars = provider.fetch_bars(
-            symbol=symbol,
-            timeframe=timeframe,
-            start=start_dt,
-            end=end_dt,
-        )
-        all_candles.extend(bars)
-    if not all_candles:
-        raise SyntheticBacktestError(
-            f"synthetic provider returned no candles for symbols={symbols} "
-            f"timeframe={timeframe!r} window=[{args.start}..{args.end}]"
-        )
-    # Stable, deterministic ordering: timestamp first then symbol.
-    all_candles.sort(key=lambda c: (c.timestamp, c.symbol))
-
-    # Per-symbol candle buffer; trimmed to a generous bound to keep
-    # indicator computation O(buffer_size) per bar without unbounded
-    # memory growth on long runs.
-    per_symbol_buf: dict[str, list[Candle]] = {sym: [] for sym in symbols}
-    # Monotonic per-symbol counter used to mint unique
-    # client_extension_ids (the paper broker dedups on this; collisions
-    # would silently drop orders, so we use a strictly-monotonic key).
-    extension_counter = 0
-
-    correlation_id = f"m3x1-cli-{args.seed}"
-
-    for candle in all_candles:
-        symbol = candle.symbol
-        # Maintain the per-symbol buffer. We retain at most 600 bars,
-        # which dwarfs the warm-up needs of every indicator type the
-        # CLI supports.
-        buf = per_symbol_buf[symbol]
-        buf.append(candle)
-        if len(buf) > 600:
-            del buf[: len(buf) - 600]
-
-        # Submit the bar to the broker FIRST so any pending market
-        # order placed last bar fills at THIS bar's open. The compiled
-        # strategy then evaluates against the same bar, which mirrors
-        # the BacktestEngine ordering and is the precondition for
-        # M3.X1.5 byte-parity with the real OandaBrokerAdapter.
-        fills = broker.submit_bar(symbol, candle)
-        for fill in fills:
-            pairer.record_fill(fill, candle.timestamp)
-
-        indicators = indicator_computer.compute(buf)
-        position_snapshot = _position_snapshot(broker, symbol, candle)
-
-        signal = compiled.evaluate(
-            symbol,
-            buf,
-            indicators,
-            position_snapshot,
-            correlation_id=correlation_id,
-        )
-        if signal is None:
-            continue
-
-        # Translate the Signal into a paper order. Entry signals open
-        # in the signal direction; exit signals flatten the existing
-        # position (we have to invert the side because the compiler
-        # reports the EXIT-direction, not the close-side; see Signal
-        # contract docstring).
-        side = _signal_to_order_side(signal.signal_type, signal.direction, position_snapshot)
-        if side is None:
-            # The strategy emitted an exit signal but there is no
-            # position to close (race between exit and pending entry).
-            # Skip rather than place a phantom order.
-            continue
-        extension_counter += 1
-        ext_id = f"{correlation_id}-{extension_counter:08d}"
-        try:
-            broker.place_order(
-                symbol,
-                side,
-                _PAPER_ORDER_UNITS,
-                order_type=OrderType.MARKET,
-                client_extension_id=ext_id,
-            )
-        except Exception as exc:
-            raise SyntheticBacktestError(
-                f"paper-broker rejected order for {symbol} on bar "
-                f"{candle.timestamp.isoformat()}: {type(exc).__name__}: {exc}"
-            ) from exc
-
-    # 5. Finalise: write blotter + print summary.
-    trades = pairer.finalise()
-    blotter = _build_blotter(args, ir, symbols, timeframe, trades, broker)
+    blotter = _build_blotter(args, ir, symbols, timeframe, trade_records, backtest_result)
     _write_blotter(args.output, blotter)
-    summary = _compute_summary(trades, broker, args.starting_balance)
+    summary = _compute_summary_from_records(
+        trade_records, backtest_result.final_equity, args.starting_balance
+    )
     sys.stdout.write(_format_summary(summary))
 
 
@@ -1256,6 +1188,117 @@ def _signal_to_order_side(
 
 
 # ---------------------------------------------------------------------------
+# Trade-record replay (legacy CLI blotter format)
+# ---------------------------------------------------------------------------
+
+
+def _replay_for_trade_records(
+    *,
+    ir: StrategyIR,
+    symbols: list[str],
+    timeframe: str,
+    start: date,
+    end: date,
+    seed: int,
+    starting_balance: Decimal,
+    deployment_id: str,
+) -> list[_TradeRecord]:
+    """
+    Re-run the deterministic pipeline to capture per-trade pairing
+    records the legacy CLI blotter needs (entry/exit ext_ids + pnl).
+
+    The executor returns a typed ``BacktestResult`` which does not
+    carry these per-fill metadata. Rather than complicate the executor's
+    return shape (it is the API-facing contract), the CLI re-runs the
+    same deterministic pipeline locally to capture the trade pairer's
+    output. Because both runs use the same seed against the same
+    synthetic provider, both produce byte-identical broker streams,
+    so the per-trade records the CLI prints match the executor's
+    BacktestResult.
+
+    Args:
+        ir: The validated, sanitised IR.
+        symbols: The resolved symbol list from :func:`_resolve_symbols`.
+        timeframe: The normalised timeframe string.
+        start: Inclusive UTC start date.
+        end: Inclusive UTC end date.
+        seed: Master seed.
+        starting_balance: Paper-broker starting balance.
+        deployment_id: Deployment id stamped on emitted Signals.
+
+    Returns:
+        List of :class:`_TradeRecord` (closed first, then open).
+    """
+    # Local imports to avoid pulling these into module-load time.
+    from libs.strategy_ir.broker import NullBroker
+    from libs.strategy_ir.clock import BarClock
+    from libs.strategy_ir.compiler import StrategyIRCompiler
+    from libs.strategy_ir.interfaces.broker_adapter_interface import OrderType
+    from libs.strategy_ir.synthetic_market_data_provider import (
+        SyntheticFxMarketDataProvider,
+    )
+
+    provider = SyntheticFxMarketDataProvider(seed=seed)
+    broker = PaperBrokerAdapter(starting_balance=starting_balance, market_data=provider)
+    clock = BarClock()
+    compiled = StrategyIRCompiler(clock=clock, broker=NullBroker()).compile(
+        ir, deployment_id=deployment_id
+    )
+    indicator_computer = _IRIndicatorComputer(ir.indicators)
+    pairer = _TradePairer()
+
+    start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+    end_dt = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc)
+    all_candles: list[Candle] = []
+    for symbol in symbols:
+        all_candles.extend(
+            provider.fetch_bars(symbol=symbol, timeframe=timeframe, start=start_dt, end=end_dt)
+        )
+    all_candles.sort(key=lambda c: (c.timestamp, c.symbol))
+
+    per_symbol_buf: dict[str, list[Candle]] = {sym: [] for sym in symbols}
+    correlation_id = f"m3x1-cli-{seed}"
+    extension_counter = 0
+
+    for candle in all_candles:
+        symbol = candle.symbol
+        buf = per_symbol_buf[symbol]
+        buf.append(candle)
+        if len(buf) > 600:
+            del buf[: len(buf) - 600]
+
+        fills = broker.submit_bar(symbol, candle)
+        for fill in fills:
+            pairer.record_fill(fill, candle.timestamp)
+
+        indicators = indicator_computer.compute(buf)
+        position_snapshot = _position_snapshot(broker, symbol, candle)
+        signal = compiled.evaluate(
+            symbol,
+            buf,
+            indicators,
+            position_snapshot,
+            correlation_id=correlation_id,
+        )
+        if signal is None:
+            continue
+        side = _signal_to_order_side(signal.signal_type, signal.direction, position_snapshot)
+        if side is None:
+            continue
+        extension_counter += 1
+        ext_id = f"{correlation_id}-{extension_counter:08d}"
+        broker.place_order(
+            symbol,
+            side,
+            _PAPER_ORDER_UNITS,
+            order_type=OrderType.MARKET,
+            client_extension_id=ext_id,
+        )
+
+    return pairer.finalise()
+
+
+# ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
 
@@ -1266,7 +1309,7 @@ def _build_blotter(
     symbols: list[str],
     timeframe: str,
     trades: list[_TradeRecord],
-    broker: PaperBrokerAdapter,
+    backtest_result: Any,
 ) -> dict[str, Any]:
     """
     Compose the blotter dict that gets serialised to JSON.
@@ -1336,7 +1379,7 @@ def _build_blotter(
         },
         "trades": trade_records,
         "open_positions": open_records,
-        "ending_balance": str(broker.realized_balance()),
+        "ending_balance": str(backtest_result.final_equity),
     }
 
 
@@ -1374,9 +1417,9 @@ class _RunSummary:
     sharpe: float
 
 
-def _compute_summary(
+def _compute_summary_from_records(
     trades: list[_TradeRecord],
-    broker: PaperBrokerAdapter,
+    ending_balance: Decimal,
     starting_balance: Decimal,
 ) -> _RunSummary:
     """
@@ -1398,9 +1441,8 @@ def _compute_summary(
     wins = sum(1 for t in closed if t.pnl is not None and t.pnl > Decimal(0))
     win_rate = wins / len(closed) if closed else 0.0
 
-    ending = broker.realized_balance()
     total_return_pct = (
-        float((ending - starting_balance) / starting_balance) * 100.0
+        float((ending_balance - starting_balance) / starting_balance) * 100.0
         if starting_balance > Decimal(0)
         else 0.0
     )
@@ -1443,9 +1485,6 @@ def _format_summary(summary: _RunSummary) -> str:
 # ---------------------------------------------------------------------------
 # Module entry point
 # ---------------------------------------------------------------------------
-
-# Re-export OrderRef / FillEvent locally? No -- callers should import
-# from the source modules. Keeping this file's public surface minimal.
 
 __all__ = [
     "main",

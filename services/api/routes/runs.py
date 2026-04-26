@@ -163,6 +163,17 @@ def get_dataset_resolver() -> DatasetResolverInterface:
 )
 async def submit_run_from_ir(
     payload: _FromIrRequest,
+    defer_execution: int = Query(
+        default=0,
+        ge=0,
+        le=1,
+        description=(
+            "When 1, queue the run only (legacy M2.C2 behaviour) instead of "
+            "executing the synthetic backtest synchronously. Defaults to 0 "
+            "so the M2.C3 GET /runs/{id}/results/* endpoints return real "
+            "data immediately after this call."
+        ),
+    ),
     user: AuthenticatedUser = Depends(require_scope("runs:write")),
     service: ResearchRunService = Depends(get_research_run_service),
     resolver: DatasetResolverInterface = Depends(get_dataset_resolver),
@@ -233,6 +244,9 @@ async def submit_run_from_ir(
     # Step 2: hand off to the service. ResearchRunConfig validation
     # surfaces here as Pydantic ValidationError -- map to 422 so
     # the wire shape matches FastAPI's other validation responses.
+    # auto_execute defaults to True so the M2.C3 GET endpoints return
+    # real blotter / equity / metrics data immediately. ?defer_execution=1
+    # opts out for callers that want to dispatch execution themselves.
     try:
         record = service.submit_from_ir(
             strategy_id=payload.strategy_id,
@@ -240,6 +254,7 @@ async def submit_run_from_ir(
             resolved_dataset=resolved,
             user_id=user.user_id,
             correlation_id=corr_id,
+            auto_execute=defer_execution == 0,
         )
     except ValidationError as exc:
         logger.warning(
@@ -252,6 +267,23 @@ async def submit_run_from_ir(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid run config derived from experiment plan: {exc}",
+        ) from exc
+    except Exception as exc:
+        # Auto-execute can raise FXLabError (or any other) when the
+        # executor fails. The service has already persisted FAILED on
+        # the run row before re-raising; we surface 500 with the message
+        # so the caller can decide whether to retry, re-queue, or drop.
+        logger.error(
+            "runs.from_ir.execution_failed",
+            strategy_id=payload.strategy_id,
+            correlation_id=corr_id,
+            component="runs",
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Backtest execution failed: {exc}",
         ) from exc
 
     logger.info(
