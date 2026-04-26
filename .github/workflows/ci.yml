@@ -334,6 +334,18 @@ jobs:
         # stack is fully ephemeral; teardown -v removes everything.
         run: docker compose -f docker-compose.test.yml up -d --wait
 
+      - name: Run alembic migrations against the test postgres
+        # The test compose stack brings up an EMPTY postgres. Without
+        # migrations, every integration test that touches the schema
+        # (most of them) fails with UndefinedColumn errors on the very
+        # first query. Run the full migration chain before pytest.
+        # DATABASE_URL must point at the test postgres (mapped to host
+        # port 5433); env above sets TEST_DATABASE_URL but alembic
+        # reads DATABASE_URL — alias it explicitly here.
+        env:
+          DATABASE_URL: postgresql://fxlab_test:fxlab_test@localhost:5433/fxlab_test
+        run: .venv/bin/alembic upgrade head
+
       - name: Run integration tests
         # Run EVERY test under tests/integration/, not just those carrying
         # the @pytest.mark.integration marker. The marker is registered
