@@ -300,10 +300,26 @@ step_docker() {
 
 # --------------------------- step: dotenv ------------------------------------
 
+# Upsert a KEY=VALUE pair into the file at .env.
+# - If the key exists (commented or uncommented), replace its line.
+# - Otherwise append `KEY=VALUE` to the file.
+_upsert_env() {
+    local key="$1" value="$2"
+    local esc_value
+    # Escape sed metacharacters in the value: backslash, ampersand, |.
+    esc_value="$(printf '%s' "$value" | sed -e 's/[\&|]/\\&/g')"
+    if grep -qE "^[[:space:]]*#?[[:space:]]*${key}=" .env 2>/dev/null; then
+        sed -i.bak -E "s|^[[:space:]]*#?[[:space:]]*${key}=.*|${key}=${esc_value}|" .env
+        rm -f .env.bak
+    else
+        printf '%s=%s\n' "$key" "$value" >> .env
+    fi
+}
+
 step_dotenv() {
     log_step ".env"
     if [[ -f .env ]]; then
-        log_ok ".env exists (left untouched)"
+        log_ok ".env exists (left untouched — re-runs preserve operator-set values)"
         summary_row OK dotenv "exists"
         return 0
     fi
@@ -313,20 +329,47 @@ step_dotenv() {
         return 0
     fi
     cp .env.example .env
-    local jwt_secret
+
+    # All three secrets need to be populated for the docker-compose stack
+    # to start at all (POSTGRES_PASSWORD and KEYCLOAK_ADMIN_PASSWORD are
+    # `:?required` in docker-compose.yml — without them, `docker compose up`
+    # fails before any container starts). JWT_SECRET_KEY is required by the
+    # API container's lifespan startup.
+    local jwt_secret pg_password kc_admin_password
     jwt_secret="$(.venv/bin/python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)"
-    if [[ -z "$jwt_secret" ]]; then
-        log_warn "could not generate JWT_SECRET_KEY (.venv/bin/python failed?)"
-        summary_row WARN dotenv "created (JWT_SECRET_KEY not set)"
+    pg_password="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(24))' 2>/dev/null || true)"
+    kc_admin_password="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(16))' 2>/dev/null || true)"
+
+    if [[ -z "$jwt_secret" || -z "$pg_password" || -z "$kc_admin_password" ]]; then
+        log_warn "could not generate secrets (.venv/bin/python failed?)"
+        summary_row WARN dotenv "created (secrets not generated)"
         return 0
     fi
-    if grep -q '^# JWT_SECRET_KEY=' .env; then
-        sed -i.bak "s|^# JWT_SECRET_KEY=.*$|JWT_SECRET_KEY=${jwt_secret}|" .env && rm -f .env.bak
-    else
-        printf '\nJWT_SECRET_KEY=%s\n' "$jwt_secret" >> .env
-    fi
-    log_ok ".env created from .env.example (JWT_SECRET_KEY generated)"
-    summary_row OK dotenv "created"
+
+    # Required secrets — without these, compose-up fails outright.
+    _upsert_env JWT_SECRET_KEY              "$jwt_secret"
+    _upsert_env POSTGRES_PASSWORD           "$pg_password"
+    _upsert_env KEYCLOAK_ADMIN_PASSWORD     "$kc_admin_password"
+
+    # Localhost connection strings — point at the dev compose stack.
+    # The validator probes these next; with the stack up, they PASS.
+    _upsert_env POSTGRES_HOST               "localhost"
+    _upsert_env POSTGRES_PORT               "5432"
+    _upsert_env POSTGRES_DB                 "fxlab"
+    _upsert_env POSTGRES_USER               "fxlab"
+    _upsert_env DATABASE_URL                "postgresql://fxlab:${pg_password}@localhost:5432/fxlab"
+    _upsert_env REDIS_HOST                  "localhost"
+    _upsert_env REDIS_PORT                  "6379"
+    _upsert_env REDIS_URL                   "redis://localhost:6379/0"
+    _upsert_env CELERY_BROKER_URL           "redis://localhost:6379/0"
+
+    # Keycloak / S3 are kept commented in dev — Keycloak realm setup is a
+    # heavier bring-up (requires the keycloak service plus realm import
+    # which can take 60+s on first boot) and MinIO is not in the dev
+    # docker-compose stack at all. Operators uncomment when needed.
+
+    log_ok ".env created with generated secrets + localhost service URLs"
+    summary_row OK dotenv "created (secrets + dev URLs populated)"
 }
 
 # --------------------------- step: compose up --------------------------------
@@ -335,12 +378,19 @@ step_compose_up() {
     [[ $DO_DOCKER -eq 1 ]] || { log_skip "compose up (docker unavailable)"; return 0; }
     log_step "Compose stack — postgres + redis"
     local services="postgres redis"
-    if $DOCKER_COMPOSE up -d $services 2>&1 | tail -8; then
-        log_ok "compose up -d $services succeeded"
-        summary_row OK compose "$services up"
+    # `--wait` blocks until healthchecks pass (postgres pg_isready, redis PING).
+    # Falls back gracefully if --wait isn't supported (older compose plugins).
+    if $DOCKER_COMPOSE up -d --wait $services 2>&1 | tail -8; then
+        log_ok "compose up -d --wait $services succeeded (services healthy)"
+        summary_row OK compose "$services up + healthy"
+    elif $DOCKER_COMPOSE up -d $services 2>&1 | tail -8; then
+        log_warn "compose up succeeded without --wait — services may still be starting"
+        summary_row WARN compose "$services up (health unconfirmed)"
+        # Brief settle to let healthchecks fire before the validator probes.
+        sleep 5
     else
         log_warn "compose up failed (the dev stack may need attention)"
-        summary_row WARN compose "up failed"
+        summary_row FAIL compose "up failed"
     fi
 }
 
