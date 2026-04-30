@@ -466,102 +466,151 @@ step_dotenv() {
 
 # --------------------------- step: compose up --------------------------------
 
+# Per-service "did compose bring this up?" flags. Read by step_alembic and
+# step_dotenv to decide whether to run/probe against that service vs. SKIP
+# cleanly. Set by step_compose_up below.
+COMPOSE_PG_UP=0
+COMPOSE_REDIS_UP=0
+
+# Helper: bring up a single compose service, polling for healthy. Sets
+# the named flag variable to 1 on success. Returns 0 always (the caller
+# decides whether a missed service is fatal).
+_compose_up_one() {
+    local svc="$1" flag_var="$2" port="$3"
+    local existing
+    existing="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -x "fxlab-${svc}" || true)"
+    if [[ -z "$existing" ]] && _port_in_use "$port"; then
+        log_warn "$svc: port $port in use by host service — skipping compose ${svc}"
+        log_warn "  Stop host service: sudo systemctl stop ${svc} (or postgresql / redis-server)"
+        summary_row WARN "compose-${svc}" "port $port in use on host"
+        return 0
+    fi
+    if $DOCKER_COMPOSE up -d --wait "$svc" >/dev/null 2>&1; then
+        log_ok "compose ${svc} up + healthy"
+        summary_row OK "compose-${svc}" "up + healthy"
+        eval "$flag_var=1"
+        return 0
+    fi
+    # Older compose plugins don't support --wait. Fall back to detached
+    # up + healthcheck poll loop (60s budget, 3s cadence).
+    if ! $DOCKER_COMPOSE up -d "$svc" 2>&1 | tail -3; then
+        log_err "compose up ${svc} failed"
+        summary_row FAIL "compose-${svc}" "up failed"
+        return 0
+    fi
+    local budget=60 elapsed=0 cid status
+    log_info "$svc: polling healthcheck (budget ${budget}s)"
+    while (( elapsed < budget )); do
+        cid="$($DOCKER_COMPOSE ps -q "$svc" 2>/dev/null | head -1)"
+        if [[ -n "$cid" ]]; then
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
+            if [[ "$status" == "healthy" ]]; then
+                log_ok "compose ${svc} healthy after ${elapsed}s (polled)"
+                summary_row OK "compose-${svc}" "up + healthy (polled)"
+                eval "$flag_var=1"
+                return 0
+            fi
+        fi
+        sleep 3; elapsed=$((elapsed + 3))
+    done
+    log_warn "compose ${svc} not healthy after ${budget}s"
+    summary_row WARN "compose-${svc}" "health unconfirmed after ${budget}s"
+}
+
 step_compose_up() {
     [[ $DO_DOCKER -eq 1 ]] || { log_skip "compose up (docker unavailable)"; return 0; }
     log_step "Compose stack — postgres + redis"
+    # Bring up each service independently — a port conflict on one must
+    # NOT prevent the other from coming up. Downstream steps (alembic,
+    # validator, dotenv) consult COMPOSE_PG_UP / COMPOSE_REDIS_UP to
+    # decide whether to use that service or SKIP cleanly.
+    _compose_up_one postgres COMPOSE_PG_UP    5432
+    _compose_up_one redis    COMPOSE_REDIS_UP 6379
+}
 
-    # Pre-check: 5432 / 6379 commonly conflict with system-installed
-    # postgres or redis daemons. Detecting first turns a confusing
-    # "compose up failed" into actionable advice.
-    local conflicts=()
-    _port_in_use 5432 && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^fxlab-postgres$' && conflicts+=("5432 (postgres)")
-    _port_in_use 6379 && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^fxlab-redis$'    && conflicts+=("6379 (redis)")
-    if (( ${#conflicts[@]} > 0 )); then
-        log_warn "port conflicts detected: ${conflicts[*]}"
-        log_warn "  Either stop the host service occupying the port, or skip with --no-docker"
-        log_warn "  e.g. sudo systemctl stop postgresql / sudo systemctl stop redis-server"
-        summary_row WARN compose "port conflict: ${conflicts[*]}"
-        return 0
+# Comment out a key in .env so the validator SKIPs that probe instead of
+# trying to connect with our generated creds against an unrelated host
+# service. Idempotent — already-commented lines stay commented.
+_comment_out_env_key() {
+    local key="$1"
+    [[ -f .env ]] || return 0
+    if grep -qE "^[[:space:]]*${key}=" .env 2>/dev/null; then
+        sed -i.bak -E "s|^([[:space:]]*)${key}=|\\1# ${key}=|" .env
+        rm -f .env.bak
     fi
+}
 
-    local services="postgres redis"
-    # Try --wait first; on success we know healthchecks have passed.
-    if $DOCKER_COMPOSE up -d --wait $services 2>&1 | tail -8; then
-        log_ok "compose up -d --wait $services succeeded (services healthy)"
-        summary_row OK compose "$services up + healthy"
-        return 0
-    fi
-
-    # Fallback for older compose plugins without --wait support: bring
-    # services up detached, then poll their healthcheck status until
-    # ready or the budget expires (replaces the previous fixed sleep 5).
-    if ! $DOCKER_COMPOSE up -d $services 2>&1 | tail -8; then
-        log_err "compose up failed"
-        summary_row FAIL compose "up failed"
-        return 0
-    fi
-
-    local budget=60 elapsed=0 svc unhealthy
-    log_info "polling healthchecks (budget ${budget}s)"
-    while (( elapsed < budget )); do
-        unhealthy=0
-        for svc in $services; do
-            local cid status
-            cid="$($DOCKER_COMPOSE ps -q "$svc" 2>/dev/null | head -1)"
-            if [[ -z "$cid" ]]; then unhealthy=1; break; fi
-            status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-            [[ "$status" == "healthy" ]] || { unhealthy=1; break; }
+# After step_compose_up determines which services actually came up,
+# reconcile .env so the validator only probes services we control.
+# When postgres-compose didn't come up (port conflict, daemon down,
+# etc.), comment out POSTGRES_*/DATABASE_URL so the validator SKIPs
+# the postgres probe rather than FAILing against an unrelated host
+# service. Same for redis. The operator can uncomment + adjust when
+# they want to point at host services manually.
+step_reconcile_env_with_compose() {
+    [[ -f .env ]] || return 0
+    log_step "Reconciling .env with compose state"
+    local changed=0
+    if [[ $COMPOSE_PG_UP -ne 1 ]]; then
+        for key in POSTGRES_HOST POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL; do
+            _comment_out_env_key "$key"
         done
-        if (( unhealthy == 0 )); then
-            log_ok "compose stack healthy after ${elapsed}s"
-            summary_row OK compose "$services up + healthy (polled)"
-            return 0
-        fi
-        sleep 3
-        elapsed=$((elapsed + 3))
-    done
-    log_warn "compose stack still not healthy after ${budget}s — services may still be starting"
-    summary_row WARN compose "$services up (health unconfirmed after ${budget}s)"
+        log_warn "compose postgres unavailable — POSTGRES_*/DATABASE_URL commented in .env"
+        changed=1
+    fi
+    if [[ $COMPOSE_REDIS_UP -ne 1 ]]; then
+        for key in REDIS_HOST REDIS_PORT REDIS_URL CELERY_BROKER_URL; do
+            _comment_out_env_key "$key"
+        done
+        log_warn "compose redis unavailable — REDIS_*/CELERY_BROKER_URL commented in .env"
+        changed=1
+    fi
+    if (( changed == 0 )); then
+        log_ok ".env already aligned with compose state"
+        summary_row OK reconcile-env "all compose services up"
+    else
+        summary_row WARN reconcile-env "commented out keys for unavailable services"
+    fi
 }
 
 # --------------------------- step: alembic -----------------------------------
 
 step_alembic() {
-    [[ $DO_DOCKER -eq 1 ]] || { log_skip "alembic (compose stack unavailable)"; return 0; }
+    [[ $DO_DOCKER -eq 1 ]] || { log_skip "alembic (docker disabled)"; return 0; }
+    if [[ $COMPOSE_PG_UP -ne 1 ]]; then
+        log_skip "alembic — compose postgres did not come up (port conflict or failure)"
+        summary_row SKIP alembic "compose postgres unavailable"
+        return 0
+    fi
+
     log_step "alembic upgrade head"
-    if .venv/bin/python -c "
-import os, sys
-from pathlib import Path
-env = Path('.env')
-if env.exists():
-    for line in env.read_text().splitlines():
-        s = line.strip()
-        if s.startswith('DATABASE_URL=') and not s.startswith('#'):
-            os.environ['DATABASE_URL'] = s.split('=', 1)[1].strip()
-            break
-sys.exit(0 if os.environ.get('DATABASE_URL') else 1)
-" 2>/dev/null; then
-        # Postgres may still be accepting healthcheck pings without being
-        # ready for migrations on first boot. Retry up to 3 times with
-        # exponential backoff before declaring failure.
-        local attempt=1 max=3 delay=2
-        while (( attempt <= max )); do
-            if .venv/bin/alembic upgrade head 2>&1 | tail -5; then
-                log_ok "migrations applied (attempt $attempt)"
-                summary_row OK alembic "head (attempt $attempt)"
-                return 0
-            fi
-            log_warn "alembic upgrade failed (attempt $attempt/$max) — retrying in ${delay}s"
-            sleep "$delay"
-            delay=$((delay * 2))
-            attempt=$((attempt + 1))
-        done
-        log_err "alembic upgrade failed after $max attempts"
-        summary_row FAIL alembic "upgrade failed (3 attempts)"
-    else
+    # Extract DATABASE_URL from .env. Bash subprocesses (alembic) do NOT
+    # inherit env vars set inside an inline `python -c` block, so we
+    # must export it into the bash environment explicitly. Without this
+    # alembic falls back to alembic.ini's `driver://` placeholder and
+    # fails with NoSuchModuleError.
+    local db_url
+    db_url="$(grep -E '^[[:space:]]*DATABASE_URL=' .env 2>/dev/null | head -1 | sed -E 's|^[[:space:]]*DATABASE_URL=||')"
+    if [[ -z "$db_url" ]]; then
         log_skip "alembic — DATABASE_URL not set in .env"
         summary_row SKIP alembic "DATABASE_URL unset"
+        return 0
     fi
+
+    local attempt=1 max=3 delay=2
+    while (( attempt <= max )); do
+        if DATABASE_URL="$db_url" .venv/bin/alembic upgrade head 2>&1 | tail -5; then
+            log_ok "migrations applied (attempt $attempt)"
+            summary_row OK alembic "head (attempt $attempt)"
+            return 0
+        fi
+        log_warn "alembic upgrade failed (attempt $attempt/$max) — retrying in ${delay}s"
+        sleep "$delay"
+        delay=$((delay * 2))
+        attempt=$((attempt + 1))
+    done
+    log_err "alembic upgrade failed after $max attempts"
+    summary_row FAIL alembic "upgrade failed (3 attempts)"
 }
 
 # --------------------------- step: validate env ------------------------------
@@ -703,6 +752,7 @@ step_install_docker
 step_docker
 step_dotenv
 step_compose_up
+step_reconcile_env_with_compose
 step_alembic
 step_validate_env
 step_backend_tests

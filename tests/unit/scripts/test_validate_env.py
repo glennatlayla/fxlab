@@ -224,6 +224,14 @@ class TestRunChecks:
 
 
 class TestMainExitCodes:
+    """main() reads .env from the real repo root, which on a dev machine
+    holds operator-set values. Stub _load_dotenv to keep these tests
+    hermetic vs. local environment."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_dotenv(self, ve, monkeypatch):
+        monkeypatch.setattr(ve, "_load_dotenv", lambda _p: None)
+
     def test_all_skip_returns_2(self, ve):
         assert ve.main() == 2
 
@@ -232,12 +240,8 @@ class TestMainExitCodes:
         assert ve.main() == 1
 
     def test_warn_returns_3(self, ve, monkeypatch):
-        # Live execution mode in development is a WARN
         monkeypatch.setenv("ALLOWED_EXECUTION_MODES", "shadow,paper,live")
         monkeypatch.setenv("ENVIRONMENT", "development")
-        # All other checks SKIP — but WARN takes precedence over SKIP
-        # because operators need to see configuration warnings even when
-        # services aren't probeable.
         with patch.object(ve, "CHECKS", [ve.check_execution_modes]):
             assert ve.main() == 3
 
