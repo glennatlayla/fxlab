@@ -16,11 +16,18 @@ PRECOMMIT   := .venv/bin/pre-commit
         verify minitux-ps minitux-logs minitux-diag \
         admin-reset \
         ps logs diag \
-        db-backup db-restore db-verify
+        db-backup db-restore db-verify \
+        validate-env install-dev-onboard
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+install-dev-onboard:  ## One-shot dev install: make bootstrap + docker + .env + creds (calls scripts/bootstrap.sh)
+	./scripts/bootstrap.sh
+
+validate-env:  ## Probe Postgres / Redis / MinIO / Keycloak / JWT / Celery configuration
+	./scripts/bootstrap.sh --validate-only
 
 bootstrap:  ## Full bootstrap on a fresh clone (.venv + deps + node + frontend + hooks)
 	@# Single-command bootstrap so a new dev clone reaches "make verify
