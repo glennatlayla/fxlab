@@ -2,9 +2,28 @@
 
 Algorithmic trading platform for backtesting, paper trading, and live execution of equity, futures, and options strategies. Includes strategy authoring, governance workflows, risk management, and a web-based operator dashboard.
 
-## Quick Start (Production Server)
+## Quick Start
 
-**Fresh install on a new Linux server (single command):**
+There are two install paths depending on whether you're standing up a developer environment or a production server.
+
+### Developer machine (single command)
+
+```bash
+git clone git@github.com:glennatlayla/fxlab.git && cd fxlab && ./scripts/bootstrap.sh
+```
+
+`scripts/bootstrap.sh` is idempotent. It detects your OS package manager (apt / dnf / yum / pacman / brew), installs system prerequisites (`python3`, `python${X}-venv` matched to your Python version, build tools, curl, git) via `sudo`, then runs the rest of the dev install: `.venv` + Python deps + nodeenv + frontend `npm install` + pre-commit hooks + `docker compose up -d --wait postgres redis` + `.env` generation with fresh secrets + `alembic upgrade head` + the credential validator + a backend `/health` smoke and frontend `npm run build`. On exit it prints what to do next.
+
+```bash
+make install-dev-onboard   # equivalent to ./scripts/bootstrap.sh
+make validate-env          # re-run the credential probes only
+make verify                # full quality gate
+./scripts/bootstrap.sh --reset-env   # archive existing .env, regenerate
+```
+
+Useful flags: `--no-docker`, `--no-sudo`, `--install-docker`, `--reset-env`, `--skip-tests`, `--skip-frontend-build`, `--skip-backend-smoke`, `--validate-only`. See `./scripts/bootstrap.sh -h`.
+
+### Production server (single command)
 
 ```bash
 git clone git@github.com:glennatlayla/fxlab.git /opt/fxlab && sudo bash /opt/fxlab/install.sh

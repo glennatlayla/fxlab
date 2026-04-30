@@ -35,7 +35,11 @@
 #                    fail with an apt/dnf hint instead.
 #   --install-docker Install Docker via https://get.docker.com if missing
 #                    (off by default — Docker is an invasive system change).
+#   --reset-env      Regenerate .env from .env.example with fresh secrets,
+#                    archiving the existing .env to .archive/<UTC>/.env first.
 #   --skip-tests     Skip the pytest gate (useful on slow machines or CI shards).
+#   --skip-frontend-build  Skip the frontend `npm run build` smoke test.
+#   --skip-backend-smoke   Skip the uvicorn /health smoke test.
 #   --validate-only  Run only the credential validator (assumes a healthy venv).
 #   -h, --help       Show this help and exit.
 #
@@ -56,22 +60,28 @@ source "$SCRIPT_DIR/_lib.sh"
 
 DO_DOCKER=1
 DO_TESTS=1
+DO_FRONTEND_BUILD=1
+DO_BACKEND_SMOKE=1
 VALIDATE_ONLY=0
 USE_SUDO=1
 INSTALL_DOCKER=0
+RESET_ENV=0
 
 usage() {
-    sed -n '2,38p' "$0"
+    sed -n '2,46p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-docker)      DO_DOCKER=0 ;;
-        --no-sudo)        USE_SUDO=0 ;;
-        --install-docker) INSTALL_DOCKER=1 ;;
-        --skip-tests)     DO_TESTS=0 ;;
-        --validate-only)  VALIDATE_ONLY=1 ;;
-        -h|--help)        usage; exit 0 ;;
+        --no-docker)            DO_DOCKER=0 ;;
+        --no-sudo)              USE_SUDO=0 ;;
+        --install-docker)       INSTALL_DOCKER=1 ;;
+        --reset-env)            RESET_ENV=1 ;;
+        --skip-tests)           DO_TESTS=0 ;;
+        --skip-frontend-build)  DO_FRONTEND_BUILD=0 ;;
+        --skip-backend-smoke)   DO_BACKEND_SMOKE=0 ;;
+        --validate-only)        VALIDATE_ONLY=1 ;;
+        -h|--help)              usage; exit 0 ;;
         *) log_err "unknown flag: $1"; usage; exit 1 ;;
     esac
     shift
@@ -268,19 +278,41 @@ step_make_bootstrap() {
 
 # --------------------------- step: docker ------------------------------------
 
+# Returns 0 if a TCP port is in use on localhost, 1 otherwise.
+# Tries `ss` first (most modern Linux), falls back to `nc`, then `lsof`.
+_port_in_use() {
+    local port="$1"
+    if have_cmd ss;   then ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port "; return $?; fi
+    if have_cmd nc;   then nc -z localhost "$port" >/dev/null 2>&1; return $?; fi
+    if have_cmd lsof; then lsof -i ":$port" -sTCP:LISTEN >/dev/null 2>&1; return $?; fi
+    # No probe available — be conservative and report "not in use" so
+    # we don't block the bootstrap on a missing tool.
+    return 1
+}
+
 step_docker() {
     [[ $DO_DOCKER -eq 1 ]] || { log_skip "docker (--no-docker)"; summary_row SKIP docker "--no-docker"; return 0; }
     log_step "Docker + Compose detection"
     if ! have_cmd docker; then
         log_warn "docker not on PATH (compose stack will be skipped)"
         log_warn "  Install: https://docs.docker.com/engine/install/"
+        log_warn "  Or run bootstrap with --install-docker to install via get.docker.com"
         summary_row WARN docker "not installed"
         DO_DOCKER=0
         return 0
     fi
     if ! docker info >/dev/null 2>&1; then
-        log_warn "docker daemon not reachable (try: sudo systemctl start docker)"
-        summary_row WARN docker "daemon down"
+        # Distinguish "daemon down" from "user not in docker group" — the
+        # latter is by far the most common dev-machine failure mode.
+        if [[ $EUID -ne 0 ]] && ! groups 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+            log_warn "docker daemon unreachable AND $USER is not in the 'docker' group"
+            log_warn "  Fix: sudo usermod -aG docker $USER"
+            log_warn "  Then log out + back in (or: newgrp docker) and re-run bootstrap"
+            summary_row WARN docker "user not in docker group"
+        else
+            log_warn "docker daemon not reachable (try: sudo systemctl start docker)"
+            summary_row WARN docker "daemon down"
+        fi
         DO_DOCKER=0
         return 0
     fi
@@ -316,19 +348,78 @@ _upsert_env() {
     fi
 }
 
+# Required keys for the dev stack to start AND for the validator to PASS.
+# step_dotenv detects when .env is missing any of these and prompts the
+# operator to re-run with --reset-env (instead of silently leaving them
+# unset). Keep this list in sync with what step_dotenv populates below.
+readonly REQUIRED_DOTENV_KEYS=(
+    JWT_SECRET_KEY
+    POSTGRES_PASSWORD
+    KEYCLOAK_ADMIN_PASSWORD
+    POSTGRES_HOST
+    POSTGRES_PORT
+    POSTGRES_DB
+    POSTGRES_USER
+    DATABASE_URL
+    REDIS_HOST
+    REDIS_PORT
+    REDIS_URL
+    CELERY_BROKER_URL
+)
+
+# Returns the count of REQUIRED_DOTENV_KEYS that are present and uncommented
+# in .env. Used to detect a half-populated .env left over from an older
+# bootstrap run.
+_count_required_keys_present() {
+    local key count=0
+    [[ -f .env ]] || { echo 0; return; }
+    for key in "${REQUIRED_DOTENV_KEYS[@]}"; do
+        if grep -qE "^[[:space:]]*${key}=[^[:space:]]" .env 2>/dev/null; then
+            count=$((count + 1))
+        fi
+    done
+    echo "$count"
+}
+
 step_dotenv() {
     log_step ".env"
+
+    # --reset-env: archive the existing .env and regenerate.
+    if [[ $RESET_ENV -eq 1 && -f .env ]]; then
+        local stamp archive_dir
+        stamp="$(date -u +%Y-%m-%dT%H%M%SZ)"
+        archive_dir=".archive/${stamp%T*}"
+        mkdir -p "$archive_dir"
+        cp .env "$archive_dir/${stamp}_dotenv"
+        rm .env
+        log_warn "--reset-env: archived previous .env to $archive_dir/${stamp}_dotenv"
+    fi
+
     if [[ -f .env ]]; then
-        log_ok ".env exists (left untouched — re-runs preserve operator-set values)"
-        summary_row OK dotenv "exists"
+        local present
+        present="$(_count_required_keys_present)"
+        local total=${#REQUIRED_DOTENV_KEYS[@]}
+        if [[ $present -lt $total ]]; then
+            log_warn ".env is half-populated ($present / $total required keys present)"
+            log_warn "  Re-run with --reset-env to regenerate (existing .env will be archived)"
+            log_warn "  Or edit .env manually — required keys: ${REQUIRED_DOTENV_KEYS[*]}"
+            summary_row WARN dotenv "half-populated ($present/$total)"
+        else
+            log_ok ".env exists with all required keys (left untouched)"
+            summary_row OK dotenv "exists ($present/$total keys)"
+        fi
+        # Tighten permissions even on existing files — defensive.
+        chmod 600 .env 2>/dev/null || true
         return 0
     fi
+
     if [[ ! -f .env.example ]]; then
         log_warn ".env.example missing — skipping .env creation"
         summary_row WARN dotenv ".env.example missing"
         return 0
     fi
     cp .env.example .env
+    chmod 600 .env
 
     # All three secrets need to be populated for the docker-compose stack
     # to start at all (POSTGRES_PASSWORD and KEYCLOAK_ADMIN_PASSWORD are
@@ -368,7 +459,8 @@ step_dotenv() {
     # which can take 60+s on first boot) and MinIO is not in the dev
     # docker-compose stack at all. Operators uncomment when needed.
 
-    log_ok ".env created with generated secrets + localhost service URLs"
+    chmod 600 .env
+    log_ok ".env created (chmod 600) with generated secrets + localhost service URLs"
     summary_row OK dotenv "created (secrets + dev URLs populated)"
 }
 
@@ -377,21 +469,59 @@ step_dotenv() {
 step_compose_up() {
     [[ $DO_DOCKER -eq 1 ]] || { log_skip "compose up (docker unavailable)"; return 0; }
     log_step "Compose stack — postgres + redis"
+
+    # Pre-check: 5432 / 6379 commonly conflict with system-installed
+    # postgres or redis daemons. Detecting first turns a confusing
+    # "compose up failed" into actionable advice.
+    local conflicts=()
+    _port_in_use 5432 && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^fxlab-postgres$' && conflicts+=("5432 (postgres)")
+    _port_in_use 6379 && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^fxlab-redis$'    && conflicts+=("6379 (redis)")
+    if (( ${#conflicts[@]} > 0 )); then
+        log_warn "port conflicts detected: ${conflicts[*]}"
+        log_warn "  Either stop the host service occupying the port, or skip with --no-docker"
+        log_warn "  e.g. sudo systemctl stop postgresql / sudo systemctl stop redis-server"
+        summary_row WARN compose "port conflict: ${conflicts[*]}"
+        return 0
+    fi
+
     local services="postgres redis"
-    # `--wait` blocks until healthchecks pass (postgres pg_isready, redis PING).
-    # Falls back gracefully if --wait isn't supported (older compose plugins).
+    # Try --wait first; on success we know healthchecks have passed.
     if $DOCKER_COMPOSE up -d --wait $services 2>&1 | tail -8; then
         log_ok "compose up -d --wait $services succeeded (services healthy)"
         summary_row OK compose "$services up + healthy"
-    elif $DOCKER_COMPOSE up -d $services 2>&1 | tail -8; then
-        log_warn "compose up succeeded without --wait — services may still be starting"
-        summary_row WARN compose "$services up (health unconfirmed)"
-        # Brief settle to let healthchecks fire before the validator probes.
-        sleep 5
-    else
-        log_warn "compose up failed (the dev stack may need attention)"
-        summary_row FAIL compose "up failed"
+        return 0
     fi
+
+    # Fallback for older compose plugins without --wait support: bring
+    # services up detached, then poll their healthcheck status until
+    # ready or the budget expires (replaces the previous fixed sleep 5).
+    if ! $DOCKER_COMPOSE up -d $services 2>&1 | tail -8; then
+        log_err "compose up failed"
+        summary_row FAIL compose "up failed"
+        return 0
+    fi
+
+    local budget=60 elapsed=0 svc unhealthy
+    log_info "polling healthchecks (budget ${budget}s)"
+    while (( elapsed < budget )); do
+        unhealthy=0
+        for svc in $services; do
+            local cid status
+            cid="$($DOCKER_COMPOSE ps -q "$svc" 2>/dev/null | head -1)"
+            if [[ -z "$cid" ]]; then unhealthy=1; break; fi
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+            [[ "$status" == "healthy" ]] || { unhealthy=1; break; }
+        done
+        if (( unhealthy == 0 )); then
+            log_ok "compose stack healthy after ${elapsed}s"
+            summary_row OK compose "$services up + healthy (polled)"
+            return 0
+        fi
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+    log_warn "compose stack still not healthy after ${budget}s — services may still be starting"
+    summary_row WARN compose "$services up (health unconfirmed after ${budget}s)"
 }
 
 # --------------------------- step: alembic -----------------------------------
@@ -411,13 +541,23 @@ if env.exists():
             break
 sys.exit(0 if os.environ.get('DATABASE_URL') else 1)
 " 2>/dev/null; then
-        if .venv/bin/alembic upgrade head 2>&1 | tail -5; then
-            log_ok "migrations applied"
-            summary_row OK alembic "head"
-        else
-            log_warn "alembic upgrade failed"
-            summary_row WARN alembic "upgrade failed"
-        fi
+        # Postgres may still be accepting healthcheck pings without being
+        # ready for migrations on first boot. Retry up to 3 times with
+        # exponential backoff before declaring failure.
+        local attempt=1 max=3 delay=2
+        while (( attempt <= max )); do
+            if .venv/bin/alembic upgrade head 2>&1 | tail -5; then
+                log_ok "migrations applied (attempt $attempt)"
+                summary_row OK alembic "head (attempt $attempt)"
+                return 0
+            fi
+            log_warn "alembic upgrade failed (attempt $attempt/$max) — retrying in ${delay}s"
+            sleep "$delay"
+            delay=$((delay * 2))
+            attempt=$((attempt + 1))
+        done
+        log_err "alembic upgrade failed after $max attempts"
+        summary_row FAIL alembic "upgrade failed (3 attempts)"
     else
         log_skip "alembic — DATABASE_URL not set in .env"
         summary_row SKIP alembic "DATABASE_URL unset"
@@ -448,12 +588,102 @@ step_validate_env() {
 step_backend_tests() {
     [[ $DO_TESTS -eq 1 ]] || { log_skip "backend pytest (--skip-tests)"; return 0; }
     log_step "Backend tests (pytest)"
-    if .venv/bin/python -m pytest -q --no-cov 2>&1 | tail -3 | tee /tmp/fxlab_pytest.out | grep -qE '^=+ [0-9]+ passed'; then
+    # The docker-compose integration test and the npm-build test both
+    # depend on environments outside the container — deselect them so
+    # bootstrap pytest passes on hosts where docker or npm isn't ready.
+    # Real CI re-runs the full suite without these guards.
+    local pytest_args=(
+        -q --no-cov
+        --ignore=tests/integration/test_docker_compose_startup.py
+        --deselect=tests/unit/test_m0_frontend_structure.py::test_ac8_npm_build_succeeds
+    )
+    if .venv/bin/python -m pytest "${pytest_args[@]}" 2>&1 | tail -3 | tee /tmp/fxlab_pytest.out | grep -qE '^=+ [0-9]+ passed'; then
         log_ok "$(tail -1 /tmp/fxlab_pytest.out)"
         summary_row OK pytest "$(tail -1 /tmp/fxlab_pytest.out | tr -s ' ')"
     else
         log_err "pytest reported failures"
         summary_row FAIL pytest "see /tmp/fxlab_pytest.out"
+    fi
+}
+
+# --------------------------- step: frontend build smoke ----------------------
+
+step_frontend_build() {
+    [[ $DO_FRONTEND_BUILD -eq 1 ]] || { log_skip "frontend build (--skip-frontend-build)"; return 0; }
+    if [[ ! -f frontend/package.json ]]; then
+        log_skip "frontend/package.json missing"
+        return 0
+    fi
+    log_step "Frontend build smoke (typecheck + build)"
+    local node_bin
+    if [[ -x .venv/bin/node ]]; then
+        node_bin="$REPO_ROOT/.venv/bin"
+    elif have_cmd node; then
+        node_bin="$(dirname "$(command -v node)")"
+    else
+        log_warn "no node binary available — skipping frontend build smoke"
+        summary_row WARN frontend-build "no node binary"
+        return 0
+    fi
+    # Run typecheck and build separately so we know which one tripped.
+    if (cd frontend && PATH="$node_bin:$PATH" npm run --silent typecheck 2>&1 | tail -8); then
+        log_ok "tsc --noEmit clean"
+    else
+        log_warn "tsc --noEmit reported errors (continuing)"
+        summary_row WARN frontend-build "tsc errors"
+        return 0
+    fi
+    if (cd frontend && PATH="$node_bin:$PATH" npm run --silent build 2>&1 | tail -8); then
+        log_ok "vite build succeeded"
+        summary_row OK frontend-build "tsc + vite build green"
+    else
+        log_err "vite build failed"
+        summary_row FAIL frontend-build "vite build failed"
+    fi
+}
+
+# --------------------------- step: backend smoke -----------------------------
+
+step_backend_smoke() {
+    [[ $DO_BACKEND_SMOKE -eq 1 ]] || { log_skip "backend smoke (--skip-backend-smoke)"; return 0; }
+    [[ -x .venv/bin/uvicorn ]] || .venv/bin/python -m pip install --quiet uvicorn 2>&1 | tail -3 || true
+    if ! .venv/bin/python -c 'import uvicorn' 2>/dev/null; then
+        log_skip "uvicorn not installed — skipping backend smoke"
+        return 0
+    fi
+    if ! have_cmd curl; then
+        log_skip "curl not installed — skipping backend smoke"
+        return 0
+    fi
+    log_step "Backend smoke (uvicorn /health)"
+    local pidfile log
+    pidfile="$(mktemp)"
+    log="$(mktemp)"
+    # Boot uvicorn in background; allow it 10s to come up; curl /health.
+    (
+        cd "$REPO_ROOT"
+        nohup .venv/bin/python -m uvicorn services.api.main:app --host 127.0.0.1 --port 18000 \
+            >"$log" 2>&1 &
+        echo $! >"$pidfile"
+    )
+    local pid budget=10 elapsed=0 ok=0
+    pid="$(cat "$pidfile")"
+    while (( elapsed < budget )); do
+        if curl -fsS --max-time 2 http://127.0.0.1:18000/health >/dev/null 2>&1; then
+            ok=1; break
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$pidfile" "$log"
+    if (( ok == 1 )); then
+        log_ok "uvicorn /health returned 200 within ${elapsed}s"
+        summary_row OK backend-smoke "uvicorn /health 200 in ${elapsed}s"
+    else
+        log_warn "uvicorn /health did not return 200 within ${budget}s"
+        summary_row WARN backend-smoke "no /health 200 in ${budget}s"
     fi
 }
 
@@ -476,6 +706,8 @@ step_compose_up
 step_alembic
 step_validate_env
 step_backend_tests
+step_frontend_build
+step_backend_smoke
 
 summary_print
 if summary_has_failures; then
@@ -483,4 +715,18 @@ if summary_has_failures; then
     exit 2
 fi
 log_ok "bootstrap complete"
+
+cat <<'NEXT'
+
+What's next:
+  • API:        http://localhost:8000  (docs: /docs)
+  • Frontend:   cd frontend && npm run dev   → http://localhost:5173
+  • Verify:     make verify
+  • Re-validate creds:  make validate-env
+  • Re-run bootstrap:   ./scripts/bootstrap.sh        (idempotent)
+  • Reset .env:         ./scripts/bootstrap.sh --reset-env
+
+Production install path is unchanged:
+  sudo bash install.sh    (full Docker/systemd/Keycloak/nginx stack)
+NEXT
 exit 0

@@ -54,8 +54,14 @@ def ve(monkeypatch):
         "KEYCLOAK_URL",
         "KEYCLOAK_REALM",
         "VITE_OIDC_AUTHORITY",
+        "KEYCLOAK_VALIDATE_BUDGET_SECONDS",
         "JWT_SECRET_KEY",
         "CELERY_BROKER_URL",
+        "SECRET_PROVIDER",
+        "AZURE_KEYVAULT_URL",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "ALLOWED_EXECUTION_MODES",
+        "ENVIRONMENT",
     ):
         monkeypatch.delenv(var, raising=False)
     return _load_module()
@@ -118,6 +124,15 @@ class TestSkipPaths:
     def test_celery_skips_without_broker_url(self, ve):
         assert ve.check_celery_broker().status == "SKIP"
 
+    def test_azure_keyvault_skips_unless_provider_azure(self, ve):
+        assert ve.check_azure_keyvault().status == "SKIP"
+
+    def test_otel_skips_without_endpoint(self, ve):
+        assert ve.check_otel_endpoint().status == "SKIP"
+
+    def test_exec_modes_skips_when_unset(self, ve):
+        assert ve.check_execution_modes().status == "SKIP"
+
 
 class TestJwtSecret:
     def test_too_short_secret_fails(self, ve, monkeypatch):
@@ -143,6 +158,64 @@ class TestCeleryBroker:
         assert ve.check_celery_broker().status == "PASS"
 
 
+class TestAzureKeyvault:
+    def test_provider_azure_without_url_fails(self, ve, monkeypatch):
+        monkeypatch.setenv("SECRET_PROVIDER", "azure")
+        result = ve.check_azure_keyvault()
+        assert result.status == "FAIL"
+        assert "AZURE_KEYVAULT_URL" in result.detail
+
+    def test_unparseable_url_fails(self, ve, monkeypatch):
+        monkeypatch.setenv("SECRET_PROVIDER", "azure")
+        monkeypatch.setenv("AZURE_KEYVAULT_URL", "not-a-url")
+        assert ve.check_azure_keyvault().status == "FAIL"
+
+    def test_unresolvable_host_fails(self, ve, monkeypatch):
+        monkeypatch.setenv("SECRET_PROVIDER", "azure")
+        monkeypatch.setenv(
+            "AZURE_KEYVAULT_URL",
+            "https://this-host-does-not-exist-fxlab-test.invalid",
+        )
+        assert ve.check_azure_keyvault().status == "FAIL"
+
+
+class TestOtelExporter:
+    def test_unparseable_fails(self, ve, monkeypatch):
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "no-scheme")
+        assert ve.check_otel_endpoint().status == "FAIL"
+
+    def test_unresolvable_warns(self, ve, monkeypatch):
+        monkeypatch.setenv(
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "http://this-otel-endpoint-does-not-exist.invalid:4317",
+        )
+        # WARN, not FAIL — tracing is best-effort, not load-bearing.
+        assert ve.check_otel_endpoint().status == "WARN"
+
+
+class TestExecutionModes:
+    def test_unknown_mode_fails(self, ve, monkeypatch):
+        monkeypatch.setenv("ALLOWED_EXECUTION_MODES", "shadow,paper,turbo")
+        assert ve.check_execution_modes().status == "FAIL"
+
+    def test_live_in_dev_warns(self, ve, monkeypatch):
+        monkeypatch.setenv("ALLOWED_EXECUTION_MODES", "shadow,paper,live")
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        result = ve.check_execution_modes()
+        assert result.status == "WARN"
+        assert "live" in result.detail.lower()
+
+    def test_live_in_production_passes(self, ve, monkeypatch):
+        monkeypatch.setenv("ALLOWED_EXECUTION_MODES", "shadow,paper,live")
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        assert ve.check_execution_modes().status == "PASS"
+
+    def test_safe_modes_in_dev_pass(self, ve, monkeypatch):
+        monkeypatch.setenv("ALLOWED_EXECUTION_MODES", "shadow,paper")
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        assert ve.check_execution_modes().status == "PASS"
+
+
 class TestRunChecks:
     def test_returns_one_result_per_check(self, ve):
         results = ve.run_checks()
@@ -157,6 +230,16 @@ class TestMainExitCodes:
     def test_one_fail_returns_1(self, ve, monkeypatch):
         monkeypatch.setenv("JWT_SECRET_KEY", "short")  # forces FAIL
         assert ve.main() == 1
+
+    def test_warn_returns_3(self, ve, monkeypatch):
+        # Live execution mode in development is a WARN
+        monkeypatch.setenv("ALLOWED_EXECUTION_MODES", "shadow,paper,live")
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        # All other checks SKIP — but WARN takes precedence over SKIP
+        # because operators need to see configuration warnings even when
+        # services aren't probeable.
+        with patch.object(ve, "CHECKS", [ve.check_execution_modes]):
+            assert ve.main() == 3
 
     def test_all_pass_returns_0(self, ve, monkeypatch):
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 64)
