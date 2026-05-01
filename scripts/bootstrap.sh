@@ -44,7 +44,14 @@
 #                    project directory. OFF by default; opt-in only.
 #   --reset-env      Regenerate .env from .env.example with fresh secrets,
 #                    archiving the existing .env to .archive/<UTC>/.env first.
-#   --skip-tests     Skip the pytest gate (useful on slow machines or CI shards).
+#   --skip-tests     Skip the pytest gate (hard skip — useful on slow
+#                    machines or CI shards). Compare with --force-tests.
+#   --force-tests    Force the pytest gate even when the workspace
+#                    fingerprint matches the last green run. By default
+#                    bootstrap skips pytest when nothing has changed since
+#                    the last passing run (HEAD, working-tree diff, and
+#                    untracked files all identical). Use this flag to
+#                    re-run the gate explicitly.
 #   --skip-frontend-build  Skip the frontend `npm run build` smoke test.
 #   --skip-backend-smoke   Skip the uvicorn /health smoke test.
 #   --no-keycloak    Skip the keycloak compose service + realm init step.
@@ -71,6 +78,7 @@ source "$SCRIPT_DIR/_lib.sh"
 
 DO_DOCKER=1
 DO_TESTS=1
+FORCE_TESTS=0
 DO_FRONTEND_BUILD=1
 DO_BACKEND_SMOKE=1
 DO_KEYCLOAK=1
@@ -92,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --evict-conflicts)      EVICT_CONFLICTS=1 ;;
         --reset-env)            RESET_ENV=1 ;;
         --skip-tests)           DO_TESTS=0 ;;
+        --force-tests)          FORCE_TESTS=1 ;;
         --skip-frontend-build)  DO_FRONTEND_BUILD=0 ;;
         --skip-backend-smoke)   DO_BACKEND_SMOKE=0 ;;
         --no-keycloak)          DO_KEYCLOAK=0 ;;
@@ -1074,8 +1083,75 @@ step_validate_env() {
 
 # --------------------------- step: pytest ------------------------------------
 
+_test_gate_stamp_path() {
+    # Per-clone, auto-ignored, never committed. Lives inside .git so it
+    # cannot pollute the working tree fingerprint we are about to compute.
+    printf '%s/.git/fxlab-bootstrap-tests.stamp' "$REPO_ROOT"
+}
+
+# Cross-platform sha256 wrapper. Prefer sha256sum (Linux); fall back to
+# `shasum -a 256` (macOS). Reads from stdin, prints hex digest only.
+_sha256_stdin() {
+    if have_cmd sha256sum; then
+        sha256sum | awk '{print $1}'
+    elif have_cmd shasum; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        # No hash tool — disable the smart skip by emitting a unique-per-call
+        # token, forcing the gate to always run.
+        printf 'no-sha256-%s' "$(date +%s%N)"
+    fi
+}
+
+# Workspace fingerprint = HEAD SHA + diff vs HEAD + every untracked file's
+# content. Captures every signal that could affect a unit-test outcome:
+# new commits, staged/unstaged edits, new untracked source/test files.
+# Dep-lock files (requirements.txt, pyproject.toml, frontend/package-lock.json)
+# and alembic migrations are tracked, so changes to them already surface
+# via the HEAD/diff component — no special-casing needed.
+_test_gate_fingerprint() {
+    {
+        printf 'head=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo no-head)"
+        # NOTE: format strings with a leading `--` are parsed by bash's
+        # builtin printf as end-of-options, so use `%s\n` indirection for
+        # the section separators instead of `printf '---diff---\n'`.
+        printf '%s\n' '---diff---'
+        git -C "$REPO_ROOT" diff HEAD --no-color 2>/dev/null || true
+        printf '%s\n' '---untracked---'
+        # Stream NUL-delimited list of untracked, non-ignored files
+        # directly into xargs so embedded NULs aren't stripped (which
+        # `$(git ls-files ... -z)` would do via command-substitution).
+        # Hash their content so a freshly-added test file invalidates
+        # the cache.
+        git -C "$REPO_ROOT" ls-files --others --exclude-standard -z 2>/dev/null \
+            | xargs -0 -I{} sh -c 'printf "%s:" "$1"; cat -- "$1" 2>/dev/null || true; printf "\n"' _ {}
+    } | _sha256_stdin
+}
+
+_test_gate_should_skip() {
+    [[ $FORCE_TESTS -eq 0 ]] || return 1
+    local stamp
+    stamp="$(_test_gate_stamp_path)"
+    [[ -f "$stamp" ]] || return 1
+    local current saved
+    current="$(_test_gate_fingerprint)"
+    saved="$(cat "$stamp" 2>/dev/null || true)"
+    [[ -n "$current" && "$current" == "$saved" ]]
+}
+
+_test_gate_record_pass() {
+    local stamp
+    stamp="$(_test_gate_stamp_path)"
+    _test_gate_fingerprint > "$stamp" 2>/dev/null || true
+}
+
 step_backend_tests() {
     [[ $DO_TESTS -eq 1 ]] || { log_skip "backend pytest (--skip-tests)"; return 0; }
+    if _test_gate_should_skip; then
+        log_skip "backend pytest (workspace fingerprint matches last green run; --force-tests to override)"
+        summary_row OK pytest "skipped — no source changes since last green run"
+        return 0
+    fi
     log_step "Backend tests (pytest — unit only)"
     # Bootstrap's pytest gate is a smoke check: "do unit tests pass after
     # this dev install?" — NOT a full CI run. Scope to tests/unit/ so that
@@ -1096,6 +1172,10 @@ step_backend_tests() {
     if .venv/bin/python -m pytest "${pytest_args[@]}" 2>&1 | tee /tmp/fxlab_pytest.out | tail -3 | grep -qE '^=+ [0-9]+ passed'; then
         log_ok "$(tail -1 /tmp/fxlab_pytest.out)"
         summary_row OK pytest "$(tail -1 /tmp/fxlab_pytest.out | tr -s ' ')"
+        # Record the workspace fingerprint so the next bootstrap can skip
+        # the gate when nothing has changed. Only on green — a failed run
+        # leaves any previous stamp stale, so the next run re-tries.
+        _test_gate_record_pass
     else
         log_err "pytest reported failures (full log: /tmp/fxlab_pytest.out)"
         # Show the failure summary section so the operator sees what broke
