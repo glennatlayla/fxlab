@@ -385,6 +385,8 @@ readonly REQUIRED_DOTENV_KEYS=(
     KEYCLOAK_REALM
     KEYCLOAK_CLIENT_ID
     KEYCLOAK_ADMIN
+    FXLAB_ADMIN_EMAIL
+    FXLAB_ADMIN_PASSWORD
 )
 
 # Returns 0 when the given KEY is present and uncommented in .env, 1 otherwise.
@@ -492,6 +494,26 @@ step_dotenv() {
             _upsert_env KEYCLOAK_ADMIN_CLIENT_SECRET "$secret_kc_api"
         else
             log_warn "could not generate KEYCLOAK_ADMIN_CLIENT_SECRET"
+        fi
+    fi
+
+    # FXLab realm admin user. setup-realm.sh provisions this user in Keycloak
+    # with the password set TEMPORARY (forces change on first login). We
+    # default the email to the operator's git identity when available — that
+    # gets a real address into the realm rather than admin@fxlab.local.
+    if ! _key_present_in_env FXLAB_ADMIN_EMAIL; then
+        local default_email
+        default_email="$(git config user.email 2>/dev/null || true)"
+        [[ -n "$default_email" ]] || default_email="admin@fxlab.local"
+        _upsert_env FXLAB_ADMIN_EMAIL "$default_email"
+    fi
+    if ! _key_present_in_env FXLAB_ADMIN_PASSWORD; then
+        local secret_admin_pwd
+        secret_admin_pwd="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(18))' 2>/dev/null || true)"
+        if [[ -n "${secret_admin_pwd:-}" ]]; then
+            _upsert_env FXLAB_ADMIN_PASSWORD "$secret_admin_pwd"
+        else
+            log_warn "could not generate FXLAB_ADMIN_PASSWORD"
         fi
     fi
 
@@ -905,13 +927,15 @@ step_keycloak_realm_init() {
         return 0
     fi
 
-    log_step "Keycloak realm setup (fxlab-api client secret)"
+    log_step "Keycloak realm setup (fxlab-api client secret + admin user)"
 
-    local kc_url kc_admin kc_admin_pwd kc_api_secret
+    local kc_url kc_admin kc_admin_pwd kc_api_secret fxlab_admin_email fxlab_admin_pwd
     kc_url="$(_read_env_value KEYCLOAK_URL)"
     kc_admin="$(_read_env_value KEYCLOAK_ADMIN)"
     kc_admin_pwd="$(_read_env_value KEYCLOAK_ADMIN_PASSWORD)"
     kc_api_secret="$(_read_env_value KEYCLOAK_ADMIN_CLIENT_SECRET)"
+    fxlab_admin_email="$(_read_env_value FXLAB_ADMIN_EMAIL)"
+    fxlab_admin_pwd="$(_read_env_value FXLAB_ADMIN_PASSWORD)"
 
     if [[ -z "$kc_url" || -z "$kc_admin" || -z "$kc_admin_pwd" || -z "$kc_api_secret" ]]; then
         log_warn "keycloak-realm: KEYCLOAK_URL/ADMIN/ADMIN_PASSWORD/ADMIN_CLIENT_SECRET missing in .env"
@@ -941,17 +965,51 @@ step_keycloak_realm_init() {
     fi
     log_ok "keycloak admin endpoint reachable after ${elapsed}s"
 
-    # Run setup-realm.sh; it sets the fxlab-api client secret to match.
+    # Run setup-realm.sh; it sets the fxlab-api client secret AND provisions
+    # the FXLab realm admin user (with the password marked temporary so the
+    # operator must change it on first login). Capture stdout to /tmp so we
+    # can detect whether the admin user was newly created vs. already
+    # present, and print the credentials accordingly.
+    local realm_out
+    realm_out="$(mktemp)"
     if KEYCLOAK_URL="$kc_url" \
        KEYCLOAK_ADMIN="$kc_admin" \
        KEYCLOAK_ADMIN_PASSWORD="$kc_admin_pwd" \
        KEYCLOAK_API_CLIENT_SECRET="$kc_api_secret" \
-       bash config/keycloak/setup-realm.sh 2>&1 | sed 's/^/    /'; then
+       FXLAB_ADMIN_EMAIL="$fxlab_admin_email" \
+       FXLAB_ADMIN_PASSWORD="$fxlab_admin_pwd" \
+       bash config/keycloak/setup-realm.sh 2>&1 | tee "$realm_out" | sed 's/^/    /'; then
         log_ok "keycloak realm setup complete (fxlab-api client secret synced)"
-        summary_row OK keycloak-realm "client secret synced"
+
+        # Surface admin-user state so the operator knows what creds to use.
+        # setup-realm.sh prints "Admin user created" on first run and
+        # "already exists, skipping" on subsequent runs.
+        if grep -q "Admin user created" "$realm_out" 2>/dev/null; then
+            cat <<EOF
+
+  ${_CLR_BOLD}╭───────────────────────────────────────────────────────────────╮${_CLR_RESET}
+  ${_CLR_BOLD}│  FXLab admin user — first-login credentials                   │${_CLR_RESET}
+  ${_CLR_BOLD}│                                                               │${_CLR_RESET}
+  ${_CLR_BOLD}│    Email:    ${_CLR_RESET}${fxlab_admin_email}
+  ${_CLR_BOLD}│    Password: ${_CLR_RESET}${fxlab_admin_pwd}
+  ${_CLR_BOLD}│                                                               │${_CLR_RESET}
+  ${_CLR_BOLD}│  Password is TEMPORARY — Keycloak forces a change on first    │${_CLR_RESET}
+  ${_CLR_BOLD}│  login. Both values live in .env (chmod 600, gitignored).     │${_CLR_RESET}
+  ${_CLR_BOLD}╰───────────────────────────────────────────────────────────────╯${_CLR_RESET}
+
+EOF
+            summary_row OK keycloak-realm "client secret synced + admin user created"
+        elif grep -q "already exists, skipping" "$realm_out" 2>/dev/null; then
+            log_info "admin user '${fxlab_admin_email}' already exists in Keycloak (use existing password)"
+            summary_row OK keycloak-realm "client secret synced; admin user already exists"
+        else
+            summary_row OK keycloak-realm "client secret synced"
+        fi
+        rm -f "$realm_out"
     else
         log_err "keycloak realm setup failed"
         summary_row FAIL keycloak-realm "setup-realm.sh exited non-zero"
+        rm -f "$realm_out"
     fi
 }
 
