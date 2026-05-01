@@ -1168,6 +1168,17 @@ step_backend_smoke() {
     # silently deleting it.
     (
         cd "$REPO_ROOT"
+        # Load .env so the uvicorn child process sees JWT_SECRET_KEY,
+        # DATABASE_URL, etc. The validate-env step parses .env directly,
+        # but the smoke must export those vars into the uvicorn process
+        # environment because services/api/main.py:_validate_startup_secrets
+        # reads from os.environ.
+        if [[ -f .env ]]; then
+            set -a
+            # shellcheck disable=SC1091
+            source .env
+            set +a
+        fi
         nohup .venv/bin/python -m uvicorn services.api.main:app --host 127.0.0.1 --port 18000 \
             >"$log" 2>&1 &
         echo $! >"$pidfile"
