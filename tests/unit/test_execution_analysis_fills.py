@@ -69,11 +69,19 @@ def _seed_order(
     order_repo: MockOrderRepository,
     order_id: str = _ORDER_ID_1,
     status: str = "filled",
+    submitted_at: str | None = None,
 ) -> None:
     """Seed an order record in the mock repository.
 
     Patches filled_quantity to "0" (instead of None) so that
     Decimal conversion in get_order_history does not raise.
+
+    If *submitted_at* is provided, it overrides the seeded order's
+    submitted_at field — required by date-range-filtered tests
+    (e.g. get_execution_report). Without it, MockOrderRepository.seed()
+    leaves submitted_at=None and the service falls through to the
+    real-clock created_at, making the test pass or fail based on the
+    calendar month at run time.
     """
     order_repo.seed(
         order_id=order_id,
@@ -91,6 +99,8 @@ def _seed_order(
     # Patch nullable Decimal fields that the service casts via Decimal()
     order_repo._store[order_id]["filled_quantity"] = "0"
     order_repo._store[order_id]["order_id"] = order_id
+    if submitted_at is not None:
+        order_repo._store[order_id]["submitted_at"] = submitted_at
 
 
 def _make_service(
@@ -246,7 +256,7 @@ class TestExecutionReportFills:
         fill_repo = MockOrderFillRepository()
 
         _seed_deployment(dep_repo)
-        _seed_order(order_repo, _ORDER_ID_1, status="filled")
+        _seed_order(order_repo, _ORDER_ID_1, status="filled", submitted_at=_FILLED_AT)
         fill_repo.seed(
             order_id=_ORDER_ID_1,
             fill_id="fill-exec-001",
@@ -272,7 +282,7 @@ class TestExecutionReportFills:
         order_repo = MockOrderRepository()
 
         _seed_deployment(dep_repo)
-        _seed_order(order_repo, _ORDER_ID_1, status="filled")
+        _seed_order(order_repo, _ORDER_ID_1, status="filled", submitted_at=_FILLED_AT)
 
         service = _make_service(dep_repo, order_repo, order_fill_repo=None)
         report = service.get_execution_report(
