@@ -73,6 +73,56 @@ fingerprint_files() {
     } | _sha256_stdin
 }
 
+# Hash everything that can affect unit-test outcomes — and nothing else.
+#
+# This deliberately does NOT call fingerprint_workspace (which hashes
+# HEAD + every diff + every untracked file). The whole-workspace hash
+# is too broad: a commit that only touches scripts/, docs/, or
+# .archive/ would invalidate the tests stamp even though the unit
+# tests themselves are byte-identical and would produce the same
+# result. That made every tooling change pay a 20-minute pytest cost
+# for no value.
+#
+# Inputs the unit-test outcome actually depends on:
+#   - Python source under libs/ and services/ (tests import these).
+#   - Test code itself (tests/unit/, tests/conftest.py, fixtures).
+#   - Dep lockfiles (requirements*.txt, pyproject.toml).
+#   - Pytest config (pytest.ini, .coveragerc).
+#   - Alembic migrations (ORM models / schema state).
+#   - Untracked .py files in libs/services/tests (newly added but not
+#     yet committed test files must invalidate so the developer can
+#     verify them).
+#
+# Anything else — scripts/, docs/, frontend/, .archive/, README — is
+# excluded by design. If a future change in one of those paths COULD
+# affect tests (e.g. a CI script that bakes in a constant), add it
+# here explicitly.
+fingerprint_test_inputs() {
+    {
+        fingerprint_globs \
+            'libs/**/*.py' 'services/**/*.py' \
+            'tests/unit/**/*.py' 'tests/conftest.py' \
+            'tests/fixtures/**/*.py' 'tests/factories/**/*.py'
+        fingerprint_files \
+            requirements.txt requirements-dev.txt pyproject.toml \
+            pytest.ini .coveragerc
+        fingerprint_globs 'alembic/versions/*.py'
+        # Untracked .py files inside the test-relevant trees only.
+        # Avoids invalidating on operator scratch files like c.sh at
+        # the repo root.
+        git -C "$REPO_ROOT" ls-files --others --exclude-standard -z -- \
+                libs/ services/ tests/ 2>/dev/null \
+            | xargs -0 -I{} sh -c '
+                case "$1" in
+                    *.py)
+                        printf "%s:" "$1"
+                        cat -- "$1" 2>/dev/null || true
+                        printf "\n"
+                        ;;
+                esac' _ {}
+    } | _sha256_stdin
+}
+
 # Hash a list of file globs. Like fingerprint_files but the input is
 # bash globs (e.g. 'alembic/versions/*.py') that get expanded and
 # fingerprinted in sorted order. Missing globs (no matches) contribute
@@ -81,11 +131,15 @@ fingerprint_globs() {
     local glob
     local matches=()
     for glob in "$@"; do
-        # Use a subshell + nullglob so unmatched globs disappear instead
-        # of becoming literal strings.
+        # Use a subshell + nullglob so unmatched globs disappear
+        # instead of becoming literal strings, and globstar so `**`
+        # actually recurses (without it, bash silently treats `**` as
+        # `*` which matches only one directory level — that bug
+        # silently made fingerprint_test_inputs miss every libs/sub/
+        # and services/sub/ Python file).
         local expanded
-        # shellcheck disable=SC2207  # nullglob expansion intentional
-        expanded=( $(shopt -s nullglob; echo $glob) )
+        # shellcheck disable=SC2207  # null/globstar expansion intentional
+        expanded=( $(shopt -s nullglob globstar; echo $glob) )
         if (( ${#expanded[@]} == 0 )); then
             matches+=("__no-match__:$glob")
         else

@@ -61,6 +61,61 @@ fp_clean="$(fingerprint_workspace)"
 pass "fingerprint_workspace tracks tracked-file edits + revert"
 
 # ---------------------------------------------------------------------------
+# fingerprint_test_inputs is scoped — tooling/doc edits MUST NOT
+# invalidate it, but Python source / test / deps changes MUST.
+# This is the contract the user identified as a real bug: every
+# bootstrap.sh edit forced a 20-minute pytest re-run.
+# ---------------------------------------------------------------------------
+
+ti1="$(fingerprint_test_inputs)"
+ti2="$(fingerprint_test_inputs)"
+[[ "$ti1" == "$ti2" ]] || fail "fingerprint_test_inputs not stable: $ti1 vs $ti2"
+pass "fingerprint_test_inputs stable across consecutive calls"
+
+# Editing scripts/bootstrap.sh — a tooling-only file — must NOT
+# invalidate the test fingerprint. This is the regression test for
+# the user-identified bug.
+BOOTSTRAP_SH="$REPO_ROOT/scripts/bootstrap.sh"
+echo "# tooling-only marker $$" >> "$BOOTSTRAP_SH"
+ti_after_tooling="$(fingerprint_test_inputs)"
+git -C "$REPO_ROOT" checkout -- scripts/bootstrap.sh
+[[ "$ti_after_tooling" == "$ti1" ]] \
+    || fail "fingerprint_test_inputs changed when scripts/bootstrap.sh was edited (must not — tooling-only)"
+pass "fingerprint_test_inputs is NOT invalidated by scripts/ edits (tooling-only)"
+
+# Editing README.md (docs) — must NOT invalidate.
+echo "# docs marker $$" >> "$REPO_ROOT/README.md"
+ti_after_docs="$(fingerprint_test_inputs)"
+git -C "$REPO_ROOT" checkout -- README.md
+[[ "$ti_after_docs" == "$ti1" ]] \
+    || fail "fingerprint_test_inputs changed when README.md was edited (must not — docs)"
+pass "fingerprint_test_inputs is NOT invalidated by docs edits"
+
+# Editing a Python file under libs/ MUST invalidate. Pick the first
+# .py file we find under libs/ to keep this resilient to refactors.
+LIBS_PY="$(git -C "$REPO_ROOT" ls-files 'libs/*.py' 2>/dev/null | head -1)"
+if [[ -n "$LIBS_PY" ]]; then
+    echo "# python source marker $$" >> "$REPO_ROOT/$LIBS_PY"
+    ti_after_libs="$(fingerprint_test_inputs)"
+    git -C "$REPO_ROOT" checkout -- "$LIBS_PY"
+    [[ "$ti_after_libs" != "$ti1" ]] \
+        || fail "fingerprint_test_inputs did NOT change when libs/ Python source was edited"
+    pass "fingerprint_test_inputs IS invalidated by libs/*.py edits"
+fi
+
+# Editing requirements.txt MUST invalidate (tests can break when
+# pinned versions move).
+REQ="$REPO_ROOT/requirements.txt"
+if [[ -f "$REQ" ]]; then
+    echo "# req marker $$" >> "$REQ"
+    ti_after_req="$(fingerprint_test_inputs)"
+    git -C "$REPO_ROOT" checkout -- requirements.txt
+    [[ "$ti_after_req" != "$ti1" ]] \
+        || fail "fingerprint_test_inputs did NOT change when requirements.txt was edited"
+    pass "fingerprint_test_inputs IS invalidated by requirements.txt edits"
+fi
+
+# ---------------------------------------------------------------------------
 # fingerprint_files: present vs absent vs content change
 # ---------------------------------------------------------------------------
 

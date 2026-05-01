@@ -209,12 +209,16 @@ fi
 # the migration that step_backend_tests does).
 stamp_migrate_legacy "$REPO_ROOT/.git/fxlab-bootstrap-tests.stamp" "tests"
 
-# tests stamp — workspace fingerprint
-fp="$(fingerprint_workspace)"
+# tests stamp — must use the SAME scoped fingerprint that
+# step_backend_tests writes (libs/services/tests source + deps +
+# pytest config + alembic migrations). Using the broader
+# fingerprint_workspace here would treat every tooling-only commit
+# as test-invalidating.
+fp="$(fingerprint_test_inputs)"
 if stamp_matches tests "$fp"; then
     mark_pass "tests stamp current"
 else
-    mark_refresh "tests stamp stale (source changes since last green pytest run)"
+    mark_refresh "tests stamp stale (Python source/test/deps changed since last green pytest run)"
 fi
 
 # deps stamp — make bootstrap inputs
