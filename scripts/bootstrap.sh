@@ -481,6 +481,77 @@ step_dotenv() {
 COMPOSE_PG_UP=0
 COMPOSE_REDIS_UP=0
 
+# Temporary docker-compose override file. Generated lazily when a port
+# remap is needed to coexist with another stack on this host. Cleaned up
+# via the EXIT trap below.
+COMPOSE_OVERRIDE_FILE=""
+
+_cleanup_compose_override() {
+    [[ -n "$COMPOSE_OVERRIDE_FILE" && -f "$COMPOSE_OVERRIDE_FILE" ]] && rm -f "$COMPOSE_OVERRIDE_FILE"
+}
+trap _cleanup_compose_override EXIT
+
+# Find an available TCP port starting at $1, incrementing up to $2
+# (default 100) attempts. Echoes the port; returns 1 if none free.
+_pick_free_port() {
+    local p="$1" tries="${2:-100}" attempt=0
+    while (( attempt < tries )); do
+        if ! _port_in_use "$p"; then echo "$p"; return 0; fi
+        p=$((p + 1))
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+# Lazily create the compose override file with the standard YAML header.
+_ensure_override_file() {
+    if [[ -z "$COMPOSE_OVERRIDE_FILE" ]]; then
+        COMPOSE_OVERRIDE_FILE="$(mktemp -t fxlab-compose-override.XXXXXX.yml)"
+        printf 'services:\n' >"$COMPOSE_OVERRIDE_FILE"
+    fi
+}
+
+# Append a single ports remap (host:container) to the override file.
+_add_port_override() {
+    local svc="$1" external="$2" internal="$3"
+    _ensure_override_file
+    cat >>"$COMPOSE_OVERRIDE_FILE" <<EOF
+  ${svc}:
+    ports:
+      - "${external}:${internal}"
+EOF
+    log_info "compose override: ${svc} → ${external}:${internal}  (file: $COMPOSE_OVERRIDE_FILE)"
+}
+
+# Run docker compose with the override file chained in when it exists.
+# The DOCKER_COMPOSE variable holds either "docker compose" or "docker-compose".
+_compose() {
+    if [[ -n "$COMPOSE_OVERRIDE_FILE" && -f "$COMPOSE_OVERRIDE_FILE" ]]; then
+        $DOCKER_COMPOSE -f docker-compose.yml -f "$COMPOSE_OVERRIDE_FILE" "$@"
+    else
+        $DOCKER_COMPOSE "$@"
+    fi
+}
+
+# Update .env's postgres-related connection vars to use a non-default port.
+_remap_dotenv_postgres_port() {
+    local new_port="$1"
+    [[ -f .env ]] || return 0
+    # POSTGRES_PORT and the port segment inside DATABASE_URL.
+    sed -i.bak -E "s|^([[:space:]]*)POSTGRES_PORT=.*|\\1POSTGRES_PORT=${new_port}|" .env
+    sed -i.bak -E "s|^([[:space:]]*DATABASE_URL=postgresql://[^:]+:[^@]+@[^:]+):[0-9]+(/.*)|\\1:${new_port}\\2|" .env
+    rm -f .env.bak
+}
+
+_remap_dotenv_redis_port() {
+    local new_port="$1"
+    [[ -f .env ]] || return 0
+    sed -i.bak -E "s|^([[:space:]]*)REDIS_PORT=.*|\\1REDIS_PORT=${new_port}|" .env
+    sed -i.bak -E "s|^([[:space:]]*REDIS_URL=redis://[^:]+):[0-9]+(/.*)|\\1:${new_port}\\2|" .env
+    sed -i.bak -E "s|^([[:space:]]*CELERY_BROKER_URL=redis://[^:]+):[0-9]+(/.*)|\\1:${new_port}\\2|" .env
+    rm -f .env.bak
+}
+
 # Identify what's holding a TCP port: another Docker container (return its
 # name), a SystemD-managed daemon (return its unit name), or just a PID +
 # binary name. Echoes a single human-readable string; never errors.
@@ -576,32 +647,54 @@ _evict_container_holder() {
 # the named flag variable to 1 on success. Returns 0 always (the caller
 # decides whether a missed service is fatal).
 _compose_up_one() {
-    local svc="$1" flag_var="$2" port="$3"
+    local svc="$1" flag_var="$2" port="$3" remap_dotenv_fn="${4:-}"
     local existing
     existing="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -x "fxlab-${svc}" || true)"
+    local effective_port="$port"
+
     if [[ -z "$existing" ]] && _port_in_use "$port"; then
         local holder
         holder="$(_identify_port_holder "$port")"
         log_warn "$svc: port $port in use by ${holder}"
+
         if [[ $EVICT_CONFLICTS -eq 1 ]] && _evict_container_holder "$holder"; then
-            # Eviction succeeded — fall through to the normal up path.
+            # Eviction succeeded — keep canonical port.
             :
         else
-            _suggest_port_fix "$svc" "$port" "$holder"
-            log_warn "  Or rerun with --evict-conflicts to stop+remove the conflicting container"
-            summary_row WARN "compose-${svc}" "port $port held by ${holder}"
-            return 0
+            # Coexistence path: pick a free alternate host port and add
+            # a compose override so our service is published there
+            # instead. Container-internal port stays 5432/6379, which is
+            # what the rest of our stack (api -> postgres on the
+            # docker network) uses, so api/keycloak don't need changes.
+            local alt
+            alt="$(_pick_free_port $((port + 1)))" || {
+                log_err "  no free port found near $port — cannot remap"
+                _suggest_port_fix "$svc" "$port" "$holder"
+                summary_row FAIL "compose-${svc}" "no free alt port near $port"
+                return 0
+            }
+            log_warn "  remapping host port: ${port} -> ${alt}  (foreign container preserved)"
+            log_warn "  rerun with --evict-conflicts to stop the conflicting container instead"
+            _add_port_override "$svc" "$alt" "$port"
+            effective_port="$alt"
+            # Update .env so DATABASE_URL / REDIS_URL / CELERY_BROKER_URL
+            # use the alt port from the host-side caller's perspective.
+            if [[ -n "$remap_dotenv_fn" ]] && declare -F "$remap_dotenv_fn" >/dev/null; then
+                "$remap_dotenv_fn" "$alt"
+                log_info "  updated .env: ${svc} URLs now use port ${alt}"
+            fi
         fi
     fi
-    if $DOCKER_COMPOSE up -d --wait "$svc" >/dev/null 2>&1; then
-        log_ok "compose ${svc} up + healthy"
-        summary_row OK "compose-${svc}" "up + healthy"
+
+    if _compose up -d --wait "$svc" >/dev/null 2>&1; then
+        log_ok "compose ${svc} up + healthy on host port ${effective_port}"
+        summary_row OK "compose-${svc}" "up + healthy (host port ${effective_port})"
         eval "$flag_var=1"
         return 0
     fi
     # Older compose plugins don't support --wait. Fall back to detached
     # up + healthcheck poll loop (60s budget, 3s cadence).
-    if ! $DOCKER_COMPOSE up -d "$svc" 2>&1 | tail -3; then
+    if ! _compose up -d "$svc" 2>&1 | tail -3; then
         log_err "compose up ${svc} failed"
         summary_row FAIL "compose-${svc}" "up failed"
         return 0
@@ -609,12 +702,12 @@ _compose_up_one() {
     local budget=60 elapsed=0 cid status
     log_info "$svc: polling healthcheck (budget ${budget}s)"
     while (( elapsed < budget )); do
-        cid="$($DOCKER_COMPOSE ps -q "$svc" 2>/dev/null | head -1)"
+        cid="$(_compose ps -q "$svc" 2>/dev/null | head -1)"
         if [[ -n "$cid" ]]; then
             status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
             if [[ "$status" == "healthy" ]]; then
-                log_ok "compose ${svc} healthy after ${elapsed}s (polled)"
-                summary_row OK "compose-${svc}" "up + healthy (polled)"
+                log_ok "compose ${svc} healthy after ${elapsed}s on host port ${effective_port} (polled)"
+                summary_row OK "compose-${svc}" "up + healthy (polled, host port ${effective_port})"
                 eval "$flag_var=1"
                 return 0
             fi
@@ -632,8 +725,8 @@ step_compose_up() {
     # NOT prevent the other from coming up. Downstream steps (alembic,
     # validator, dotenv) consult COMPOSE_PG_UP / COMPOSE_REDIS_UP to
     # decide whether to use that service or SKIP cleanly.
-    _compose_up_one postgres COMPOSE_PG_UP    5432
-    _compose_up_one redis    COMPOSE_REDIS_UP 6379
+    _compose_up_one postgres COMPOSE_PG_UP    5432  _remap_dotenv_postgres_port
+    _compose_up_one redis    COMPOSE_REDIS_UP 6379  _remap_dotenv_redis_port
 }
 
 # Comment out a key in .env so the validator SKIPs that probe instead of
