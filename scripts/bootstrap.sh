@@ -1018,21 +1018,31 @@ step_validate_env() {
 
 step_backend_tests() {
     [[ $DO_TESTS -eq 1 ]] || { log_skip "backend pytest (--skip-tests)"; return 0; }
-    log_step "Backend tests (pytest)"
-    # The docker-compose integration test and the npm-build test both
-    # depend on environments outside the container — deselect them so
-    # bootstrap pytest passes on hosts where docker or npm isn't ready.
-    # Real CI re-runs the full suite without these guards.
+    log_step "Backend tests (pytest — unit only)"
+    # Bootstrap's pytest gate is a smoke check: "do unit tests pass after
+    # this dev install?" — NOT a full CI run. Scope to tests/unit/ so that
+    # integration / acceptance / load suites (which depend on host clock,
+    # disk speed, real services beyond the dev compose stack, perf budgets,
+    # etc.) do not block dev-onboarding. CI runs `make test` for the full
+    # suite. The npm-build unit test is deselected because it shells out
+    # to the frontend build, which step_frontend_build already covers.
     local pytest_args=(
         -q --no-cov
-        --ignore=tests/integration/test_docker_compose_startup.py
+        tests/unit/
         --deselect=tests/unit/test_m0_frontend_structure.py::test_ac8_npm_build_succeeds
     )
-    if .venv/bin/python -m pytest "${pytest_args[@]}" 2>&1 | tail -3 | tee /tmp/fxlab_pytest.out | grep -qE '^=+ [0-9]+ passed'; then
+    # Capture the full pytest output to /tmp/fxlab_pytest.out so failures
+    # can be diagnosed. The tail-of-tail to grep keeps the success-detection
+    # logic narrow (only the summary line counts), but the log retains
+    # everything the operator needs to investigate.
+    if .venv/bin/python -m pytest "${pytest_args[@]}" 2>&1 | tee /tmp/fxlab_pytest.out | tail -3 | grep -qE '^=+ [0-9]+ passed'; then
         log_ok "$(tail -1 /tmp/fxlab_pytest.out)"
         summary_row OK pytest "$(tail -1 /tmp/fxlab_pytest.out | tr -s ' ')"
     else
-        log_err "pytest reported failures"
+        log_err "pytest reported failures (full log: /tmp/fxlab_pytest.out)"
+        # Show the failure summary section so the operator sees what broke
+        # without having to open the file.
+        grep -E '^FAILED |^=.*failed.*passed' /tmp/fxlab_pytest.out 2>/dev/null | head -20 | sed 's/^/    /'
         summary_row FAIL pytest "see /tmp/fxlab_pytest.out"
     fi
 }
@@ -1090,14 +1100,21 @@ step_backend_smoke() {
     local pidfile log
     pidfile="$(mktemp)"
     log="$(mktemp)"
-    # Boot uvicorn in background; allow it 10s to come up; curl /health.
+    # Boot uvicorn in background and poll /health. 30s budget covers
+    # cold Python imports, SQLAlchemy engine init, real-Postgres connect
+    # pool warmup, and the Keycloak-configured lifespan path. Earlier
+    # 10s budget was tight when the only DB was SQLite-in-tempfile;
+    # with real services in the loop, 30s is the realistic floor. If
+    # /health doesn't come up by then, the uvicorn log usually shows
+    # exactly why — we now print its tail on the warn path instead of
+    # silently deleting it.
     (
         cd "$REPO_ROOT"
         nohup .venv/bin/python -m uvicorn services.api.main:app --host 127.0.0.1 --port 18000 \
             >"$log" 2>&1 &
         echo $! >"$pidfile"
     )
-    local pid budget=10 elapsed=0 ok=0
+    local pid budget=30 elapsed=0 ok=0
     pid="$(cat "$pidfile")"
     while (( elapsed < budget )); do
         if curl -fsS --max-time 2 http://127.0.0.1:18000/health >/dev/null 2>&1; then
@@ -1108,13 +1125,16 @@ step_backend_smoke() {
     done
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    rm -f "$pidfile" "$log"
     if (( ok == 1 )); then
         log_ok "uvicorn /health returned 200 within ${elapsed}s"
         summary_row OK backend-smoke "uvicorn /health 200 in ${elapsed}s"
+        rm -f "$pidfile" "$log"
     else
         log_warn "uvicorn /health did not return 200 within ${budget}s"
+        log_warn "uvicorn log tail:"
+        tail -25 "$log" 2>/dev/null | sed 's/^/    /'
         summary_row WARN backend-smoke "no /health 200 in ${budget}s"
+        rm -f "$pidfile" "$log"
     fi
 }
 
