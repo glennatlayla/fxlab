@@ -472,6 +472,71 @@ step_dotenv() {
 COMPOSE_PG_UP=0
 COMPOSE_REDIS_UP=0
 
+# Identify what's holding a TCP port: another Docker container (return its
+# name), a SystemD-managed daemon (return its unit name), or just a PID +
+# binary name. Echoes a single human-readable string; never errors.
+_identify_port_holder() {
+    local port="$1"
+
+    # 1. Docker — fastest signal because we already have the daemon up.
+    if have_cmd docker; then
+        local cname
+        cname="$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null \
+                  | awk -F'\t' -v port=":$port->" '$2 ~ port { print $1; exit }')"
+        if [[ -n "$cname" ]]; then
+            echo "docker container: $cname"
+            return 0
+        fi
+    fi
+
+    # 2. ss → PID + comm. Requires elevated privs to see foreign PIDs but
+    #    works for the same-user case which is the common dev scenario.
+    if have_cmd ss; then
+        local proc
+        proc="$(ss -ltnp "( sport = :$port )" 2>/dev/null \
+                | awk 'NR>1 { print $NF; exit }')"
+        if [[ -n "$proc" && "$proc" != "-" ]]; then
+            # Format is users:(("comm",pid=N,fd=N))
+            echo "process: $proc"
+            return 0
+        fi
+    fi
+
+    # 3. lsof — slower but more permissive on macOS.
+    if have_cmd lsof; then
+        local cmd_pid
+        cmd_pid="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+                   | awk 'NR>1 { printf "%s (pid %s)", $1, $2; exit }')"
+        if [[ -n "$cmd_pid" ]]; then
+            echo "$cmd_pid"
+            return 0
+        fi
+    fi
+
+    echo "(holder unidentified)"
+}
+
+# Print actionable instructions for releasing a port held by either a
+# Docker container or a host process.
+_suggest_port_fix() {
+    local svc="$1" port="$2" holder="$3"
+    case "$holder" in
+        "docker container: "*)
+            local cname="${holder#docker container: }"
+            log_warn "  Stop the container: docker stop $cname"
+            log_warn "  Or remap our compose service to a different port (override docker-compose.yml)"
+            ;;
+        "process: "*)
+            log_warn "  Inspect: $holder"
+            log_warn "  If it's a SystemD daemon: sudo systemctl stop ${svc} (or postgresql / redis-server)"
+            ;;
+        *)
+            log_warn "  Identify with: sudo ss -ltnp '( sport = :$port )'"
+            log_warn "  Or: docker ps  (something else is bound to $port)"
+            ;;
+    esac
+}
+
 # Helper: bring up a single compose service, polling for healthy. Sets
 # the named flag variable to 1 on success. Returns 0 always (the caller
 # decides whether a missed service is fatal).
@@ -480,9 +545,11 @@ _compose_up_one() {
     local existing
     existing="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -x "fxlab-${svc}" || true)"
     if [[ -z "$existing" ]] && _port_in_use "$port"; then
-        log_warn "$svc: port $port in use by host service — skipping compose ${svc}"
-        log_warn "  Stop host service: sudo systemctl stop ${svc} (or postgresql / redis-server)"
-        summary_row WARN "compose-${svc}" "port $port in use on host"
+        local holder
+        holder="$(_identify_port_holder "$port")"
+        log_warn "$svc: port $port in use by ${holder} — skipping compose ${svc}"
+        _suggest_port_fix "$svc" "$port" "$holder"
+        summary_row WARN "compose-${svc}" "port $port held by ${holder}"
         return 0
     fi
     if $DOCKER_COMPOSE up -d --wait "$svc" >/dev/null 2>&1; then
