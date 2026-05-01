@@ -154,16 +154,44 @@ test_outside_git_repo_fails() {
     assert_contains "$output" "git" "expected error mentioning git" || return 1
 }
 
-test_dirty_tree_refused() {
+test_unstaged_tracked_change_refused() {
     local repo
     repo="$(make_repo)" || return 1
     cd "$repo"
-    echo "uncommitted" > dirty.txt
+    # Modify a tracked file (README.md is committed in init).
+    echo "edited" >> README.md
     output="$(bash scripts/start.sh 2>&1)"
     rc=$?
-    assert_eq 1 "$rc" "expected exit 1 on dirty tree" || return 1
+    assert_eq 1 "$rc" "expected exit 1 on unstaged tracked change" || return 1
     assert_contains "$output" "uncommitted" "expected uncommitted-changes message" || return 1
-    assert_not_contains "$output" "BOOTSTRAP-STUB" "bootstrap must NOT run on dirty tree" || return 1
+    assert_not_contains "$output" "BOOTSTRAP-STUB" "bootstrap must NOT run on tracked dirty tree" || return 1
+}
+
+test_staged_tracked_change_refused() {
+    local repo
+    repo="$(make_repo)" || return 1
+    cd "$repo"
+    echo "staged" >> README.md
+    git add README.md
+    output="$(bash scripts/start.sh 2>&1)"
+    rc=$?
+    assert_eq 1 "$rc" "expected exit 1 on staged tracked change" || return 1
+    assert_contains "$output" "uncommitted" "expected uncommitted-changes message" || return 1
+    assert_not_contains "$output" "BOOTSTRAP-STUB" "bootstrap must NOT run on tracked dirty tree" || return 1
+}
+
+test_untracked_file_alone_allowed_with_warning() {
+    local repo
+    repo="$(make_repo)" || return 1
+    cd "$repo"
+    # Untracked file is git-pull-safe; start.sh should warn but proceed.
+    echo "scratch" > scratch.txt
+    output="$(bash scripts/start.sh 2>&1)"
+    rc=$?
+    assert_eq 0 "$rc" "expected exit 0 with only untracked files" || return 1
+    assert_contains "$output" "Untracked"      "expected untracked-files notice" || return 1
+    assert_contains "$output" "scratch.txt"    "expected the file path to appear" || return 1
+    assert_contains "$output" "BOOTSTRAP-STUB" "bootstrap should still run"       || return 1
 }
 
 test_detached_head_refused() {
@@ -255,7 +283,9 @@ echo
 
 run_test "--help prints usage"                   test_help_prints_usage
 run_test "outside git repo fails"                test_outside_git_repo_fails
-run_test "dirty working tree is refused"         test_dirty_tree_refused
+run_test "unstaged tracked change is refused"    test_unstaged_tracked_change_refused
+run_test "staged tracked change is refused"      test_staged_tracked_change_refused
+run_test "untracked-only tree is allowed"        test_untracked_file_alone_allowed_with_warning
 run_test "detached HEAD is refused"              test_detached_head_refused
 run_test "branch without upstream is refused"    test_no_upstream_refused
 run_test "clean up-to-date runs bootstrap"       test_clean_uptodate_runs_bootstrap

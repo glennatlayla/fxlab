@@ -71,15 +71,22 @@ cd "$REPO_ROOT"
 if (( DO_PULL )); then
     log_step "Sync with origin"
 
-    # Refuse on dirty tree — preserves operator WIP. `git status --porcelain`
-    # catches staged + unstaged + untracked changes (untracked counts because
-    # an FF pull can collide with a new file added by the upstream commit).
-    # The user can stash explicitly if they want; we will not do it for them.
-    if [[ -n "$(git status --porcelain)" ]]; then
-        log_err "Working tree has uncommitted changes."
+    # Refuse on staged or unstaged TRACKED-file modifications — preserves
+    # operator WIP. Untracked files are allowed: `git pull --ff-only` will
+    # itself refuse if a new upstream file would clobber an untracked one,
+    # and otherwise untracked files survive a pull intact. Forcing a stash
+    # for every gitignored scratch file (test SQLite, log, etc.) is friction
+    # without safety value.
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        log_err "Working tree has uncommitted tracked-file changes."
         log_err "Stash or commit them first:"
-        log_err "    git stash push -u -m 'before start.sh'"
+        log_err "    git stash push -m 'before start.sh'"
         exit 1
+    fi
+    UNTRACKED="$(git ls-files --others --exclude-standard)"
+    if [[ -n "$UNTRACKED" ]]; then
+        log_warn "Untracked files present (proceeding — pull will preserve them):"
+        printf '%s\n' "$UNTRACKED" | sed 's/^/    /'
     fi
 
     BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
