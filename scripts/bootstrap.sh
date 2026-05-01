@@ -35,6 +35,13 @@
 #                    fail with an apt/dnf hint instead.
 #   --install-docker Install Docker via https://get.docker.com if missing
 #                    (off by default — Docker is an invasive system change).
+#   --evict-conflicts
+#                    When a Docker container from another project is bound
+#                    to a port we need (5432, 6379), stop and remove it.
+#                    PRESERVES that container's image and named volumes —
+#                    only the container instance is destroyed. Bring it
+#                    back later with `docker compose up` from its own
+#                    project directory. OFF by default; opt-in only.
 #   --reset-env      Regenerate .env from .env.example with fresh secrets,
 #                    archiving the existing .env to .archive/<UTC>/.env first.
 #   --skip-tests     Skip the pytest gate (useful on slow machines or CI shards).
@@ -66,16 +73,18 @@ VALIDATE_ONLY=0
 USE_SUDO=1
 INSTALL_DOCKER=0
 RESET_ENV=0
+EVICT_CONFLICTS=0
 
 usage() {
-    sed -n '2,46p' "$0"
+    sed -n '2,55p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-docker)            DO_DOCKER=0 ;;
-        --no-sudo)              USE_SUDO=0 ;;
+        --no-sudo)               USE_SUDO=0 ;;
         --install-docker)       INSTALL_DOCKER=1 ;;
+        --evict-conflicts)      EVICT_CONFLICTS=1 ;;
         --reset-env)            RESET_ENV=1 ;;
         --skip-tests)           DO_TESTS=0 ;;
         --skip-frontend-build)  DO_FRONTEND_BUILD=0 ;;
@@ -537,6 +546,32 @@ _suggest_port_fix() {
     esac
 }
 
+# If the holder is a foreign Docker container, stop + remove it. PRESERVES
+# its image and any named/anonymous volumes. Returns 0 if a container was
+# successfully evicted, 1 if the holder isn't a container or removal failed.
+_evict_container_holder() {
+    local holder="$1"
+    if [[ "$holder" != "docker container: "* ]]; then
+        log_warn "  --evict-conflicts only handles Docker containers; this holder is: $holder"
+        return 1
+    fi
+    local cname="${holder#docker container: }"
+    if [[ "$cname" == "fxlab-"* ]]; then
+        # Defensive — never evict our own containers; they're stale state
+        # the regular compose lifecycle should manage.
+        log_warn "  refusing to evict our own container ($cname)"
+        return 1
+    fi
+    log_warn "  --evict-conflicts: stopping + removing container '$cname' (image + volumes preserved)"
+    if docker stop "$cname" >/dev/null 2>&1 && docker rm "$cname" >/dev/null 2>&1; then
+        log_ok "  evicted $cname — port released"
+        summary_row WARN "evict-conflict" "removed foreign container $cname"
+        return 0
+    fi
+    log_err "  eviction of $cname failed — try manually: docker stop $cname && docker rm $cname"
+    return 1
+}
+
 # Helper: bring up a single compose service, polling for healthy. Sets
 # the named flag variable to 1 on success. Returns 0 always (the caller
 # decides whether a missed service is fatal).
@@ -547,10 +582,16 @@ _compose_up_one() {
     if [[ -z "$existing" ]] && _port_in_use "$port"; then
         local holder
         holder="$(_identify_port_holder "$port")"
-        log_warn "$svc: port $port in use by ${holder} — skipping compose ${svc}"
-        _suggest_port_fix "$svc" "$port" "$holder"
-        summary_row WARN "compose-${svc}" "port $port held by ${holder}"
-        return 0
+        log_warn "$svc: port $port in use by ${holder}"
+        if [[ $EVICT_CONFLICTS -eq 1 ]] && _evict_container_holder "$holder"; then
+            # Eviction succeeded — fall through to the normal up path.
+            :
+        else
+            _suggest_port_fix "$svc" "$port" "$holder"
+            log_warn "  Or rerun with --evict-conflicts to stop+remove the conflicting container"
+            summary_row WARN "compose-${svc}" "port $port held by ${holder}"
+            return 0
+        fi
     fi
     if $DOCKER_COMPOSE up -d --wait "$svc" >/dev/null 2>&1; then
         log_ok "compose ${svc} up + healthy"
