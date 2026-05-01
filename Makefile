@@ -26,6 +26,9 @@ help:  ## Show this help message
 install-dev-onboard:  ## One-shot dev install: make bootstrap + docker + .env + creds (calls scripts/bootstrap.sh)
 	./scripts/bootstrap.sh
 
+start:  ## Resume a dev session: git pull --ff-only + scripts/bootstrap.sh (idempotent)
+	@./scripts/start.sh
+
 validate-env:  ## Probe Postgres / Redis / MinIO / Keycloak / JWT / Celery configuration
 	./scripts/bootstrap.sh --validate-only
 
@@ -138,6 +141,7 @@ test-shell:  ## Run shell test suites for install.sh and ship.sh
 	@bash tests/shell/test_install_mode_selection.sh
 	@bash tests/shell/test_entrypoint_seed_admin.sh
 	@bash tests/shell/test_ship_commit_push.sh
+	@bash tests/shell/test_start_script.sh
 	@echo "All shell tests passed."
 
 # ---------------------------------------------------------------------------
