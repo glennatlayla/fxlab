@@ -47,6 +47,10 @@
 #   --skip-tests     Skip the pytest gate (useful on slow machines or CI shards).
 #   --skip-frontend-build  Skip the frontend `npm run build` smoke test.
 #   --skip-backend-smoke   Skip the uvicorn /health smoke test.
+#   --no-keycloak    Skip the keycloak compose service + realm init step.
+#                    Use when working on a slice that does not need the IdP
+#                    (saves ~3 minutes on first bootstrap; the api container
+#                    falls back to HS256 self-rolled tokens).
 #   --validate-only  Run only the credential validator (assumes a healthy venv).
 #   -h, --help       Show this help and exit.
 #
@@ -69,6 +73,7 @@ DO_DOCKER=1
 DO_TESTS=1
 DO_FRONTEND_BUILD=1
 DO_BACKEND_SMOKE=1
+DO_KEYCLOAK=1
 VALIDATE_ONLY=0
 USE_SUDO=1
 INSTALL_DOCKER=0
@@ -76,7 +81,7 @@ RESET_ENV=0
 EVICT_CONFLICTS=0
 
 usage() {
-    sed -n '2,55p' "$0"
+    sed -n '2,60p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -89,6 +94,7 @@ while [[ $# -gt 0 ]]; do
         --skip-tests)           DO_TESTS=0 ;;
         --skip-frontend-build)  DO_FRONTEND_BUILD=0 ;;
         --skip-backend-smoke)   DO_BACKEND_SMOKE=0 ;;
+        --no-keycloak)          DO_KEYCLOAK=0 ;;
         --validate-only)        VALIDATE_ONLY=1 ;;
         -h|--help)              usage; exit 0 ;;
         *) log_err "unknown flag: $1"; usage; exit 1 ;;
@@ -365,6 +371,7 @@ readonly REQUIRED_DOTENV_KEYS=(
     JWT_SECRET_KEY
     POSTGRES_PASSWORD
     KEYCLOAK_ADMIN_PASSWORD
+    KEYCLOAK_ADMIN_CLIENT_SECRET
     POSTGRES_HOST
     POSTGRES_PORT
     POSTGRES_DB
@@ -374,7 +381,28 @@ readonly REQUIRED_DOTENV_KEYS=(
     REDIS_PORT
     REDIS_URL
     CELERY_BROKER_URL
+    KEYCLOAK_URL
+    KEYCLOAK_REALM
+    KEYCLOAK_CLIENT_ID
+    KEYCLOAK_ADMIN
 )
+
+# Returns 0 when the given KEY is present and uncommented in .env, 1 otherwise.
+# Used by step_dotenv to decide whether to upsert a missing key vs leaving an
+# operator-set value alone.
+_key_present_in_env() {
+    local key="$1"
+    [[ -f .env ]] || return 1
+    grep -qE "^[[:space:]]*${key}=[^[:space:]]" .env 2>/dev/null
+}
+
+# Echo the value of KEY from .env (first match, uncommented). Echoes empty
+# string when the key is absent or commented.
+_read_env_value() {
+    local key="$1"
+    [[ -f .env ]] || return 0
+    grep -E "^[[:space:]]*${key}=" .env 2>/dev/null | head -1 | sed -E "s|^[[:space:]]*${key}=||"
+}
 
 # Returns the count of REQUIRED_DOTENV_KEYS that are present and uncommented
 # in .env. Used to detect a half-populated .env left over from an older
@@ -393,7 +421,7 @@ _count_required_keys_present() {
 step_dotenv() {
     log_step ".env"
 
-    # --reset-env: archive the existing .env and regenerate.
+    # --reset-env: archive the existing .env and regenerate from scratch.
     if [[ $RESET_ENV -eq 1 && -f .env ]]; then
         local stamp archive_dir
         stamp="$(date -u +%Y-%m-%dT%H%M%SZ)"
@@ -404,73 +432,115 @@ step_dotenv() {
         log_warn "--reset-env: archived previous .env to $archive_dir/${stamp}_dotenv"
     fi
 
-    if [[ -f .env ]]; then
-        local present
-        present="$(_count_required_keys_present)"
-        local total=${#REQUIRED_DOTENV_KEYS[@]}
-        if [[ $present -lt $total ]]; then
-            log_warn ".env is half-populated ($present / $total required keys present)"
-            log_warn "  Re-run with --reset-env to regenerate (existing .env will be archived)"
-            log_warn "  Or edit .env manually — required keys: ${REQUIRED_DOTENV_KEYS[*]}"
-            summary_row WARN dotenv "half-populated ($present/$total)"
-        else
-            log_ok ".env exists with all required keys (left untouched)"
-            summary_row OK dotenv "exists ($present/$total keys)"
+    # Bootstrap a fresh .env from .env.example when missing.
+    if [[ ! -f .env ]]; then
+        if [[ ! -f .env.example ]]; then
+            log_warn ".env.example missing — skipping .env creation"
+            summary_row WARN dotenv ".env.example missing"
+            return 0
         fi
-        # Tighten permissions even on existing files — defensive.
-        chmod 600 .env 2>/dev/null || true
-        return 0
+        cp .env.example .env
+        chmod 600 .env
+        log_info ".env created from .env.example (secrets will be generated next)"
+    fi
+    chmod 600 .env 2>/dev/null || true
+
+    # Upsert-if-missing pass: for every required key, if it is absent or
+    # commented in .env, supply a value. Existing operator-set values are
+    # preserved verbatim. This makes step_dotenv idempotent across:
+    #   - fresh installs (.env created from .env.example, then secrets added)
+    #   - upgrades (new required keys added without rotating existing creds)
+    #   - half-populated state (prior bootstrap aborted mid-write)
+    #
+    # Secrets (JWT, postgres password, Keycloak admin password, Keycloak
+    # service-account client secret) are generated only when their key is
+    # missing — never regenerated when a value already exists, since that
+    # would invalidate live tokens / desynchronise from a running Keycloak.
+
+    local secret_jwt secret_pg secret_kc_admin secret_kc_api
+
+    if ! _key_present_in_env JWT_SECRET_KEY; then
+        secret_jwt="$(.venv/bin/python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)"
+        if [[ -n "${secret_jwt:-}" ]]; then
+            _upsert_env JWT_SECRET_KEY "$secret_jwt"
+        else
+            log_warn "could not generate JWT_SECRET_KEY (.venv/bin/python failed?)"
+        fi
     fi
 
-    if [[ ! -f .env.example ]]; then
-        log_warn ".env.example missing — skipping .env creation"
-        summary_row WARN dotenv ".env.example missing"
-        return 0
+    if ! _key_present_in_env POSTGRES_PASSWORD; then
+        secret_pg="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(24))' 2>/dev/null || true)"
+        if [[ -n "${secret_pg:-}" ]]; then
+            _upsert_env POSTGRES_PASSWORD "$secret_pg"
+        else
+            log_warn "could not generate POSTGRES_PASSWORD"
+        fi
     fi
-    cp .env.example .env
+
+    if ! _key_present_in_env KEYCLOAK_ADMIN_PASSWORD; then
+        secret_kc_admin="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(16))' 2>/dev/null || true)"
+        if [[ -n "${secret_kc_admin:-}" ]]; then
+            _upsert_env KEYCLOAK_ADMIN_PASSWORD "$secret_kc_admin"
+        else
+            log_warn "could not generate KEYCLOAK_ADMIN_PASSWORD"
+        fi
+    fi
+
+    if ! _key_present_in_env KEYCLOAK_ADMIN_CLIENT_SECRET; then
+        secret_kc_api="$(.venv/bin/python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)"
+        if [[ -n "${secret_kc_api:-}" ]]; then
+            _upsert_env KEYCLOAK_ADMIN_CLIENT_SECRET "$secret_kc_api"
+        else
+            log_warn "could not generate KEYCLOAK_ADMIN_CLIENT_SECRET"
+        fi
+    fi
+
+    # Non-secret defaults — connection strings + Keycloak realm configuration
+    # pointing at the local compose stack. Upsert only when missing so an
+    # operator who pointed POSTGRES_HOST at a host-side database (or
+    # KEYCLOAK_URL at a remote IdP) stays pointed there.
+    _key_present_in_env POSTGRES_HOST       || _upsert_env POSTGRES_HOST       "localhost"
+    _key_present_in_env POSTGRES_PORT       || _upsert_env POSTGRES_PORT       "5432"
+    _key_present_in_env POSTGRES_DB         || _upsert_env POSTGRES_DB         "fxlab"
+    _key_present_in_env POSTGRES_USER       || _upsert_env POSTGRES_USER       "fxlab"
+    _key_present_in_env REDIS_HOST          || _upsert_env REDIS_HOST          "localhost"
+    _key_present_in_env REDIS_PORT          || _upsert_env REDIS_PORT          "6379"
+    _key_present_in_env REDIS_URL           || _upsert_env REDIS_URL           "redis://localhost:6379/0"
+    _key_present_in_env CELERY_BROKER_URL   || _upsert_env CELERY_BROKER_URL   "redis://localhost:6379/0"
+    _key_present_in_env KEYCLOAK_URL        || _upsert_env KEYCLOAK_URL        "http://localhost:8080"
+    _key_present_in_env KEYCLOAK_REALM      || _upsert_env KEYCLOAK_REALM      "fxlab"
+    _key_present_in_env KEYCLOAK_CLIENT_ID  || _upsert_env KEYCLOAK_CLIENT_ID  "fxlab-api"
+    _key_present_in_env KEYCLOAK_ADMIN      || _upsert_env KEYCLOAK_ADMIN      "admin"
+
+    # DATABASE_URL is composed from POSTGRES_PASSWORD, so it must be upserted
+    # AFTER the password upsert above. Read whatever password ended up in .env
+    # (newly generated or operator-set) and weave it into the URL.
+    if ! _key_present_in_env DATABASE_URL; then
+        local pg_pwd
+        pg_pwd="$(_read_env_value POSTGRES_PASSWORD)"
+        if [[ -n "$pg_pwd" ]]; then
+            _upsert_env DATABASE_URL "postgresql://fxlab:${pg_pwd}@localhost:5432/fxlab"
+        else
+            log_warn "DATABASE_URL not set and POSTGRES_PASSWORD missing — skipping"
+        fi
+    fi
+
     chmod 600 .env
 
-    # All three secrets need to be populated for the docker-compose stack
-    # to start at all (POSTGRES_PASSWORD and KEYCLOAK_ADMIN_PASSWORD are
-    # `:?required` in docker-compose.yml — without them, `docker compose up`
-    # fails before any container starts). JWT_SECRET_KEY is required by the
-    # API container's lifespan startup.
-    local jwt_secret pg_password kc_admin_password
-    jwt_secret="$(.venv/bin/python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)"
-    pg_password="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(24))' 2>/dev/null || true)"
-    kc_admin_password="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(16))' 2>/dev/null || true)"
-
-    if [[ -z "$jwt_secret" || -z "$pg_password" || -z "$kc_admin_password" ]]; then
-        log_warn "could not generate secrets (.venv/bin/python failed?)"
-        summary_row WARN dotenv "created (secrets not generated)"
-        return 0
+    # Reconcile coverage. With the upsert-if-missing pass above, a complete
+    # state is the norm; warn loudly if anything still slipped through (e.g.
+    # python unavailable, .env.example structurally broken).
+    local present total
+    present="$(_count_required_keys_present)"
+    total=${#REQUIRED_DOTENV_KEYS[@]}
+    if [[ $present -lt $total ]]; then
+        log_warn ".env partially populated ($present / $total required keys present)"
+        log_warn "  Re-run with --reset-env to regenerate cleanly"
+        summary_row WARN dotenv "partial ($present/$total)"
+    else
+        log_ok ".env has all $total required keys (chmod 600)"
+        summary_row OK dotenv "complete ($present/$total)"
     fi
-
-    # Required secrets — without these, compose-up fails outright.
-    _upsert_env JWT_SECRET_KEY              "$jwt_secret"
-    _upsert_env POSTGRES_PASSWORD           "$pg_password"
-    _upsert_env KEYCLOAK_ADMIN_PASSWORD     "$kc_admin_password"
-
-    # Localhost connection strings — point at the dev compose stack.
-    # The validator probes these next; with the stack up, they PASS.
-    _upsert_env POSTGRES_HOST               "localhost"
-    _upsert_env POSTGRES_PORT               "5432"
-    _upsert_env POSTGRES_DB                 "fxlab"
-    _upsert_env POSTGRES_USER               "fxlab"
-    _upsert_env DATABASE_URL                "postgresql://fxlab:${pg_password}@localhost:5432/fxlab"
-    _upsert_env REDIS_HOST                  "localhost"
-    _upsert_env REDIS_PORT                  "6379"
-    _upsert_env REDIS_URL                   "redis://localhost:6379/0"
-    _upsert_env CELERY_BROKER_URL           "redis://localhost:6379/0"
-
-    # Keycloak / S3 are kept commented in dev — Keycloak realm setup is a
-    # heavier bring-up (requires the keycloak service plus realm import
-    # which can take 60+s on first boot) and MinIO is not in the dev
-    # docker-compose stack at all. Operators uncomment when needed.
-
-    chmod 600 .env
-    log_ok ".env created (chmod 600) with generated secrets + localhost service URLs"
-    summary_row OK dotenv "created (secrets + dev URLs populated)"
 }
 
 # --------------------------- step: compose up --------------------------------
@@ -480,6 +550,7 @@ step_dotenv() {
 # cleanly. Set by step_compose_up below.
 COMPOSE_PG_UP=0
 COMPOSE_REDIS_UP=0
+COMPOSE_KC_UP=0
 
 # Temporary docker-compose override file. Generated lazily when a port
 # remap is needed to coexist with another stack on this host. Cleaned up
@@ -647,7 +718,7 @@ _evict_container_holder() {
 # the named flag variable to 1 on success. Returns 0 always (the caller
 # decides whether a missed service is fatal).
 _compose_up_one() {
-    local svc="$1" flag_var="$2" port="$3" remap_dotenv_fn="${4:-}"
+    local svc="$1" flag_var="$2" port="$3" remap_dotenv_fn="${4:-}" health_budget="${5:-60}"
     local existing
     existing="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -x "fxlab-${svc}" || true)"
     local effective_port="$port"
@@ -686,7 +757,7 @@ _compose_up_one() {
         fi
     fi
 
-    if _compose up -d --wait "$svc" >/dev/null 2>&1; then
+    if _compose up -d --wait --wait-timeout="$health_budget" "$svc" >/dev/null 2>&1; then
         log_ok "compose ${svc} up + healthy on host port ${effective_port}"
         summary_row OK "compose-${svc}" "up + healthy (host port ${effective_port})"
         eval "$flag_var=1"
@@ -699,9 +770,9 @@ _compose_up_one() {
         summary_row FAIL "compose-${svc}" "up failed"
         return 0
     fi
-    local budget=60 elapsed=0 cid status
-    log_info "$svc: polling healthcheck (budget ${budget}s)"
-    while (( elapsed < budget )); do
+    local elapsed=0 cid status
+    log_info "$svc: polling healthcheck (budget ${health_budget}s)"
+    while (( elapsed < health_budget )); do
         cid="$(_compose ps -q "$svc" 2>/dev/null | head -1)"
         if [[ -n "$cid" ]]; then
             status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
@@ -714,19 +785,43 @@ _compose_up_one() {
         fi
         sleep 3; elapsed=$((elapsed + 3))
     done
-    log_warn "compose ${svc} not healthy after ${budget}s"
-    summary_row WARN "compose-${svc}" "health unconfirmed after ${budget}s"
+    log_warn "compose ${svc} not healthy after ${health_budget}s"
+    summary_row WARN "compose-${svc}" "health unconfirmed after ${health_budget}s"
+}
+
+# Update KEYCLOAK_URL's port segment when compose remaps keycloak from 8080
+# to a free alternate. The validator + setup-realm.sh both probe via
+# KEYCLOAK_URL on the host, so the port change must propagate.
+_remap_dotenv_keycloak_url() {
+    local new_port="$1"
+    [[ -f .env ]] || return 0
+    sed -i.bak -E "s|^([[:space:]]*KEYCLOAK_URL=https?://[^:]+):[0-9]+|\\1:${new_port}|" .env
+    rm -f .env.bak
 }
 
 step_compose_up() {
     [[ $DO_DOCKER -eq 1 ]] || { log_skip "compose up (docker unavailable)"; return 0; }
-    log_step "Compose stack — postgres + redis"
+    log_step "Compose stack — postgres + redis + keycloak"
     # Bring up each service independently — a port conflict on one must
     # NOT prevent the other from coming up. Downstream steps (alembic,
-    # validator, dotenv) consult COMPOSE_PG_UP / COMPOSE_REDIS_UP to
-    # decide whether to use that service or SKIP cleanly.
+    # validator, dotenv) consult COMPOSE_PG_UP / COMPOSE_REDIS_UP /
+    # COMPOSE_KC_UP to decide whether to use that service or SKIP cleanly.
     _compose_up_one postgres COMPOSE_PG_UP    5432  _remap_dotenv_postgres_port
     _compose_up_one redis    COMPOSE_REDIS_UP 6379  _remap_dotenv_redis_port
+    if (( DO_KEYCLOAK )); then
+        # Keycloak's healthcheck (15s × 10 retries + 60s start_period) plus
+        # realm import on first boot can take ~210s — give a 240s budget.
+        # When postgres failed to come up, skip — keycloak depends on it.
+        if [[ $COMPOSE_PG_UP -ne 1 ]]; then
+            log_skip "keycloak — depends on postgres which did not come up"
+            summary_row SKIP compose-keycloak "postgres unavailable"
+        else
+            _compose_up_one keycloak COMPOSE_KC_UP 8080 _remap_dotenv_keycloak_url 240
+        fi
+    else
+        log_skip "keycloak (--no-keycloak)"
+        summary_row SKIP compose-keycloak "--no-keycloak"
+    fi
 }
 
 # Comment out a key in .env so the validator SKIPs that probe instead of
@@ -766,11 +861,97 @@ step_reconcile_env_with_compose() {
         log_warn "compose redis unavailable — REDIS_*/CELERY_BROKER_URL commented in .env"
         changed=1
     fi
+    # Keycloak only matters when --keycloak is requested (default). When the
+    # service didn't come up, comment out the URL so the host-side validator
+    # SKIPs cleanly. KEYCLOAK_ADMIN_PASSWORD stays uncommented because compose
+    # still requires it (the keycloak container declares it as :?required and
+    # docker-compose evaluates that even when the container isn't started).
+    if (( DO_KEYCLOAK )) && [[ $COMPOSE_KC_UP -ne 1 ]]; then
+        for key in KEYCLOAK_URL KEYCLOAK_REALM KEYCLOAK_CLIENT_ID KEYCLOAK_ADMIN KEYCLOAK_ADMIN_CLIENT_SECRET; do
+            _comment_out_env_key "$key"
+        done
+        log_warn "compose keycloak unavailable — KEYCLOAK_* commented in .env"
+        changed=1
+    fi
     if (( changed == 0 )); then
         log_ok ".env already aligned with compose state"
         summary_row OK reconcile-env "all compose services up"
     else
         summary_row WARN reconcile-env "commented out keys for unavailable services"
+    fi
+}
+
+# --------------------------- step: keycloak realm init ------------------------
+#
+# Synchronise the fxlab-api Keycloak client's secret with the value in .env.
+# Without this step, the client secret embedded in the realm-import JSON does
+# not match KEYCLOAK_ADMIN_CLIENT_SECRET, the api container fails to obtain
+# tokens, and the host-side validator's keycloak probe also fails.
+#
+# Idempotent: setup-realm.sh updates the existing client secret rather than
+# duplicating, so re-running bootstrap is safe.
+
+step_keycloak_realm_init() {
+    [[ $DO_DOCKER -eq 1 ]] || { log_skip "keycloak-realm (docker disabled)"; return 0; }
+    (( DO_KEYCLOAK ))      || { log_skip "keycloak-realm (--no-keycloak)"; return 0; }
+    if [[ $COMPOSE_KC_UP -ne 1 ]]; then
+        log_skip "keycloak-realm — compose keycloak did not come up"
+        summary_row SKIP keycloak-realm "compose keycloak unavailable"
+        return 0
+    fi
+    if [[ ! -f config/keycloak/setup-realm.sh ]]; then
+        log_warn "keycloak-realm — config/keycloak/setup-realm.sh not found"
+        summary_row WARN keycloak-realm "setup-realm.sh missing"
+        return 0
+    fi
+
+    log_step "Keycloak realm setup (fxlab-api client secret)"
+
+    local kc_url kc_admin kc_admin_pwd kc_api_secret
+    kc_url="$(_read_env_value KEYCLOAK_URL)"
+    kc_admin="$(_read_env_value KEYCLOAK_ADMIN)"
+    kc_admin_pwd="$(_read_env_value KEYCLOAK_ADMIN_PASSWORD)"
+    kc_api_secret="$(_read_env_value KEYCLOAK_ADMIN_CLIENT_SECRET)"
+
+    if [[ -z "$kc_url" || -z "$kc_admin" || -z "$kc_admin_pwd" || -z "$kc_api_secret" ]]; then
+        log_warn "keycloak-realm: KEYCLOAK_URL/ADMIN/ADMIN_PASSWORD/ADMIN_CLIENT_SECRET missing in .env"
+        summary_row WARN keycloak-realm "missing env keys"
+        return 0
+    fi
+
+    # Wait for the master-realm token endpoint to grant an admin-cli token.
+    # The container's healthcheck only proves /health/ready is up; the realm
+    # import (start-dev --import-realm) can take additional seconds beyond
+    # health-ready before admin-cli works. Poll up to 120s.
+    local budget=120 elapsed=0
+    log_info "polling ${kc_url}/realms/master admin endpoint (budget ${budget}s)..."
+    while (( elapsed < budget )); do
+        if curl -sf -o /dev/null -X POST \
+            "${kc_url}/realms/master/protocol/openid-connect/token" \
+            -d "grant_type=password" -d "client_id=admin-cli" \
+            -d "username=${kc_admin}" -d "password=${kc_admin_pwd}" 2>/dev/null; then
+            break
+        fi
+        sleep 3; elapsed=$((elapsed + 3))
+    done
+    if (( elapsed >= budget )); then
+        log_err "keycloak admin endpoint did not respond after ${budget}s"
+        summary_row FAIL keycloak-realm "admin endpoint timeout"
+        return 0
+    fi
+    log_ok "keycloak admin endpoint reachable after ${elapsed}s"
+
+    # Run setup-realm.sh; it sets the fxlab-api client secret to match.
+    if KEYCLOAK_URL="$kc_url" \
+       KEYCLOAK_ADMIN="$kc_admin" \
+       KEYCLOAK_ADMIN_PASSWORD="$kc_admin_pwd" \
+       KEYCLOAK_API_CLIENT_SECRET="$kc_api_secret" \
+       bash config/keycloak/setup-realm.sh 2>&1 | sed 's/^/    /'; then
+        log_ok "keycloak realm setup complete (fxlab-api client secret synced)"
+        summary_row OK keycloak-realm "client secret synced"
+    else
+        log_err "keycloak realm setup failed"
+        summary_row FAIL keycloak-realm "setup-realm.sh exited non-zero"
     fi
 }
 
@@ -954,6 +1135,7 @@ step_docker
 step_dotenv
 step_compose_up
 step_reconcile_env_with_compose
+step_keycloak_realm_init
 step_alembic
 step_validate_env
 step_backend_tests
