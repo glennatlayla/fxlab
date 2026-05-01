@@ -48,10 +48,18 @@
 #                    machines or CI shards). Compare with --force-tests.
 #   --force-tests    Force the pytest gate even when the workspace
 #                    fingerprint matches the last green run. By default
-#                    bootstrap skips pytest when nothing has changed since
-#                    the last passing run (HEAD, working-tree diff, and
-#                    untracked files all identical). Use this flag to
-#                    re-run the gate explicitly.
+#                    every heavy step (make bootstrap, alembic, frontend
+#                    build, pytest) is gated on a per-step fingerprint
+#                    and skipped when nothing has changed since the last
+#                    passing run. Use these flags to override individual
+#                    steps; pass --force to override every gate.
+#   --force-deps     Re-run `make bootstrap` (pip + npm install) even if
+#                    the deps fingerprint matches.
+#   --force-alembic  Re-run `alembic upgrade head` even if the migration
+#                    set is unchanged.
+#   --force-frontend-build  Re-run the frontend `npm run build` smoke
+#                    even if the frontend source fingerprint matches.
+#   --force          Equivalent to passing every --force-* flag at once.
 #   --skip-frontend-build  Skip the frontend `npm run build` smoke test.
 #   --skip-backend-smoke   Skip the uvicorn /health smoke test.
 #   --no-keycloak    Skip the keycloak compose service + realm init step.
@@ -73,12 +81,19 @@ readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." &>/dev/null && pwd)"
 
 # shellcheck source=scripts/_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
+# shellcheck source=scripts/_fingerprint.sh
+source "$SCRIPT_DIR/_fingerprint.sh"
+# shellcheck source=scripts/_stamps.sh
+source "$SCRIPT_DIR/_stamps.sh"
 
 # --------------------------- option parsing ----------------------------------
 
 DO_DOCKER=1
 DO_TESTS=1
 FORCE_TESTS=0
+FORCE_DEPS=0
+FORCE_ALEMBIC=0
+FORCE_FRONTEND_BUILD=0
 DO_FRONTEND_BUILD=1
 DO_BACKEND_SMOKE=1
 DO_KEYCLOAK=1
@@ -89,7 +104,11 @@ RESET_ENV=0
 EVICT_CONFLICTS=0
 
 usage() {
-    sed -n '2,60p' "$0"
+    # Print every leading-comment block (lines 2..first non-comment),
+    # so help stays in sync with the documented flag list as the header
+    # grows. Avoids the previous hard-coded `sed -n '2,60p'` which
+    # silently truncated newly-added flags.
+    awk 'NR==1 {next} /^[^#]/ {exit} {print}' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -101,6 +120,11 @@ while [[ $# -gt 0 ]]; do
         --reset-env)            RESET_ENV=1 ;;
         --skip-tests)           DO_TESTS=0 ;;
         --force-tests)          FORCE_TESTS=1 ;;
+        --force-deps)           FORCE_DEPS=1 ;;
+        --force-alembic)        FORCE_ALEMBIC=1 ;;
+        --force-frontend-build) FORCE_FRONTEND_BUILD=1 ;;
+        --force)                FORCE_TESTS=1; FORCE_DEPS=1
+                                FORCE_ALEMBIC=1; FORCE_FRONTEND_BUILD=1 ;;
         --skip-frontend-build)  DO_FRONTEND_BUILD=0 ;;
         --skip-backend-smoke)   DO_BACKEND_SMOKE=0 ;;
         --no-keycloak)          DO_KEYCLOAK=0 ;;
@@ -289,10 +313,32 @@ step_install_docker() {
 # --------------------------- step: make bootstrap ----------------------------
 
 step_make_bootstrap() {
+    # Fingerprint the inputs that drive `make bootstrap`: Python deps
+    # files, frontend package manifests, the Makefile itself, and the
+    # presence of the .venv / node_modules outputs. If all match the
+    # last green run, skip the (expensive) reinstall.
+    local fp
+    fp="$(fingerprint_files \
+        requirements.txt requirements-dev.txt pyproject.toml \
+        frontend/package.json frontend/package-lock.json \
+        Makefile)"
+    # Existence of the produced artefacts is part of the fingerprint —
+    # if the operator nuked .venv or frontend/node_modules, force a
+    # reinstall by mixing those into the digest.
+    fp="$({ printf '%s\n' "$fp"; \
+            printf 'venv-exists=%s\n' "$([[ -d .venv ]] && echo y || echo n)"; \
+            printf 'node-modules-exists=%s\n' "$([[ -d frontend/node_modules ]] && echo y || echo n)"; \
+          } | _sha256_stdin)"
+    if [[ $FORCE_DEPS -eq 0 ]] && stamp_matches deps "$fp"; then
+        log_skip "make bootstrap (deps fingerprint matches last green run; --force-deps to override)"
+        summary_row OK make-bootstrap "skipped — Python/npm deps unchanged"
+        return 0
+    fi
     log_step "make bootstrap (.venv + Python deps + nodeenv + frontend deps + hooks)"
     if make bootstrap; then
         log_ok "make bootstrap complete"
         summary_row OK make-bootstrap "venv + Python + node + frontend"
+        stamp_record deps "$fp"
     else
         log_err "make bootstrap failed — see output above"
         summary_row FAIL make-bootstrap "non-zero exit"
@@ -1046,11 +1092,24 @@ step_alembic() {
         return 0
     fi
 
+    # Fingerprint the migration files. If the set of migrations and the
+    # DATABASE_URL haven't changed since the last green run, skip the
+    # alembic command — it's idempotent but the network round-trip and
+    # subprocess startup add seconds we don't need.
+    local fp
+    fp="$({ fingerprint_globs 'alembic/versions/*.py'; printf 'db_url=%s\n' "$db_url"; } | _sha256_stdin)"
+    if [[ $FORCE_ALEMBIC -eq 0 ]] && stamp_matches alembic "$fp"; then
+        log_skip "alembic (migration set + DATABASE_URL match last green run; --force-alembic to override)"
+        summary_row OK alembic "skipped — no migration changes"
+        return 0
+    fi
+
     local attempt=1 max=3 delay=2
     while (( attempt <= max )); do
         if DATABASE_URL="$db_url" .venv/bin/alembic upgrade head 2>&1 | tail -5; then
             log_ok "migrations applied (attempt $attempt)"
             summary_row OK alembic "head (attempt $attempt)"
+            stamp_record alembic "$fp"
             return 0
         fi
         log_warn "alembic upgrade failed (attempt $attempt/$max) — retrying in ${delay}s"
@@ -1070,10 +1129,14 @@ step_validate_env() {
         log_skip "scripts/validate_env.py not found"
         return 0
     fi
-    set +e
-    .venv/bin/python scripts/validate_env.py
-    local rc=$?
-    set -e 2>/dev/null || true
+    # Capture the validator's exit code without enabling errexit; this
+    # script runs under `set -uo pipefail` only and the previous
+    # `set -e 2>/dev/null || true` pattern silently turned errexit ON
+    # for every step that followed, which caused bootstrap.sh to exit
+    # non-zero from any subsequent failed-but-non-fatal command (and
+    # therefore start.sh to report `scripts/bootstrap.sh failed`).
+    local rc=0
+    .venv/bin/python scripts/validate_env.py || rc=$?
     case $rc in
         0) summary_row OK   validate-env "all checked services reachable" ;;
         2) summary_row WARN validate-env "some checks skipped (env vars unset)" ;;
@@ -1083,71 +1146,15 @@ step_validate_env() {
 
 # --------------------------- step: pytest ------------------------------------
 
-_test_gate_stamp_path() {
-    # Per-clone, auto-ignored, never committed. Lives inside .git so it
-    # cannot pollute the working tree fingerprint we are about to compute.
-    printf '%s/.git/fxlab-bootstrap-tests.stamp' "$REPO_ROOT"
-}
-
-# Cross-platform sha256 wrapper. Prefer sha256sum (Linux); fall back to
-# `shasum -a 256` (macOS). Reads from stdin, prints hex digest only.
-_sha256_stdin() {
-    if have_cmd sha256sum; then
-        sha256sum | awk '{print $1}'
-    elif have_cmd shasum; then
-        shasum -a 256 | awk '{print $1}'
-    else
-        # No hash tool — disable the smart skip by emitting a unique-per-call
-        # token, forcing the gate to always run.
-        printf 'no-sha256-%s' "$(date +%s%N)"
-    fi
-}
-
-# Workspace fingerprint = HEAD SHA + diff vs HEAD + every untracked file's
-# content. Captures every signal that could affect a unit-test outcome:
-# new commits, staged/unstaged edits, new untracked source/test files.
-# Dep-lock files (requirements.txt, pyproject.toml, frontend/package-lock.json)
-# and alembic migrations are tracked, so changes to them already surface
-# via the HEAD/diff component — no special-casing needed.
-_test_gate_fingerprint() {
-    {
-        printf 'head=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo no-head)"
-        # NOTE: format strings with a leading `--` are parsed by bash's
-        # builtin printf as end-of-options, so use `%s\n` indirection for
-        # the section separators instead of `printf '---diff---\n'`.
-        printf '%s\n' '---diff---'
-        git -C "$REPO_ROOT" diff HEAD --no-color 2>/dev/null || true
-        printf '%s\n' '---untracked---'
-        # Stream NUL-delimited list of untracked, non-ignored files
-        # directly into xargs so embedded NULs aren't stripped (which
-        # `$(git ls-files ... -z)` would do via command-substitution).
-        # Hash their content so a freshly-added test file invalidates
-        # the cache.
-        git -C "$REPO_ROOT" ls-files --others --exclude-standard -z 2>/dev/null \
-            | xargs -0 -I{} sh -c 'printf "%s:" "$1"; cat -- "$1" 2>/dev/null || true; printf "\n"' _ {}
-    } | _sha256_stdin
-}
-
-_test_gate_should_skip() {
-    [[ $FORCE_TESTS -eq 0 ]] || return 1
-    local stamp
-    stamp="$(_test_gate_stamp_path)"
-    [[ -f "$stamp" ]] || return 1
-    local current saved
-    current="$(_test_gate_fingerprint)"
-    saved="$(cat "$stamp" 2>/dev/null || true)"
-    [[ -n "$current" && "$current" == "$saved" ]]
-}
-
-_test_gate_record_pass() {
-    local stamp
-    stamp="$(_test_gate_stamp_path)"
-    _test_gate_fingerprint > "$stamp" 2>/dev/null || true
-}
-
 step_backend_tests() {
     [[ $DO_TESTS -eq 1 ]] || { log_skip "backend pytest (--skip-tests)"; return 0; }
-    if _test_gate_should_skip; then
+    # One-shot migration of the legacy stamp path from commit 15a54cb so
+    # operators with a pre-existing green stamp do not pay another full
+    # pytest run after pulling this refactor.
+    stamp_migrate_legacy "$REPO_ROOT/.git/fxlab-bootstrap-tests.stamp" "tests"
+    local fp
+    fp="$(fingerprint_workspace)"
+    if [[ $FORCE_TESTS -eq 0 ]] && stamp_matches tests "$fp"; then
         log_skip "backend pytest (workspace fingerprint matches last green run; --force-tests to override)"
         summary_row OK pytest "skipped — no source changes since last green run"
         return 0
@@ -1175,7 +1182,7 @@ step_backend_tests() {
         # Record the workspace fingerprint so the next bootstrap can skip
         # the gate when nothing has changed. Only on green — a failed run
         # leaves any previous stamp stale, so the next run re-tries.
-        _test_gate_record_pass
+        stamp_record tests "$fp"
     else
         log_err "pytest reported failures (full log: /tmp/fxlab_pytest.out)"
         # Show the failure summary section so the operator sees what broke
@@ -1191,6 +1198,26 @@ step_frontend_build() {
     [[ $DO_FRONTEND_BUILD -eq 1 ]] || { log_skip "frontend build (--skip-frontend-build)"; return 0; }
     if [[ ! -f frontend/package.json ]]; then
         log_skip "frontend/package.json missing"
+        return 0
+    fi
+    # Fingerprint the frontend source tree + build config. If unchanged
+    # since the last green run AND the dist/ output is still present,
+    # skip the rebuild — it costs ~50s every invocation.
+    local fp
+    fp="$({ fingerprint_globs \
+                'frontend/src/**/*.ts' 'frontend/src/**/*.tsx' \
+                'frontend/src/**/*.js' 'frontend/src/**/*.jsx' \
+                'frontend/src/**/*.css' 'frontend/src/**/*.html'; \
+            fingerprint_files \
+                frontend/package.json frontend/package-lock.json \
+                frontend/vite.config.ts frontend/vite.config.js \
+                frontend/tsconfig.json frontend/tsconfig.node.json \
+                frontend/index.html; \
+            printf 'dist-exists=%s\n' "$([[ -d frontend/dist ]] && echo y || echo n)"; \
+          } | _sha256_stdin)"
+    if [[ $FORCE_FRONTEND_BUILD -eq 0 ]] && stamp_matches frontend-build "$fp"; then
+        log_skip "frontend build (sources + config match last green run; --force-frontend-build to override)"
+        summary_row OK frontend-build "skipped — frontend sources unchanged"
         return 0
     fi
     log_step "Frontend build smoke (typecheck + build)"
@@ -1215,6 +1242,7 @@ step_frontend_build() {
     if (cd frontend && PATH="$node_bin:$PATH" npm run --silent build 2>&1 | tail -8); then
         log_ok "vite build succeeded"
         summary_row OK frontend-build "tsc + vite build green"
+        stamp_record frontend-build "$fp"
     else
         log_err "vite build failed"
         summary_row FAIL frontend-build "vite build failed"
@@ -1325,8 +1353,10 @@ What's next:
   • Frontend:   cd frontend && npm run dev   → http://localhost:5173
   • Verify:     make verify
   • Re-validate creds:  make validate-env
-  • Re-run bootstrap:   ./scripts/bootstrap.sh        (idempotent)
-  • Reset .env:         ./scripts/bootstrap.sh --reset-env
+  • Resume session:     ./scripts/start.sh
+                        (pulls origin, runs bootstrap; per-step stamps
+                         skip work that has not changed)
+  • Force a full refresh:  ./scripts/start.sh --force
 
 Production install path is unchanged:
   sudo bash install.sh    (full Docker/systemd/Keycloak/nginx stack)
