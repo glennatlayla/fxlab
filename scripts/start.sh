@@ -1,21 +1,49 @@
 #!/usr/bin/env bash
 #
-# FXLab — resume a dev session.
+# FXLab — single entry point for resuming a dev session.
 #
-# Brings the local clone in sync with origin (fast-forward only) and then
-# re-runs scripts/bootstrap.sh so .venv, Python deps, npm deps, frontend
-# build, and Alembic migrations are all current. Idempotent — safe to
-# invoke at the start of every session.
+# Default behaviour: pulls origin (fast-forward only), then runs a fast
+# healthcheck. If the healthcheck reports the environment is green, exit
+# in seconds. If any per-step stamp is stale, auto-escalate into the
+# refresh pipeline (scripts/bootstrap.sh) — which will skip any step
+# whose fingerprint already matches the last green stamp.
 #
-# Pre-flight refusals (exit 1 with a message) — designed to never clobber
-# an operator's in-progress work:
+# Pre-flight refusals (exit 1 with a message) — designed to never
+# clobber an operator's in-progress work:
 #   - not inside a git working tree
 #   - working tree has uncommitted (staged or unstaged) changes
 #   - HEAD is detached
 #   - current branch has no tracking upstream
 #   - upstream has diverged from local (non-fast-forward)
 #
-# See `scripts/start.sh --help` for flags and exit codes.
+# Flags:
+#   --no-pull         Skip the git fetch + pull.
+#   --refresh         Force refresh mode (skip the fast healthcheck).
+#   --force           Force refresh AND override every per-step stamp
+#                     (full reinstall + alembic + frontend rebuild +
+#                     pytest gate, regardless of fingerprint match).
+#                     Implies --refresh.
+#   --status          Print the current healthcheck/stamp status and
+#                     exit. No work, no side-effects.
+#   --skip-tests      In refresh mode, skip the pytest gate entirely.
+#   --force-tests     In refresh mode, re-run pytest even if stamp
+#                     matches.
+#   --force-deps      In refresh mode, re-run make bootstrap even if
+#                     deps stamp matches.
+#   --force-alembic   In refresh mode, re-run alembic upgrade.
+#   --force-frontend-build
+#                     In refresh mode, re-run the frontend build.
+#   --no-bootstrap    Skip the bootstrap pipeline entirely (just sync
+#                     git, run healthcheck, report).
+#   -h, --help        Show this help and exit.
+#
+# Any flag not recognised by start.sh is forwarded to bootstrap.sh.
+#
+# Exit codes:
+#   0  healthy or refresh completed green
+#   1  pre-flight failed (dirty tree, detached HEAD, no upstream, …)
+#      OR healthcheck found a hard failure (compose down, .env missing)
+#      OR refresh pipeline reported a FAIL row.
 
 set -euo pipefail
 
@@ -29,36 +57,23 @@ source "$REPO_ROOT/scripts/_lib.sh"
 
 DO_PULL=1
 DO_BOOTSTRAP=1
+FORCE_REFRESH=0
+STATUS_ONLY=0
 BOOTSTRAP_PASSTHRU=()
 
 print_help() {
-    cat <<'EOF'
-Usage: scripts/start.sh [--no-pull] [--no-bootstrap] [bootstrap-args...]
-
-Resume a dev session: pull from origin (fast-forward only), then run
-scripts/bootstrap.sh to refresh .venv / Python deps / npm deps / migrations.
-
-Options:
-  --no-pull          Skip the git fetch + pull (just refresh deps).
-  --no-bootstrap     Skip scripts/bootstrap.sh (just sync git).
-  -h, --help         Show this help and exit.
-
-Any other flags are forwarded to scripts/bootstrap.sh, e.g.
-    scripts/start.sh --skip-tests --no-docker
-
-Exit codes:
-  0  success
-  1  pre-flight check failed (dirty tree, detached HEAD, no upstream, ...)
-  2  scripts/bootstrap.sh failed
-EOF
+    awk 'NR==1 {next} /^[^#]/ {exit} {print}' "$0"
 }
 
 while (( $# )); do
     case "$1" in
-        --no-pull)         DO_PULL=0 ;;
-        --no-bootstrap)    DO_BOOTSTRAP=0 ;;
-        -h|--help)         print_help; exit 0 ;;
-        *)                 BOOTSTRAP_PASSTHRU+=("$1") ;;
+        --no-pull)          DO_PULL=0 ;;
+        --no-bootstrap)     DO_BOOTSTRAP=0 ;;
+        --refresh)          FORCE_REFRESH=1 ;;
+        --force)            FORCE_REFRESH=1; BOOTSTRAP_PASSTHRU+=("--force") ;;
+        --status)           STATUS_ONLY=1 ;;
+        -h|--help)          print_help; exit 0 ;;
+        *)                  BOOTSTRAP_PASSTHRU+=("$1") ;;
     esac
     shift
 done
@@ -66,17 +81,22 @@ done
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# Step 1 — git sync (fast-forward only)
+# Status mode — short-circuit to healthcheck --status, no pull, no work.
+# ---------------------------------------------------------------------------
+if (( STATUS_ONLY )); then
+    exec "$REPO_ROOT/scripts/healthcheck.sh" --status
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1 — git sync (fast-forward only).
 # ---------------------------------------------------------------------------
 if (( DO_PULL )); then
     log_step "Sync with origin"
 
-    # Refuse on staged or unstaged TRACKED-file modifications — preserves
-    # operator WIP. Untracked files are allowed: `git pull --ff-only` will
-    # itself refuse if a new upstream file would clobber an untracked one,
-    # and otherwise untracked files survive a pull intact. Forcing a stash
-    # for every gitignored scratch file (test SQLite, log, etc.) is friction
-    # without safety value.
+    # Refuse on tracked-file modifications — preserves operator WIP.
+    # Untracked files are allowed: git pull --ff-only refuses to clobber
+    # untracked files itself, and forcing a stash for every gitignored
+    # scratch file is friction without safety value.
     if ! git diff --quiet || ! git diff --cached --quiet; then
         log_err "Working tree has uncommitted tracked-file changes."
         log_err "Stash or commit them first:"
@@ -111,8 +131,6 @@ if (( DO_PULL )); then
         exit 1
     fi
 
-    # --ff-only refuses to merge or rebase; aborts on divergent history.
-    # Operator must resolve manually rather than have start.sh guess.
     if ! git pull --ff-only "$REMOTE" "$BRANCH"; then
         log_err "Pull failed — '$BRANCH' has diverged from $UPSTREAM."
         log_err "Resolve manually:  git status; git log --oneline ..@{u}"
@@ -132,22 +150,61 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2 — bootstrap (idempotent: deps + .venv + migrations + frontend)
+# Step 2 — fast healthcheck. Decides whether refresh is needed.
 # ---------------------------------------------------------------------------
-if (( DO_BOOTSTRAP )); then
-    log_step "Refresh install"
+if (( ! DO_BOOTSTRAP )); then
+    log_skip "bootstrap (--no-bootstrap) — running healthcheck only"
+fi
+
+NEED_REFRESH=0
+if (( FORCE_REFRESH )); then
+    log_info "Refresh forced via --refresh / --force"
+    NEED_REFRESH=1
+else
+    HEALTHCHECK="$REPO_ROOT/scripts/healthcheck.sh"
+    if [[ ! -x "$HEALTHCHECK" ]]; then
+        log_err "scripts/healthcheck.sh missing — falling back to refresh"
+        NEED_REFRESH=1
+    else
+        # Run healthcheck inline (not exec) so we can act on its exit
+        # code. set +e around it because set -e is on at the top of
+        # this script.
+        set +e
+        "$HEALTHCHECK"
+        rc=$?
+        set -e
+        case $rc in
+            0)  log_ok "Environment is ready — no refresh needed."
+                if (( ! DO_BOOTSTRAP )); then
+                    log_ok "start.sh complete (healthcheck-only)"
+                fi
+                exit 0 ;;
+            10) log_info "Healthcheck reports stamps stale — escalating to refresh."
+                NEED_REFRESH=1 ;;
+            1)  log_err "Healthcheck reported hard failures (see above)."
+                exit 1 ;;
+            *)  log_err "Healthcheck exited with unexpected rc=$rc; escalating to refresh."
+                NEED_REFRESH=1 ;;
+        esac
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3 — refresh (only when needed). Per-step stamps inside bootstrap.sh
+# skip work that has not changed.
+# ---------------------------------------------------------------------------
+if (( DO_BOOTSTRAP )) && (( NEED_REFRESH )); then
+    log_step "Refresh"
     BOOTSTRAP_SH="$REPO_ROOT/scripts/bootstrap.sh"
     if [[ ! -x "$BOOTSTRAP_SH" ]]; then
         log_err "scripts/bootstrap.sh missing or not executable: $BOOTSTRAP_SH"
-        exit 2
+        exit 1
     fi
     log_info "Running: $BOOTSTRAP_SH ${BOOTSTRAP_PASSTHRU[*]:-}"
     if ! "$BOOTSTRAP_SH" ${BOOTSTRAP_PASSTHRU[@]+"${BOOTSTRAP_PASSTHRU[@]}"}; then
-        log_err "scripts/bootstrap.sh failed"
-        exit 2
+        log_err "scripts/bootstrap.sh reported failures"
+        exit 1
     fi
-else
-    log_skip "bootstrap (--no-bootstrap)"
 fi
 
 log_ok "start.sh complete"
