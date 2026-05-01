@@ -38,8 +38,20 @@ class DatabaseSettings(BaseSettings):
     """
     Database connection settings.
 
+    PostgreSQL is the canonical runtime database for FXLab. SQLite is
+    permitted ONLY for unit tests and local development; production
+    deployments enforce PostgreSQL via the guard in
+    `services/api/db.py:_resolve_database_url()` (raises RuntimeError
+    if `ENVIRONMENT=production` and `DATABASE_URL` starts with `sqlite:`).
+
+    The Pydantic default below points at the docker-compose dev stack
+    (postgres service on the docker network). It is harmless when env
+    vars override it (every real deployment + `make bootstrap` does so);
+    it documents intent for any reader of the source.
+
     Attributes:
-        url: Full database connection URL (PostgreSQL or SQLite).
+        url: Full database connection URL. PostgreSQL in production;
+            SQLite allowed in test/dev (override via env var).
         pool_size: Connection pool size (PostgreSQL only).
         pool_overflow: Max overflow connections (PostgreSQL only).
         pool_timeout: Seconds to wait for a connection from pool.
@@ -48,8 +60,8 @@ class DatabaseSettings(BaseSettings):
     """
 
     url: str = Field(
-        default="sqlite:///./fxlab_test.db",
-        description="Database connection URL",
+        default="postgresql://fxlab:fxlab@postgres:5432/fxlab",
+        description="Database connection URL (PostgreSQL canonical; SQLite allowed for tests only)",
     )
     pool_size: int = Field(default=20, ge=1, description="Connection pool size")
     pool_overflow: int = Field(default=20, ge=0, description="Max overflow connections")
