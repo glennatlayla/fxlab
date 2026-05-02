@@ -195,18 +195,66 @@ run_register_cleanup() {
 
 run_preflight_orphan_check() {
     local pattern="$1"
-    # Skip self ($$) and our parent tree. -ww gives full cmd; awk
-    # filters out anything in the current process group.
-    local current_pgid
-    current_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+    # Build the set of PIDs we must NOT flag: ourselves, every
+    # ancestor of ourselves up to PID 1, and every descendant of
+    # ourselves. Same-pgid filtering is unreliable because bash
+    # invoked as `bash <script>` (or via the Claude harness wrapper)
+    # creates a new process group, so the parent harness shell ends
+    # up in a different pgid even though it is a legitimate ancestor
+    # we should not flag as an orphan.
+    local exempt_pids=" $$ "
+    local p="$$"
+    local depth=0
+    while (( depth < 50 )); do
+        local pp
+        pp="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+        [[ -z "$pp" || "$pp" == "0" || "$pp" == "1" ]] && break
+        exempt_pids+="$pp "
+        p="$pp"
+        depth=$((depth + 1))
+    done
+    # Descendants (transitive): expand via pgrep -P repeatedly.
+    local frontier="$$"
+    depth=0
+    while (( depth < 50 )) && [[ -n "$frontier" ]]; do
+        local next=""
+        local pid
+        for pid in $frontier; do
+            local kids
+            kids="$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')"
+            for k in $kids; do
+                exempt_pids+="$k "
+                next+="$k "
+            done
+        done
+        frontier="$next"
+        depth=$((depth + 1))
+    done
+
+    # Filter logic:
+    #   - Skip the header row.
+    #   - Skip exempt PIDs (self + ancestors + descendants).
+    #   - Skip our own pipeline tools (awk/grep/ps) — without this,
+    #     the awk we are running here matches its own command line
+    #     because the pattern ("\.venv/bin/python -m pytest") appears
+    #     literally in its `-v pat=...` arg.
+    #   - Match the pattern only against the COMMAND portion of the
+    #     line ($4 onward), not the whole line, so PIDs whose command
+    #     happens to contain the pattern as a quoted string (e.g. our
+    #     own pipeline ancestor running this script) are not caught.
     local orphans
     orphans="$(ps -eo pid,pgid,etime,args -ww 2>/dev/null \
-        | awk -v me="$$" -v pgid="$current_pgid" \
-            -v pat="$pattern" '
+        | awk -v exempt=" $exempt_pids " \
+              -v pat="$pattern" '
             NR==1 {next}
-            $1==me {next}
-            $2==pgid {next}
-            $0 ~ pat {print}
+            { tok=" " $1 " " }
+            index(exempt, tok) > 0 {next}
+            $4 == "awk" || $4 == "grep" || $4 == "ps" {next}
+            {
+                cmd = ""
+                for (i = 4; i <= NF; i++) cmd = cmd " " $i
+                if (cmd ~ pat) print
+            }
         ' || true)"
     if [[ -n "$orphans" ]]; then
         log_warn "Detected possible orphan processes matching: $pattern"
