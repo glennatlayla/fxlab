@@ -280,9 +280,14 @@ if (( DO_APP_UP )); then
     fi
     api_ok=1
     frontend_ok=1
+    # Bind to 0.0.0.0 so the dev server is reachable from another
+    # machine on the LAN (operator's laptop browsing the API/UI on
+    # the dev box). Override with FXLAB_BIND_HOST=127.0.0.1 in .env
+    # if you need loopback-only.
+    BIND_HOST="${FXLAB_BIND_HOST:-0.0.0.0}"
     app_launch api 8000 \
         "$REPO_ROOT/.venv/bin/python" -m uvicorn services.api.main:app \
-            --host 127.0.0.1 --port 8000 \
+            --host "$BIND_HOST" --port 8000 \
         || api_ok=0
     # Frontend dev server: vite picks up vite.config + .env automatically
     # but needs CWD=frontend AND npm on PATH. The repo's nodeenv installs
@@ -302,15 +307,29 @@ if (( DO_APP_UP )); then
         bash -c "
             export PATH=\"$NODE_PATH_DIR:\$PATH\"
             cd \"$REPO_ROOT/frontend\"
-            exec npm run dev -- --host 127.0.0.1
+            exec npm run dev -- --host $BIND_HOST
         " \
         || frontend_ok=0
 
     if (( api_ok )) && (( frontend_ok )); then
         log_ok ""
         log_ok "FXLab is ready."
-        log_ok "  → UI:        http://localhost:5173"
-        log_ok "  → API docs:  http://localhost:8000/docs"
+        # Print every reachable address (loopback + every non-127
+        # interface from `hostname -I`) so the operator knows which
+        # URL to use from their laptop. The dev box typically has
+        # several: ZeroTier (192.168.x), internal LAN (10.x), docker
+        # bridge (172.17.x). All listed; operator picks the one they
+        # can reach.
+        log_ok "  → UI:"
+        log_ok "      http://localhost:5173"
+        for LAN_IP in $(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(127\.|172\.17\.|$)'); do
+            log_ok "      http://$LAN_IP:5173"
+        done
+        log_ok "  → API docs:"
+        log_ok "      http://localhost:8000/docs"
+        for LAN_IP in $(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(127\.|172\.17\.|$)'); do
+            log_ok "      http://$LAN_IP:8000/docs"
+        done
         if [[ -n "${FXLAB_ADMIN_EMAIL:-}" ]]; then
             log_ok "  → Login as:  $FXLAB_ADMIN_EMAIL  (Keycloak realm: ${KEYCLOAK_REALM:-fxlab})"
         fi
