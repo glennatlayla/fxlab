@@ -210,4 +210,42 @@ if grep -q 'awk -v exempt' <<< "$output"; then
 fi
 pass "run_preflight_orphan_check does not match its own awk pipeline"
 
+# 9. CRITICAL for shared-host correctness: a pytest invocation whose
+#    CWD is OUTSIDE REPO_ROOT must NOT be flagged as an FXLab orphan.
+#    The dev box runs another application that also uses pytest;
+#    matching purely on the command line would risk surfacing (and
+#    later killing) that other app's processes.
+TMPCWD="$(mktemp -d)"
+trap 'rm -rf "$TMPCWD"' EXIT
+
+# Spawn a fake "pytest" worker outside REPO_ROOT. Use sleep with an
+# argv that matches the orphan pattern so we exercise the matcher.
+( cd "$TMPCWD" && exec -a '.venv/bin/python -m pytest tests/unit/' sleep 30 ) &
+FAKE_PYTEST_PID=$!
+
+# Give it a moment to settle into the new CWD.
+i=0
+while (( i < 20 )); do
+    if [[ -e "/proc/$FAKE_PYTEST_PID/cwd" ]]; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+
+output="$(bash -c "
+    set -euo pipefail
+    export REPO_ROOT='$REPO_ROOT'
+    source '$REPO_ROOT/scripts/_lib.sh'
+    run_preflight_orphan_check 'scripts/(start|bootstrap)\\.sh|fxlab_pytest|\\.venv/bin/python -m pytest'
+    echo END
+" 2>&1)"
+
+kill "$FAKE_PYTEST_PID" 2>/dev/null || true
+wait "$FAKE_PYTEST_PID" 2>/dev/null || true
+
+if grep -q "$FAKE_PYTEST_PID" <<< "$output"; then
+    echo "$output"
+    fail "run_preflight_orphan_check flagged a pytest whose CWD is OUTSIDE REPO_ROOT"
+fi
+pass "run_preflight_orphan_check is scoped by /proc/<pid>/cwd to REPO_ROOT (shared-host safe)"
+
 echo "all run-lifecycle tests passed"

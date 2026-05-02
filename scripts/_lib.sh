@@ -243,11 +243,15 @@ run_preflight_orphan_check() {
     #     because the pattern ("\.venv/bin/python -m pytest") appears
     #     literally in its `-v pat=...` arg.
     #   - Match the pattern only against the COMMAND portion of the
-    #     line ($4 onward), not the whole line, so PIDs whose command
-    #     happens to contain the pattern as a quoted string (e.g. our
-    #     own pipeline ancestor running this script) are not caught.
-    local orphans
-    orphans="$(ps -eo pid,pgid,etime,args -ww 2>/dev/null \
+    #     line ($4 onward), not the whole line.
+    #   - CRITICAL for shared-host correctness: only flag a process
+    #     as an FXLab orphan if its working directory is inside
+    #     $REPO_ROOT. Other applications on this box may use
+    #     `.venv/bin/python -m pytest` too — we must never report or
+    #     touch those. We do this in a second pass below because awk
+    #     cannot read /proc/<pid>/cwd portably.
+    local candidate_pids
+    candidate_pids="$(ps -eo pid,pgid,etime,args -ww 2>/dev/null \
         | awk -v exempt=" $exempt_pids " \
               -v pat="$pattern" '
             NR==1 {next}
@@ -257,9 +261,32 @@ run_preflight_orphan_check() {
             {
                 cmd = ""
                 for (i = 4; i <= NF; i++) cmd = cmd " " $i
-                if (cmd ~ pat) print
+                if (cmd ~ pat) print $1
             }
         ' || true)"
+
+    # Per-candidate CWD scoping. Linux: /proc/<pid>/cwd is a symlink
+    # to the process's current directory. Skip processes whose CWD is
+    # not inside REPO_ROOT — those belong to a different application
+    # sharing this host.
+    local orphans=""
+    local cpid
+    for cpid in $candidate_pids; do
+        local pid_cwd
+        pid_cwd="$(readlink "/proc/$cpid/cwd" 2>/dev/null || true)"
+        if [[ -z "$pid_cwd" ]]; then
+            # Cannot read CWD (process gone, or non-Linux fallback).
+            # On non-Linux we conservatively skip — if we can't prove
+            # it belongs to this repo, we don't report it.
+            continue
+        fi
+        if [[ "$pid_cwd" != "$REPO_ROOT" && "$pid_cwd" != "$REPO_ROOT"/* ]]; then
+            continue
+        fi
+        local row
+        row="$(ps -p "$cpid" -o pid,pgid,etime,args -ww 2>/dev/null | tail -n +2 || true)"
+        [[ -n "$row" ]] && orphans+="$row"$'\n'
+    done
     if [[ -n "$orphans" ]]; then
         log_warn "Detected possible orphan processes matching: $pattern"
         echo "$orphans" | sed 's/^/    /'
