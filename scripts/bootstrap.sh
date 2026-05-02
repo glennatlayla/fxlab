@@ -1120,7 +1120,11 @@ step_alembic() {
 
     local attempt=1 max=3 delay=2
     while (( attempt <= max )); do
-        if DATABASE_URL="$db_url" .venv/bin/alembic upgrade head 2>&1 | tail -5; then
+        # Stream alembic output live and use PIPESTATUS so the if-test
+        # reflects alembic's actual exit code, not tail's.
+        DATABASE_URL="$db_url" .venv/bin/alembic upgrade head 2>&1 | tee /tmp/fxlab_alembic.out
+        local alembic_rc=${PIPESTATUS[0]}
+        if [[ $alembic_rc -eq 0 ]]; then
             log_ok "migrations applied (attempt $attempt)"
             summary_row OK alembic "head (attempt $attempt)"
             stamp_record alembic "$fp"
@@ -1131,7 +1135,7 @@ step_alembic() {
         delay=$((delay * 2))
         attempt=$((attempt + 1))
     done
-    log_err "alembic upgrade failed after $max attempts"
+    log_err "alembic upgrade failed after $max attempts (see /tmp/fxlab_alembic.out)"
     summary_row FAIL alembic "upgrade failed (3 attempts)"
 }
 
@@ -1167,7 +1171,13 @@ step_backend_tests() {
     # pytest run after pulling this refactor.
     stamp_migrate_legacy "$REPO_ROOT/.git/fxlab-bootstrap-tests.stamp" "tests"
     local fp
-    fp="$(fingerprint_workspace)"
+    # Use fingerprint_test_inputs (the scoped fingerprint added in
+    # f218c2d) so a tooling-only edit to scripts/ or docs/ does NOT
+    # invalidate the tests stamp. CRITICAL: this MUST match the
+    # fingerprint healthcheck.sh uses to read the stamp — if the
+    # writer and reader compute different digests, the stamp can
+    # never match and we re-run pytest on every invocation.
+    fp="$(fingerprint_test_inputs)"
     if [[ $FORCE_TESTS -eq 0 ]] && stamp_matches tests "$fp"; then
         log_skip "backend pytest (workspace fingerprint matches last green run; --force-tests to override)"
         summary_row OK pytest "skipped — no source changes since last green run"
@@ -1181,21 +1191,35 @@ step_backend_tests() {
     # etc.) do not block dev-onboarding. CI runs `make test` for the full
     # suite. The npm-build unit test is deselected because it shells out
     # to the frontend build, which step_frontend_build already covers.
+    # No `-q`: with quiet mode pytest emits a single line of dots that
+    # buffers heavily through `tee`, which is why the operator saw 20
+    # minutes of dead-air. Default mode prints one progress line per
+    # test file with a percentage — readable and continuous. PYTHONUNBUFFERED
+    # forces line-buffered stdout from the python interpreter so the
+    # output reaches `tee` (and the terminal) without 4 KiB-block delay.
     local pytest_args=(
-        -q --no-cov
+        --no-cov
+        --color=yes
+        --tb=short
         tests/unit/
         --deselect=tests/unit/test_m0_frontend_structure.py::test_ac8_npm_build_succeeds
     )
-    # Capture the full pytest output to /tmp/fxlab_pytest.out so failures
-    # can be diagnosed. The tail-of-tail to grep keeps the success-detection
-    # logic narrow (only the summary line counts), but the log retains
-    # everything the operator needs to investigate.
-    if .venv/bin/python -m pytest "${pytest_args[@]}" 2>&1 | tee /tmp/fxlab_pytest.out | tail -3 | grep -qE '^=+ [0-9]+ passed'; then
+    # Stream pytest's output live to the terminal AND tee it to
+    # /tmp/fxlab_pytest.out for post-mortem analysis. Capture the
+    # actual pytest exit code via PIPESTATUS — the previous
+    # `pytest | tee | tail -3 | grep -qE` chain swallowed the exit
+    # code and silenced all live output, so the operator could not
+    # tell the difference between "running" and "hung".
+    log_info "pytest streaming live; full log at /tmp/fxlab_pytest.out"
+    PYTHONUNBUFFERED=1 .venv/bin/python -m pytest "${pytest_args[@]}" 2>&1 | tee /tmp/fxlab_pytest.out
+    local pytest_rc=${PIPESTATUS[0]}
+    if [[ $pytest_rc -eq 0 ]]; then
         log_ok "$(tail -1 /tmp/fxlab_pytest.out)"
         summary_row OK pytest "$(tail -1 /tmp/fxlab_pytest.out | tr -s ' ')"
-        # Record the workspace fingerprint so the next bootstrap can skip
-        # the gate when nothing has changed. Only on green — a failed run
-        # leaves any previous stamp stale, so the next run re-tries.
+        # Record the test-inputs fingerprint so the next bootstrap can
+        # skip the gate when nothing has changed. Only on green — a
+        # failed run leaves any previous stamp stale, so the next run
+        # re-tries.
         stamp_record tests "$fp"
     else
         log_err "pytest reported failures (full log: /tmp/fxlab_pytest.out)"
@@ -1246,19 +1270,29 @@ step_frontend_build() {
         return 0
     fi
     # Run typecheck and build separately so we know which one tripped.
-    if (cd frontend && PATH="$node_bin:$PATH" npm run --silent typecheck 2>&1 | tail -8); then
+    # Stream live (no `tail -8` swallowing progress) and capture the
+    # tool's exit code via PIPESTATUS so the if-test reflects truth
+    # rather than tail's exit. tee writes a per-step log so a failure
+    # is fully diagnosable after the run.
+    log_info "tsc --noEmit streaming; full log at /tmp/fxlab_typecheck.out"
+    (cd frontend && PATH="$node_bin:$PATH" npm run typecheck 2>&1) | tee /tmp/fxlab_typecheck.out
+    local tsc_rc=${PIPESTATUS[0]}
+    if [[ $tsc_rc -eq 0 ]]; then
         log_ok "tsc --noEmit clean"
     else
         log_warn "tsc --noEmit reported errors (continuing)"
-        summary_row WARN frontend-build "tsc errors"
+        summary_row WARN frontend-build "tsc errors (see /tmp/fxlab_typecheck.out)"
         return 0
     fi
-    if (cd frontend && PATH="$node_bin:$PATH" npm run --silent build 2>&1 | tail -8); then
+    log_info "vite build streaming; full log at /tmp/fxlab_vite.out"
+    (cd frontend && PATH="$node_bin:$PATH" npm run build 2>&1) | tee /tmp/fxlab_vite.out
+    local vite_rc=${PIPESTATUS[0]}
+    if [[ $vite_rc -eq 0 ]]; then
         log_ok "vite build succeeded"
         summary_row OK frontend-build "tsc + vite build green"
         stamp_record frontend-build "$fp"
     else
-        log_err "vite build failed"
+        log_err "vite build failed (see /tmp/fxlab_vite.out)"
         summary_row FAIL frontend-build "vite build failed"
     fi
 }

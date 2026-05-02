@@ -244,4 +244,44 @@ pass "stamp_migrate_legacy never overwrites an existing new stamp"
 
 rm -f "$LEGACY" "$NEW_PATH"
 
+# ---------------------------------------------------------------------------
+# Writer / reader fingerprint agreement.
+#
+# step_backend_tests in scripts/bootstrap.sh writes the `tests` stamp.
+# scripts/healthcheck.sh reads it. They MUST compute the same digest
+# from the same workspace state — otherwise the stamp can never match
+# and pytest re-runs on every invocation regardless of what changed.
+#
+# This is the regression test for the bug landed in f218c2d, where the
+# bootstrap.sh diff was nuked by a destructive `git checkout` in the
+# test before it was committed: the commit message claimed the writer
+# had been switched to fingerprint_test_inputs, but only the reader
+# (healthcheck.sh) actually got the change. End result: tests stamp
+# permanently stale.
+# ---------------------------------------------------------------------------
+
+writer_fp_call="$(grep -E '^[[:space:]]*fp="\$\(fingerprint_' "$REPO_ROOT/scripts/bootstrap.sh" \
+    | grep -i tests -B0 -A0 || true)"
+# Locate the tests fingerprint specifically (it is the one assigned in
+# step_backend_tests, between the function start and the first
+# stamp_matches tests / stamp_record tests call).
+writer_tests_fp="$(awk '
+    /^step_backend_tests\(\) \{/      {in_fn=1; next}
+    in_fn && /^}/                     {in_fn=0}
+    in_fn && /fp="\$\(fingerprint_/   {print; exit}
+' "$REPO_ROOT/scripts/bootstrap.sh")"
+reader_tests_fp="$(awk '
+    /^# tests stamp/                  {capture=1; next}
+    capture && /fp="\$\(fingerprint_/ {print; exit}
+' "$REPO_ROOT/scripts/healthcheck.sh")"
+[[ -n "$writer_tests_fp" ]] || fail "could not locate tests fingerprint in bootstrap.sh::step_backend_tests"
+[[ -n "$reader_tests_fp" ]] || fail "could not locate tests fingerprint in healthcheck.sh"
+
+# Strip whitespace differences and compare the function names used.
+writer_fn="$(sed -E 's/.*fingerprint_([a-z_]+).*/fingerprint_\1/' <<< "$writer_tests_fp")"
+reader_fn="$(sed -E 's/.*fingerprint_([a-z_]+).*/fingerprint_\1/' <<< "$reader_tests_fp")"
+[[ "$writer_fn" == "$reader_fn" ]] \
+    || fail "tests fingerprint mismatch: writer uses '$writer_fn', reader uses '$reader_fn' — stamp can never match"
+pass "tests stamp writer (bootstrap.sh) and reader (healthcheck.sh) use the same fingerprint function ($writer_fn)"
+
 echo "all stamp + fingerprint tests passed"
