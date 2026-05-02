@@ -17,3 +17,12 @@ PyYAML>=6.0.0
 # fails on a fresh clone and tranches like Tranche L (2026-04-16) can
 # slip past the format/lint gate without anyone noticing locally.
 pre-commit>=4.0.0,<5.0.0
+
+# Per-test timeout for the bootstrap pytest gate. On 2026-05-02 a
+# mis-marked @pytest.mark.unit test that drives full-backtest CLI
+# invocations (test_smoke_against_two_irs_produces_deterministic_report)
+# deadlocked and dead-aired the whole bootstrap for hours. With
+# pytest-timeout, scripts/bootstrap.sh::step_backend_tests passes
+# `--timeout=60 --timeout-method=thread` so any individual hung test
+# fails after 60s instead of stalling the gate.
+pytest-timeout>=2.3.0,<3.0.0

@@ -1197,12 +1197,34 @@ step_backend_tests() {
     # test file with a percentage — readable and continuous. PYTHONUNBUFFERED
     # forces line-buffered stdout from the python interpreter so the
     # output reaches `tee` (and the terminal) without 4 KiB-block delay.
+    # Per-test timeout: bootstrap's pytest gate is a smoke check, not a
+    # CI run. Apply a hard 60-second per-test timeout via pytest-timeout
+    # (added to requirements-dev.txt 2026-05-02) so a single deadlocked
+    # test cannot dead-air the whole gate for hours. If the plugin is
+    # not yet installed (operator on a clone with stale deps), the
+    # --timeout flag is silently ignored by pytest with a warning.
+    local pytest_timeout_args=()
+    if .venv/bin/python -c "import pytest_timeout" 2>/dev/null; then
+        pytest_timeout_args=(--timeout=60 --timeout-method=thread)
+    else
+        log_warn "pytest-timeout not installed — bootstrap pytest gate has no per-test deadline"
+        log_warn "  install with: .venv/bin/pip install pytest-timeout"
+    fi
     local pytest_args=(
         --no-cov
         --color=yes
         --tb=short
+        "${pytest_timeout_args[@]}"
         tests/unit/
         --deselect=tests/unit/test_m0_frontend_structure.py::test_ac8_npm_build_succeeds
+        # Mismarked as @pytest.mark.unit but actually drives the full
+        # backtest CLI end-to-end against two IRs and re-runs it for a
+        # determinism assertion — minutes per IR, no timeout, prone to
+        # asyncio deadlocks. Belongs in tests/integration/. CI's
+        # `make test` continues to exercise it; bootstrap's smoke gate
+        # skips it so dev-onboarding is not gated on a flaky 10-minute
+        # integration test.
+        --deselect=tests/unit/services/cli/test_backtest_all_strategies.py::test_smoke_against_two_irs_produces_deterministic_report
     )
     # Stream pytest's output live to the terminal AND tee it to
     # /tmp/fxlab_pytest.out for post-mortem analysis. Capture the
