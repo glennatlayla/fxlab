@@ -81,11 +81,23 @@ done
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# Status mode — short-circuit to healthcheck --status, no pull, no work.
+# Status mode — short-circuit to healthcheck --status, no pull, no work,
+# no lock acquisition (it's a read-only probe).
 # ---------------------------------------------------------------------------
 if (( STATUS_ONLY )); then
     exec "$REPO_ROOT/scripts/healthcheck.sh" --status
 fi
+
+# ---------------------------------------------------------------------------
+# Lifecycle: refuse concurrent runs, install descendant-cleanup trap,
+# and warn about any orphan pytest/bootstrap.sh from a prior session.
+# This is the structural fix for "I left two pytests running" —
+# without it, an interrupted run would orphan its children and a
+# second start.sh would race the first on stamp files.
+# ---------------------------------------------------------------------------
+run_preflight_orphan_check 'scripts/(start|bootstrap)\.sh|fxlab_pytest|\.venv/bin/python -m pytest'
+run_acquire_lock fxlab-start
+run_register_cleanup
 
 # ---------------------------------------------------------------------------
 # Step 1 — git sync (fast-forward only).

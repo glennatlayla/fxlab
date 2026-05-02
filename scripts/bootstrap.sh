@@ -138,6 +138,13 @@ done
 cd "$REPO_ROOT" || die "cannot cd to repo root: $REPO_ROOT"
 summary_init
 
+# Refuse concurrent bootstrap runs immediately. The cleanup-trap
+# registration is deferred to AFTER the existing compose-override
+# trap is set so we chain onto it rather than overwriting it.
+# start.sh acquires its own outer lock; this inner lock catches
+# direct `./scripts/bootstrap.sh` invocations.
+run_acquire_lock fxlab-bootstrap
+
 readonly OS="$(detect_os)"
 log_info "host: os=$OS"
 
@@ -638,6 +645,13 @@ _cleanup_compose_override() {
     [[ -n "$COMPOSE_OVERRIDE_FILE" && -f "$COMPOSE_OVERRIDE_FILE" ]] && rm -f "$COMPOSE_OVERRIDE_FILE"
 }
 trap _cleanup_compose_override EXIT
+# Now that the compose trap is set, register the descendant-killer +
+# lock-releaser. run_register_cleanup chains onto the existing EXIT
+# trap, so on exit we run (in order): kill descendants, release the
+# fxlab-bootstrap lock, clean up the compose override file. Critical
+# for preventing orphan pytest / npm / alembic when the operator
+# Ctrl-Cs bootstrap mid-run.
+run_register_cleanup
 
 # Find an available TCP port starting at $1, incrementing up to $2
 # (default 100) attempts. Echoes the port; returns 1 if none free.

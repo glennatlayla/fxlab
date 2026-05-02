@@ -49,13 +49,19 @@ pass "fingerprint_workspace stable across consecutive calls"
 [[ ${#fp1} -eq 64 ]] || fail "fingerprint_workspace digest length unexpected (${#fp1})"
 pass "fingerprint_workspace returns 64-char sha256"
 
-# Edit a tracked file, ensure fingerprint changes, then revert.
+# Edit a tracked file, ensure fingerprint changes, then revert. Note
+# we use cp-based save/restore (not git checkout) so this test does
+# not destroy unrelated unstaged changes in the operator's tree.
 README="$REPO_ROOT/README.md"
 [[ -f "$README" ]] || fail "README.md missing — adapt this test"
+TMPDIR="$(mktemp -d)"
+README_BACKUP="$TMPDIR/README.bak.$$"
+cp -- "$README" "$README_BACKUP"
 echo "# fingerprint test marker $$" >> "$README"
 fp_dirty="$(fingerprint_workspace)"
-[[ "$fp_dirty" != "$fp1" ]] || fail "fingerprint_workspace did not change after editing README.md"
-git -C "$REPO_ROOT" checkout -- README.md
+[[ "$fp_dirty" != "$fp1" ]] || { cp -- "$README_BACKUP" "$README"; fail "fingerprint_workspace did not change after editing README.md"; }
+cp -- "$README_BACKUP" "$README"
+rm -f "$README_BACKUP"
 fp_clean="$(fingerprint_workspace)"
 [[ "$fp_clean" == "$fp1" ]] || fail "fingerprint_workspace did not restore after revert"
 pass "fingerprint_workspace tracks tracked-file edits + revert"
@@ -72,32 +78,55 @@ ti2="$(fingerprint_test_inputs)"
 [[ "$ti1" == "$ti2" ]] || fail "fingerprint_test_inputs not stable: $ti1 vs $ti2"
 pass "fingerprint_test_inputs stable across consecutive calls"
 
+# Helper: save and restore a file's content via `cp`. NEVER use
+# `git checkout -- <path>` here — that destroys the operator's
+# unstaged edits to the SAME file (caught the hard way: the
+# bootstrap.sh case below was nuking concurrent lifecycle work in
+# the working tree).
+_save_and_edit() {
+    local path="$1" marker="$2"
+    local backup="$TMPDIR/$(basename "$path").$$.bak"
+    cp -- "$path" "$backup"
+    echo "$marker" >> "$path"
+    printf '%s' "$backup"
+}
+_restore() {
+    local path="$1" backup="$2"
+    cp -- "$backup" "$path"
+    rm -f "$backup"
+}
+
 # Editing scripts/bootstrap.sh — a tooling-only file — must NOT
 # invalidate the test fingerprint. This is the regression test for
 # the user-identified bug.
 BOOTSTRAP_SH="$REPO_ROOT/scripts/bootstrap.sh"
-echo "# tooling-only marker $$" >> "$BOOTSTRAP_SH"
+backup="$(_save_and_edit "$BOOTSTRAP_SH" "# tooling-only marker $$")"
 ti_after_tooling="$(fingerprint_test_inputs)"
-git -C "$REPO_ROOT" checkout -- scripts/bootstrap.sh
+_restore "$BOOTSTRAP_SH" "$backup"
 [[ "$ti_after_tooling" == "$ti1" ]] \
     || fail "fingerprint_test_inputs changed when scripts/bootstrap.sh was edited (must not — tooling-only)"
 pass "fingerprint_test_inputs is NOT invalidated by scripts/ edits (tooling-only)"
 
 # Editing README.md (docs) — must NOT invalidate.
-echo "# docs marker $$" >> "$REPO_ROOT/README.md"
+README_MD="$REPO_ROOT/README.md"
+backup="$(_save_and_edit "$README_MD" "# docs marker $$")"
 ti_after_docs="$(fingerprint_test_inputs)"
-git -C "$REPO_ROOT" checkout -- README.md
+_restore "$README_MD" "$backup"
 [[ "$ti_after_docs" == "$ti1" ]] \
     || fail "fingerprint_test_inputs changed when README.md was edited (must not — docs)"
 pass "fingerprint_test_inputs is NOT invalidated by docs edits"
 
 # Editing a Python file under libs/ MUST invalidate. Pick the first
 # .py file we find under libs/ to keep this resilient to refactors.
-LIBS_PY="$(git -C "$REPO_ROOT" ls-files 'libs/*.py' 2>/dev/null | head -1)"
+# Avoid `git ls-files | head -1` because head closing stdin SIGPIPEs
+# git, which under pipefail+errexit silently exits this test.
+LIBS_FILES="$(git -C "$REPO_ROOT" ls-files 'libs/*.py' 2>/dev/null || true)"
+LIBS_PY="${LIBS_FILES%%$'\n'*}"
 if [[ -n "$LIBS_PY" ]]; then
-    echo "# python source marker $$" >> "$REPO_ROOT/$LIBS_PY"
+    LIBS_PATH="$REPO_ROOT/$LIBS_PY"
+    backup="$(_save_and_edit "$LIBS_PATH" "# python source marker $$")"
     ti_after_libs="$(fingerprint_test_inputs)"
-    git -C "$REPO_ROOT" checkout -- "$LIBS_PY"
+    _restore "$LIBS_PATH" "$backup"
     [[ "$ti_after_libs" != "$ti1" ]] \
         || fail "fingerprint_test_inputs did NOT change when libs/ Python source was edited"
     pass "fingerprint_test_inputs IS invalidated by libs/*.py edits"
@@ -107,9 +136,9 @@ fi
 # pinned versions move).
 REQ="$REPO_ROOT/requirements.txt"
 if [[ -f "$REQ" ]]; then
-    echo "# req marker $$" >> "$REQ"
+    backup="$(_save_and_edit "$REQ" "# req marker $$")"
     ti_after_req="$(fingerprint_test_inputs)"
-    git -C "$REPO_ROOT" checkout -- requirements.txt
+    _restore "$REQ" "$backup"
     [[ "$ti_after_req" != "$ti1" ]] \
         || fail "fingerprint_test_inputs did NOT change when requirements.txt was edited"
     pass "fingerprint_test_inputs IS invalidated by requirements.txt edits"
