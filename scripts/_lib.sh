@@ -193,6 +193,173 @@ run_register_cleanup() {
     trap '_run_kill_descendants; _run_release_lock; exit 143' TERM
 }
 
+# Lock-release-only variant: install an EXIT/INT/TERM trap that
+# releases the held lock but does NOT kill descendant processes.
+# Used by start.sh, which intentionally launches long-running
+# services (the API, the frontend dev server) that must outlive
+# the start.sh process. Killing them on start.sh exit would
+# terminate the very services start.sh just brought up.
+#
+# bootstrap.sh continues to use run_register_cleanup (the
+# descendant-killing variant) because its descendants are
+# pytest / npm / alembic — meant to be reaped on abnormal exit.
+run_register_lock_release_only() {
+    [[ $_RUN_CLEANUP_REGISTERED -eq 1 ]] && return 0
+    _RUN_CLEANUP_REGISTERED=1
+    local existing
+    existing="$(trap -p EXIT 2>/dev/null | sed -E "s/^trap -- '(.*)' EXIT$/\\1/")"
+    if [[ -n "$existing" ]]; then
+        # shellcheck disable=SC2064  # intentional eager expansion
+        trap "_run_release_lock; $existing" EXIT
+    else
+        trap '_run_release_lock' EXIT
+    fi
+    trap '_run_release_lock; exit 130' INT
+    trap '_run_release_lock; exit 143' TERM
+}
+
+# ----------------------------- application services --------------------------
+#
+# Launch and tear down the FXLab application services (FastAPI on 8000,
+# Vite dev server on 5173) so `./scripts/start.sh` actually leaves the
+# operator with a usable app at http://localhost:5173, not just a
+# prepared environment.
+#
+# Each service has a PID file at .git/fxlab-app-<name>.pid (per-clone,
+# never committed) and a log file at /tmp/fxlab-app-<name>.log.
+
+app_pid_path() { printf '%s/.git/fxlab-app-%s.pid' "$REPO_ROOT" "$1"; }
+app_log_path() { printf '/tmp/fxlab-app-%s.log' "$1"; }
+
+# Returns 0 if a process is listening on the given port.
+app_port_up() {
+    local port="$1"
+    timeout 1 bash -c "exec 9<>/dev/tcp/127.0.0.1/$port" 2>/dev/null
+}
+
+# Returns 0 if the recorded PID for <name> is still alive.
+app_pid_alive() {
+    local name="$1"
+    local pid_file
+    pid_file="$(app_pid_path "$name")"
+    [[ -f "$pid_file" ]] || return 1
+    local pid
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# Launch a long-running command in the background as a detached process,
+# write its PID to .git/fxlab-app-<name>.pid, redirect its stdout+stderr
+# to /tmp/fxlab-app-<name>.log, and wait for the given port to start
+# responding (30s budget). Returns 0 if the service comes up.
+#
+# Args: name, port, command...
+app_launch() {
+    local name="$1" port="$2"; shift 2
+    local pid_file log_file
+    pid_file="$(app_pid_path "$name")"
+    log_file="$(app_log_path "$name")"
+
+    if app_port_up "$port"; then
+        log_ok "$name already up on http://localhost:$port"
+        return 0
+    fi
+
+    # Stale PID file? Remove it.
+    if [[ -f "$pid_file" ]]; then
+        local old_pid
+        old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            log_warn "$name PID $old_pid is alive but port $port not responding"
+            log_warn "  log tail: $log_file"
+            tail -10 "$log_file" 2>/dev/null | sed 's/^/    /'
+            return 1
+        fi
+        rm -f "$pid_file"
+    fi
+
+    log_step "Starting $name (background)"
+    log_info "  cmd: $*"
+    log_info "  log: $log_file"
+
+    # setsid puts the child in its own session/pgid so it survives this
+    # shell exiting (start.sh exits while the API keeps serving).
+    # nohup makes the redirects survive too.
+    setsid nohup "$@" >"$log_file" 2>&1 < /dev/null &
+    local pid=$!
+    disown "$pid" 2>/dev/null || true
+    echo "$pid" >"$pid_file"
+
+    local i=0 budget=30
+    while (( i < budget )); do
+        if app_port_up "$port"; then
+            log_ok "$name up on http://localhost:$port (PID $pid)"
+            return 0
+        fi
+        # If the process died mid-startup, fail fast.
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log_err "$name (PID $pid) exited before port $port became reachable"
+            log_err "  log tail:"
+            tail -20 "$log_file" 2>/dev/null | sed 's/^/    /'
+            rm -f "$pid_file"
+            return 1
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    log_err "$name did not come up on port $port within ${budget}s"
+    log_err "  log tail:"
+    tail -20 "$log_file" 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+
+# Send TERM to the recorded PID, then KILL after 5s if still alive.
+# Removes the PID file. Returns 0 either way (idempotent).
+app_stop() {
+    local name="$1"
+    local pid_file
+    pid_file="$(app_pid_path "$name")"
+    [[ -f "$pid_file" ]] || { log_skip "$name not running (no PID file)"; return 0; }
+    local pid
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$pid_file"
+        log_skip "$name PID was stale — cleared"
+        return 0
+    fi
+    log_step "Stopping $name (PID $pid)"
+    # Kill the entire process group (setsid put us in our own group)
+    # so child npm/node/uvicorn workers die too.
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    local i=0
+    while (( i < 10 )); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+        i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+    log_ok "$name stopped"
+}
+
+# Print one line per known app service: name, status, PID, port.
+app_status() {
+    local services=("$@")
+    local svc
+    for svc in "${services[@]}"; do
+        local name="${svc%%:*}" port="${svc##*:}"
+        if app_port_up "$port"; then
+            local pid
+            pid="$(cat "$(app_pid_path "$name")" 2>/dev/null || echo "?")"
+            log_ok "$name up on http://localhost:$port (PID $pid)"
+        else
+            log_info "$name DOWN (port $port not responding)"
+        fi
+    done
+}
+
 run_preflight_orphan_check() {
     local pattern="$1"
     # Build the set of PIDs we must NOT flag: ourselves, every
