@@ -178,4 +178,36 @@ grep -q 'run_preflight_orphan_check' "$START" \
     || fail "start.sh does not call run_preflight_orphan_check"
 pass "start.sh wires the orphan pre-flight check"
 
+# 7. run_preflight_orphan_check must survive `set -euo pipefail`. The
+#    function calls pgrep, which exits 1 when there are no children;
+#    without `|| true` on that pipe, command substitution under
+#    pipefail+errexit would silently exit the calling script. This is
+#    the regression test for the user-observed `./scripts/start.sh`
+#    that just exited with no output and no error.
+output="$(bash -c "
+    set -euo pipefail
+    export REPO_ROOT='$REPO_ROOT'
+    source '$REPO_ROOT/scripts/_lib.sh'
+    run_preflight_orphan_check 'no-such-pattern-that-cannot-match-anything'
+    echo SURVIVED
+" 2>&1)"
+grep -q '^SURVIVED$' <<< "$output" \
+    || { echo "$output"; fail "run_preflight_orphan_check exited under set -euo pipefail (pgrep no-children returns 1)"; }
+pass "run_preflight_orphan_check survives set -euo pipefail when pgrep finds no children"
+
+# 8. The orphan check must NOT flag its own awk/grep/ps pipeline
+#    as an orphan (the pattern is in the awk -v pat=... arg).
+output="$(bash -c "
+    set -euo pipefail
+    export REPO_ROOT='$REPO_ROOT'
+    source '$REPO_ROOT/scripts/_lib.sh'
+    run_preflight_orphan_check 'scripts/(start|bootstrap)\\.sh|fxlab_pytest|\\.venv/bin/python -m pytest'
+    echo END
+" 2>&1)"
+if grep -q 'awk -v exempt' <<< "$output"; then
+    echo "$output"
+    fail "run_preflight_orphan_check matched its own awk command line (false positive)"
+fi
+pass "run_preflight_orphan_check does not match its own awk pipeline"
+
 echo "all run-lifecycle tests passed"

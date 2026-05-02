@@ -214,6 +214,10 @@ run_preflight_orphan_check() {
         depth=$((depth + 1))
     done
     # Descendants (transitive): expand via pgrep -P repeatedly.
+    # `|| true` is required on the pgrep — pgrep returns exit 1 when
+    # there are no matching children, which under start.sh's
+    # `set -euo pipefail` would propagate through the command
+    # substitution and silently exit the entire script.
     local frontier="$$"
     depth=0
     while (( depth < 50 )) && [[ -n "$frontier" ]]; do
@@ -221,7 +225,7 @@ run_preflight_orphan_check() {
         local pid
         for pid in $frontier; do
             local kids
-            kids="$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')"
+            kids="$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ' || true)"
             for k in $kids; do
                 exempt_pids+="$k "
                 next+="$k "
